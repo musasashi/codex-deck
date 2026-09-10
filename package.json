@@ -1,0 +1,391 @@
+{
+  "name": "codex-deck",
+  "displayName": "Codex Deck",
+  "icon": "media/icon.png",
+  "description": "Codexタスクをエディタタブで並行実行するVS Code拡張機能",
+  "version": "0.1.0",
+  "publisher": "codex-deck",
+  "private": true,
+  "engines": {
+    "vscode": "^1.96.0",
+    "node": ">=24.0.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "extensionKind": [
+    "workspace"
+  ],
+  "activationEvents": [
+    "onWebviewPanel:codexDeck.task"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Codexはワークスペース内でツールを実行します。"
+    },
+    "virtualWorkspaces": {
+      "supported": false
+    }
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "codexDeck.newTask",
+        "title": "新規タスク",
+        "category": "Codex Deck",
+        "icon": "$(add)"
+      },
+      {
+        "command": "codexDeck.history",
+        "title": "チャット履歴",
+        "category": "Codex Deck",
+        "icon": "$(history)"
+      },
+      {
+        "command": "codexDeck.openTask",
+        "title": "タスクを開く",
+        "category": "Codex Deck"
+      },
+      {
+        "command": "codexDeck.closeTask",
+        "title": "閉じる",
+        "category": "Codex Deck",
+        "icon": "$(close)"
+      },
+      {
+        "command": "codexDeck.stopTask",
+        "title": "停止",
+        "category": "Codex Deck",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "codexDeck.renameTask",
+        "title": "名前を変更",
+        "category": "Codex Deck"
+      },
+      {
+        "command": "codexDeck.copyTaskDeepLink",
+        "title": "ディープリンクとしてコピー",
+        "category": "Codex Deck",
+        "enablement": "viewItem != draftTask"
+      },
+      {
+        "command": "codexDeck.copyTaskMarkdown",
+        "title": "マークダウンとしてコピー",
+        "category": "Codex Deck"
+      },
+      {
+        "command": "codexDeck.archiveTask",
+        "title": "アーカイブ",
+        "category": "Codex Deck"
+      },
+      {
+        "command": "codexDeck.forkTask",
+        "title": "会話を分岐",
+        "category": "Codex Deck"
+      },
+      {
+        "command": "codexDeck.addSelection",
+        "title": "選択範囲をタスクに追加",
+        "category": "Codex Deck"
+      },
+      {
+        "command": "codexDeck.addFile",
+        "title": "ファイルをタスクに追加",
+        "category": "Codex Deck"
+      },
+      {
+        "command": "codexDeck.signIn",
+        "title": "サインイン",
+        "category": "Codex Deck"
+      },
+      {
+        "command": "codexDeck.signOut",
+        "title": "サインアウト",
+        "category": "Codex Deck"
+      },
+      {
+        "command": "codexDeck.settings",
+        "title": "設定",
+        "category": "Codex Deck",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "codexDeck.mcp",
+        "title": "MCPサーバー",
+        "category": "Codex Deck"
+      },
+      {
+        "command": "codexDeck.skills",
+        "title": "スキルを追加",
+        "category": "Codex Deck"
+      },
+      {
+        "command": "codexDeck.review",
+        "title": "コードレビュー",
+        "category": "Codex Deck"
+      },
+      {
+        "command": "codexDeck.showDiff",
+        "title": "変更の差分",
+        "category": "Codex Deck"
+      },
+      {
+        "command": "codexDeck.worktree",
+        "title": "新しいworktreeでタスクを作成",
+        "category": "Codex Deck"
+      },
+      {
+        "command": "codexDeck.reconnect",
+        "title": "App Serverに再接続",
+        "category": "Codex Deck"
+      },
+      {
+        "command": "codexDeck.menu",
+        "title": "コマンドメニュー",
+        "category": "Codex Deck"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codexDeck",
+          "title": "Codex Deck",
+          "icon": "media/deck.svg"
+        }
+      ]
+    },
+    "views": {
+      "explorer": [
+        {
+          "id": "codexDeck.tasks",
+          "name": "開いているタスク",
+          "visibility": "visible"
+        }
+      ],
+      "codexDeck": [
+        {
+          "id": "codexDeck.launcher",
+          "name": "Codex Deck"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "codexDeck.tasks",
+        "contents": "開いているタスクはありません。"
+      },
+      {
+        "view": "codexDeck.launcher",
+        "contents": "タスクごとにタブを開いて、Codexと作業できます。\n[新規タスク](command:codexDeck.newTask)\n[チャット履歴](command:codexDeck.history)"
+      }
+    ],
+    "submenus": [
+      {
+        "id": "codexDeck.copyTask",
+        "label": "コピー"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "codexDeck.newTask",
+          "when": "view == codexDeck.tasks || view == codexDeck.launcher",
+          "group": "navigation@1"
+        },
+        {
+          "command": "codexDeck.history",
+          "when": "view == codexDeck.tasks || view == codexDeck.launcher",
+          "group": "navigation@2"
+        },
+        {
+          "command": "codexDeck.settings",
+          "when": "view == codexDeck.tasks || view == codexDeck.launcher",
+          "group": "navigation@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "codexDeck.stopTask",
+          "when": "view == codexDeck.tasks && viewItem == runningTask",
+          "group": "inline@1"
+        },
+        {
+          "command": "codexDeck.closeTask",
+          "when": "view == codexDeck.tasks",
+          "group": "inline@2"
+        },
+        {
+          "submenu": "codexDeck.copyTask",
+          "when": "view == codexDeck.tasks",
+          "group": "1_copy"
+        },
+        {
+          "command": "codexDeck.renameTask",
+          "when": "view == codexDeck.tasks"
+        },
+        {
+          "command": "codexDeck.forkTask",
+          "when": "view == codexDeck.tasks"
+        },
+        {
+          "command": "codexDeck.archiveTask",
+          "when": "view == codexDeck.tasks"
+        }
+      ],
+      "codexDeck.copyTask": [
+        {
+          "command": "codexDeck.copyTaskDeepLink",
+          "group": "copy@1"
+        },
+        {
+          "command": "codexDeck.copyTaskMarkdown",
+          "group": "copy@2"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "codexDeck.addSelection",
+          "when": "editorHasSelection",
+          "group": "codexDeck"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "codexDeck.addFile",
+          "when": "!explorerResourceIsFolder",
+          "group": "codexDeck"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "codexDeck.newTask",
+        "key": "ctrl+shift+o"
+      }
+    ],
+    "configuration": {
+      "title": "Codex Deck",
+      "properties": {
+        "codexDeck.cliPath": {
+          "type": "string",
+          "default": "codex",
+          "scope": "machine",
+          "description": "公式Codex CLIの実行ファイル。WSL・SSHでは接続先にインストールしてください。"
+        },
+        "codexDeck.presets": {
+          "type": "array",
+          "default": [
+            {
+              "model": "latest",
+              "effort": "high",
+              "mode": "auto-review"
+            }
+          ],
+          "minItems": 1,
+          "scope": "resource",
+          "markdownDescription": "モデル・推論強度・権限のプリセット。先頭を新規タスクの初期設定に使用し、タスク内のボタンで順番に切り替えます。コマンド「Codex Deck: 設定」の専用タブで追加・編集・削除・並べ替えができます。",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "model",
+              "effort",
+              "mode"
+            ],
+            "properties": {
+              "model": {
+                "type": "string",
+                "minLength": 1,
+                "default": "latest",
+                "markdownDescription": "モデルID。`latest`は推奨モデルを自動選択します。"
+              },
+              "effort": {
+                "type": "string",
+                "minLength": 1,
+                "default": "high",
+                "markdownDescription": "推論強度。`default`はモデルの既定値を使用します。"
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "auto-review",
+                  "workspace-write",
+                  "danger-full-access",
+                  "read-only",
+                  "default"
+                ],
+                "enumItemLabels": [
+                  "Approve for me",
+                  "Ask for approval",
+                  "Full Access",
+                  "Read Only",
+                  "Codex設定を引き継ぐ"
+                ],
+                "enumDescriptions": [
+                  "承認が必要な操作を自動レビューします。",
+                  "ワークスペース外の編集やインターネットへのアクセスを承認します。",
+                  "サンドボックスと承認確認を使用しません。",
+                  "読み取り専用で実行します。",
+                  "Codexの権限設定を引き継ぎます。"
+                ],
+                "default": "auto-review"
+              }
+            }
+          }
+        },
+        "codexDeck.titleModel": {
+          "type": "string",
+          "default": "latest",
+          "minLength": 1,
+          "scope": "resource",
+          "markdownDescription": "タスク名の要約に使うモデルID。`latest`は最新の推奨モデルを自動選択します。コマンド「Codex Deck: 設定」の「タスク名」から選択できます。最初の依頼を送信した時点で要約します。分岐先では引き継いだ会話も参考にします。"
+        },
+        "codexDeck.titleEffort": {
+          "type": "string",
+          "default": "lowest",
+          "minLength": 1,
+          "scope": "resource",
+          "markdownDescription": "タスク名の要約に使う推論強度。`lowest`は選択したモデルで利用できる最も低い強度、`default`はモデルの既定値を使います。コマンド「Codex Deck: 設定」の「タスク名」からモデルに対応する強度を選択できます。"
+        },
+        "codexDeck.composerEnterBehavior": {
+          "type": "string",
+          "enum": [
+            "enter",
+            "modEnter"
+          ],
+          "default": "modEnter",
+          "description": "メッセージ送信のキー操作。enterはEnter、modEnterはCtrl+Enter／Cmd+Enterで送信します。Shift+Enterは改行します。"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "check": "tsc --noEmit",
+    "test": "node --import tsx --test --test-isolation=none tests/*.test.ts",
+    "test:smoke": "node --import tsx scripts/smoke.ts",
+    "vscode:prepublish": "npm run check && npm run build",
+    "package": "vsce package --allow-missing-repository --no-dependencies --no-rewrite-relative-links --skip-license",
+    "test:ui": "npm run build && playwright test",
+    "test:extension": "npm run build && node --import tsx scripts/testExtension.ts",
+    "test:history": "npm run build && node --import tsx scripts/testHistory.ts"
+  },
+  "dependencies": {
+    "marked": "^16.3.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.96.0",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^3.6.0",
+    "esbuild": "^0.25.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}

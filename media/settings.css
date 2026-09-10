@@ -1,0 +1,31 @@
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--vscode-editor-background); color: var(--vscode-foreground); font: var(--vscode-font-size, 13px) var(--vscode-font-family, sans-serif); }
+main { max-width: 720px; margin: 40px auto; padding: 0 28px; }
+h1 { margin: 0 0 12px; font-size: 24px; font-weight: 600; }
+header { margin-bottom: 28px; }
+header p, .hint { color: var(--vscode-descriptionForeground); line-height: 1.6; }
+label { display: block; margin: 20px 0 8px; font-weight: 600; }
+select { width: 100%; min-height: 34px; padding: 6px 10px; border: 1px solid var(--vscode-dropdown-border, var(--vscode-widget-border)); border-radius: 3px; background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground); font: inherit; }
+select:focus, button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
+fieldset { min-width: 0; border: 0; border-top: 1px solid var(--vscode-widget-border); padding: 4px 0 0; margin: 28px 0 24px; }
+legend { padding: 0 12px 0 0; font-size: 16px; font-weight: 600; }
+.hint { margin: 8px 0 0; overflow-wrap: anywhere; }
+.hint:empty { display: none; }
+.preset-card { margin: 16px 0; padding: 16px; border: 1px solid var(--vscode-widget-border, #7774); border-radius: 6px; }
+.preset-header, .preset-actions { display: flex; align-items: center; gap: 6px; }
+.preset-header { justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+.preset-header h2 { margin: 0; font-size: 14px; font-weight: 600; }
+.preset-default { display: block; margin-top: 4px; color: var(--vscode-descriptionForeground); font-size: 11px; }
+.preset-actions button { padding: 4px 9px; }
+.preset-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; }
+button { padding: 7px 16px; border: 1px solid transparent; border-radius: 3px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); font: inherit; cursor: pointer; }
+button:hover { background: var(--vscode-button-hoverBackground); }
+button.secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+button:disabled, select:disabled { opacity: .6; cursor: default; }
+#status { min-height: 20px; line-height: 1.6; overflow-wrap: anywhere; }
+#status.error { color: var(--vscode-errorForeground); }
+footer { display: flex; flex-wrap: wrap; gap: 20px; border-top: 1px solid var(--vscode-widget-border); margin-top: 24px; padding-top: 18px; }
+button.link { background: transparent; color: var(--vscode-textLink-foreground); padding: 0; text-align: left; }
+@media (max-width: 420px) { main { margin: 24px auto; padding: 0 16px; } .preset-fields { grid-template-columns: minmax(0, 1fr); gap: 0; } }

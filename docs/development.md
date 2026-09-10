@@ -1,0 +1,40 @@
+# 開発ガイド
+
+[READMEに戻る](../README.md)
+
+## 開発版を起動する
+
+[必要な環境](../README.md#はじめる)を用意し、リポジトリのルートで`npm ci`を実行します。
+
+VS Codeでリポジトリを開き、F5でExtension Development Hostを起動します。起動前に自動でビルドされます。起動したウィンドウで作業フォルダーを開くと、Codex Deckを使用できます。
+
+## 検証する
+
+| コマンド | 対象 |
+| --- | --- |
+| `npm run check` | TypeScriptの型チェック |
+| `npm test` | 単体テスト |
+| `npx playwright test` | チャット・設定画面 |
+| `npm run test:extension` | Extension Hostでの拡張機能 |
+| `npm run test:history` | 履歴の操作 |
+| `npm run test:smoke` | インストール済みCLIとの接続とデータ取得。推論は実行しない |
+
+### 画面テスト
+
+初回にブラウザーを取得し、UIテストの前にビルドします。
+
+```sh
+npx playwright install chromium
+npm run build
+```
+
+既存のブラウザーを使う場合は`CODEX_DECK_CHROMIUM`に実行ファイルを指定します。UIテストの実行規則は[AGENTS.md](../AGENTS.md#uiテスト)を参照してください。
+
+### LinuxでのExtension Host・履歴テスト
+
+```sh
+xvfb-run -a npm run test:extension
+xvfb-run -a npm run test:history
+```
+
+これらのテストは隔離した設定と模擬App Serverを使用します。

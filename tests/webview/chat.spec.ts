@@ -1,0 +1,1175 @@
+import { test, expect, type Page } from '@playwright/test';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { chatHtml } from '../../src/ui/html';
+import { decodeUsage } from '../../src/appServer/client';
+import { TaskManager } from '../../src/core/taskManager';
+import { taskReferenceBody } from '../../src/core/taskReferenceText';
+import { FakeGateway, thread } from '../helpers';
+import type { Skill, Task, Usage } from '../../src/core/types';
+
+const theme = `:root{--vscode-editor-background:#181a1e;--vscode-foreground:#e0e3e9;--vscode-descriptionForeground:#a0a7b3;--vscode-widget-border:#353940;--vscode-input-background:#22252b;--vscode-input-foreground:#e0e3e9;--vscode-input-placeholderForeground:#979faa;--vscode-button-background:#b6d8b1;--vscode-button-foreground:#193019;--vscode-button-hoverBackground:#c9e8c5;--vscode-button-secondaryBackground:#353941;--vscode-button-secondaryForeground:#e0e3e9;--vscode-focusBorder:#8eaf8a;--vscode-font-family:system-ui,sans-serif;--vscode-font-size:13px;--vscode-editor-font-family:monospace;--vscode-editor-font-size:12px;--vscode-textCodeBlock-background:#121417;--vscode-textLink-foreground:#a9c6ea;--vscode-progressBar-background:#b6d8b1;--vscode-editorWarning-foreground:#e2bd79;--vscode-errorForeground:#f5a59e;--vscode-inputValidation-warningBackground:#302b20;--vscode-editorWidget-background:#22252b;--vscode-dropdown-background:#22252b;--vscode-dropdown-foreground:#e0e3e9;}`;
+const models = [{ id: 'catalog-model', label: 'Catalog model', efforts: [{ id: 'new-effort', description: 'from server' }, { id: 'high', description: 'high' }], description: '', defaultEffort: 'new-effort', isDefault: true, inputModalities: ['text', 'image'] }];
+function task(): Task { return { id: 'task-1', threadId: 'thread-1', title: 'App Serverとの通信を実装する', cwd: '/workspace/codex-deck', open: true, autoResume: false, claims: [], settings: { mode: 'default' }, status: 'idle', turns: [], requests: [], attachments: [], busy: false, hydrated: true, instructionSources: [] }; }
+async function state(page: Page, value: Task, usage?: Usage, connected = true, presetCount = 1) { await page.evaluate(data => window.dispatchEvent(new MessageEvent('message', { data })), { type: 'state', task: value, models, usage, connected, presetCount, enterBehavior: 'enter' }); }
+async function messages(page: Page) { return page.evaluate(() => (window as unknown as { sent: Record<string, unknown>[] }).sent); }
+async function receive(page: Page, data: Record<string, unknown>) { await page.evaluate(data => window.dispatchEvent(new MessageEvent('message', { data })), data); }
+async function sendResult(page: Page, type: 'sent' | 'failure') {
+  const request = (await messages(page)).findLast(message => message.type === 'send')!;
+  await receive(page, { type, sendId: request.sendId, text: request.text });
+}
+const skills: Skill[] = [
+  { name: 'registered-one', path: '/skills/one/SKILL.md', description: '登録された最初のスキル', scope: 'system' },
+  { name: 'registered-two', path: '/skills/two/SKILL.md', description: '登録された二つ目のスキル', scope: 'user' },
+];
+async function catalog(page: Page, entries = skills, permissionMode = 'workspace-write') {
+  const request = (await messages(page)).findLast(message => message.type === 'composerCatalog');
+  expect(request).toBeTruthy();
+  await receive(page, { type: 'composerCatalog', requestId: request!.requestId, skills: entries, permissionMode });
+}
+async function fileRequest(page: Page, query: string) {
+  await expect.poll(async () => (await messages(page)).findLast(message => message.type === 'fileSearch')?.query).toBe(query);
+  return (await messages(page)).findLast(message => message.type === 'fileSearch')!;
+}
+async function pasteClipboardImages(page: Page, files: { type?: string; size?: number }[] = [{}], filesOnly = false, submitImmediately = false) {
+  return page.evaluate(({ files, filesOnly, submitImmediately }) => {
+    const data = new DataTransfer();
+    for (const [index, file] of files.entries()) {
+      const canvas = document.createElement('canvas'); canvas.width = 240; canvas.height = 150;
+      const context = canvas.getContext('2d')!;
+      context.fillStyle = '#181a1e'; context.fillRect(0, 0, 240, 150);
+      context.font = '14px monospace'; context.fillStyle = '#b6d8b1';
+      context.fillText(`Screenshot ${index + 1}`, 16, 30);
+      context.fillStyle = '#e0e3e9';
+      context.fillText('const result =', 16, 68); context.fillText('  await run();', 16, 90);
+      context.fillStyle = '#a9c6ea'; context.fillText('3 tests passed', 16, 128);
+      const bytes = file.size === undefined ? Uint8Array.from(atob(canvas.toDataURL().split(',')[1]!), char => char.charCodeAt(0)) : new Uint8Array(file.size);
+      data.items.add(new File([bytes], `image-${index}.png`, { type: file.type ?? 'image/png' }));
+    }
+    if (filesOnly) Object.defineProperty(data, 'items', { value: [] });
+    const event = new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true });
+    document.getElementById('prompt')!.dispatchEvent(event);
+    if (submitImmediately) (document.getElementById('composer') as HTMLFormElement).requestSubmit();
+    return event.defaultPrevented;
+  }, { files, filesOnly, submitImmediately });
+}
+async function imageRequest(page: Page, count = 1) {
+  await expect.poll(async () => (await messages(page)).filter(message => message.type === 'pasteImages').length).toBe(count);
+  return (await messages(page)).filter(message => message.type === 'pasteImages')[count - 1]!;
+}
+async function acceptImages(page: Page, value: Task, request: Record<string, unknown>) {
+  value.attachments.push(...(request.urls as string[]).map((url, index) => ({ id: `image-${request.requestId}-${index}`, label: '貼り付けた画像', input: { type: 'image' as const, url } })));
+  await receive(page, { type: 'imagesPasted', requestId: request.requestId, attachments: value.attachments });
+}
+
+test.beforeEach(async ({ page }) => {
+  const html = chatHtml({ cspSource: 'http://localhost', script: 'http://localhost/webview.js', css: 'http://localhost/chat.css', nonce: 'testing-nonce' });
+  await page.addInitScript(() => {
+    const state = window as unknown as { sent: unknown[]; acquireVsCodeApi: () => unknown };
+    state.sent = [];
+    state.acquireVsCodeApi = () => ({ postMessage: (message: unknown) => state.sent.push(message),
+      setState: (value: unknown) => sessionStorage.setItem('webviewState', JSON.stringify(value)), getState: () => JSON.parse(sessionStorage.getItem('webviewState') ?? '{}') });
+  });
+  await page.route('http://localhost/**', async route => {
+    const url = route.request().url();
+    if (url.endsWith('/webview.js')) await route.fulfill({ contentType: 'text/javascript', body: await readFile('dist/webview.js', 'utf8') });
+    else if (url.endsWith('/chat.css')) await route.fulfill({ contentType: 'text/css', body: theme + await readFile('media/chat.css', 'utf8') });
+    else await route.fulfill({ contentType: 'text/html', body: html });
+  });
+  await page.goto('http://localhost/');
+  await expect.poll(async () => (await messages(page)).some(message => message.type === 'ready')).toBe(true);
+});
+
+test('empty chat shows only registered skills, dynamic settings, auto-resume toggle and keyboard input', async ({ page }, info) => {
+  const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
+  await receive(page, { type: 'state', task: task(), models, connected: true });
+  await catalog(page);
+  await expect(page.locator('#skills .skill')).toHaveCount(2);
+  await expect(page.locator('#conversation')).toHaveText('$registered-two登録された二つ目のスキル$registered-one登録された最初のスキル');
+  await page.getByLabel('使用量回復後に自動継続').check();
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'autoResume', enabled: true });
+  await page.getByLabel('モデル', { exact: true }).selectOption('catalog-model');
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'settings', model: 'catalog-model', effort: '' });
+  const prompt = page.getByLabel('メッセージ', { exact: true });
+  const send = page.getByRole('button', { name: '送信', exact: true });
+  await send.hover();
+  await expect(send).toHaveAttribute('title', '送信 (Ctrl+Enter / Cmd+Enter)');
+  await prompt.fill('通信層を実装してください。');
+  await prompt.press('Enter');
+  await expect(prompt).toHaveValue('通信層を実装してください。\n');
+  await prompt.press('Shift+Enter');
+  expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(0);
+  await prompt.press('Control+Enter');
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'send', text: '通信層を実装してください。\n\n' });
+  await sendResult(page, 'sent');
+  await prompt.fill('Cmdキーでも送信'); await prompt.press('Meta+Enter');
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'send', text: 'Cmdキーでも送信' });
+  await sendResult(page, 'sent');
+  await state(page, task());
+  await send.hover();
+  await expect(send).toHaveAttribute('title', '送信 (Enter)');
+  await prompt.fill('Enter送信に変更'); await prompt.press('Shift+Enter');
+  expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(2);
+  await prompt.press('Enter');
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'send', text: 'Enter送信に変更\n' });
+  expect(errors).toEqual([]);
+  await page.screenshot({ path: info.outputPath('empty-chat.png') });
+});
+
+test('new task defaults show the latest catalog model, high effort, and Approve for me', async ({ page }) => {
+  const value = task(); value.threadId = undefined;
+  value.settings = { model: 'latest', effort: 'high', mode: 'auto-review' };
+  await state(page, value); await catalog(page);
+  await expect(page.getByLabel('メッセージ', { exact: true })).toBeFocused();
+  await expect(page.locator('#model option:checked')).toHaveText('最新モデル (Catalog model)');
+  await expect(page.locator('#effort')).toHaveValue('high');
+  await expect(page.locator('#mode option:checked')).toHaveText('Approve for me');
+  expect((await messages(page)).filter(message => message.type === 'settings')).toHaveLength(0);
+  value.settings.model = 'catalog-model';
+  await state(page, value);
+  await expect(page.locator('#model option:checked')).toHaveText('Catalog model');
+  await expect(page.locator('#effort')).toHaveValue('high');
+});
+
+for (const order of ['state-first', 'ack-first']) test(`first send renders immediately and reconciles ${order} without clearing the next draft`, async ({ page }, info) => {
+  const value = task(); value.threadId = undefined;
+  await state(page, value); await catalog(page);
+  const prompt = page.getByLabel('メッセージ', { exact: true });
+  const text = 'すぐに表示してください。<script>安全に表示</script>';
+  await prompt.fill(text);
+  const immediate = await page.evaluate(() => {
+    const start = performance.now();
+    (document.getElementById('composer') as HTMLFormElement).requestSubmit();
+    return { elapsed: performance.now() - start, draft: (document.getElementById('prompt') as HTMLTextAreaElement).value,
+      text: document.querySelector('.pending-send .user-text')?.textContent,
+      status: document.querySelector('.pending-status')?.textContent, skillsHidden: document.getElementById('skills')!.hidden,
+      disabled: (document.getElementById('send') as HTMLButtonElement).disabled };
+  });
+  expect(immediate).toMatchObject({ draft: '', text, status: '送信中…', skillsHidden: true, disabled: true });
+  console.log(`First message rendered synchronously in ${immediate.elapsed.toFixed(1)}ms (${order}).`);
+  expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(1);
+  const request = (await messages(page)).findLast(message => message.type === 'send')!;
+  await state(page, value); await receive(page, { type: 'failure' });
+  await receive(page, { type: 'failure', sendId: 'unrelated-send' });
+  await expect(page.locator('.pending-send')).toHaveCount(1);
+  await expect(page.locator('#skills')).toBeHidden();
+  await expect(page.locator('#send')).toBeDisabled();
+  await expect(page.locator('#model')).toBeDisabled();
+  if (order === 'state-first') await page.screenshot({ path: info.outputPath('sending.png') });
+  await prompt.fill(text);
+  value.threadId = 'new-thread'; value.status = 'running'; value.activeTurnId = 'first-turn';
+  value.turns = [{ id: 'first-turn', status: 'inProgress', items: [{ id: 'first-user', kind: 'userMessage', data: { clientId: request.sendId, content: [{ type: 'text', text }] } }] }];
+  if (order === 'ack-first') {
+    await sendResult(page, 'sent');
+    await expect(page.locator('.pending-status')).toHaveText('送信済み');
+    await expect(page.locator('.message.user')).toHaveCount(1);
+  }
+  await state(page, value);
+  if (order === 'state-first') {
+    await expect(page.locator('#send')).toBeDisabled();
+    await sendResult(page, 'sent');
+  }
+  await expect(page.locator('.pending-send')).toHaveCount(0);
+  await expect(page.locator('.message.user')).toHaveCount(1);
+  await expect(page.locator('.user-text')).toHaveText(text);
+  await expect(prompt).toHaveValue(text);
+  await expect(page.locator('#send')).toBeEnabled();
+});
+
+test('first-send failures restore text, exact skill selection and attachments for another attempt', async ({ page }) => {
+  const value = task(); value.threadId = undefined;
+  await state(page, value); await catalog(page);
+  await page.locator('#skills .skill').first().click();
+  const prompt = page.getByLabel('メッセージ', { exact: true });
+  await prompt.press('End'); await prompt.type('この画像を確認');
+  await pasteClipboardImages(page); await acceptImages(page, value, await imageRequest(page));
+  await prompt.press('Enter');
+  await expect(prompt).toHaveValue('');
+  await expect(page.locator('.pending-send img')).toHaveCount(1);
+  await expect(page.locator('#attachments')).toBeHidden();
+  await sendResult(page, 'failure');
+  await expect(prompt).toHaveValue('$registered-two この画像を確認');
+  await expect(page.locator('.pending-send')).toHaveCount(0);
+  await expect(page.locator('#attachments img')).toHaveCount(1);
+  await prompt.press('Enter');
+  expect((await messages(page)).findLast(message => message.type === 'send')).toMatchObject({
+    text: '$registered-two この画像を確認', skillPaths: ['/skills/two/SKILL.md'], attachmentIds: [value.attachments[0]!.id],
+  });
+});
+
+test('retry preserves the next draft and new attachments and ignores an older send failure', async ({ page }, info) => {
+  const value = task(); value.threadId = undefined;
+  await state(page, value); await catalog(page);
+  const prompt = page.getByLabel('メッセージ', { exact: true });
+  await page.locator('#skills .skill').first().click();
+  await prompt.press('End'); await prompt.type('最初の指示');
+  await pasteClipboardImages(page); await acceptImages(page, value, await imageRequest(page));
+  await prompt.press('Enter');
+  const first = (await messages(page)).findLast(message => message.type === 'send')!;
+  await prompt.fill('次の指示');
+  await pasteClipboardImages(page); await acceptImages(page, value, await imageRequest(page, 2));
+  await sendResult(page, 'failure');
+  await expect(prompt).toHaveValue('次の指示');
+  await expect(page.locator('#attachments img')).toHaveCount(1);
+  await expect(page.locator('.pending-send img')).toHaveCount(1);
+  await page.screenshot({ path: info.outputPath('send-failure.png') });
+  await page.getByRole('button', { name: '再送', exact: true }).click();
+  const retry = (await messages(page)).findLast(message => message.type === 'send')!;
+  expect(retry).toMatchObject({ text: first.text, skillPaths: first.skillPaths, attachmentIds: first.attachmentIds });
+  expect(retry.sendId).not.toBe(first.sendId);
+  await receive(page, { type: 'failure', sendId: first.sendId });
+  await expect(page.locator('.pending-status')).toHaveText('送信中…');
+  await expect(page.locator('#send')).toBeDisabled();
+  value.turns = [{ id: 'retry-turn', status: 'inProgress', items: [{ id: 'retry-user', kind: 'userMessage', data: { clientId: retry.sendId,
+    content: [{ type: 'text', text: retry.text }, value.attachments[0]!.input] } }] }];
+  value.attachments.shift();
+  await state(page, value); await sendResult(page, 'sent');
+  await expect(prompt).toHaveValue('次の指示');
+  await expect(page.locator('#attachments img')).toHaveCount(1);
+  await expect(page.locator('.pending-send')).toHaveCount(0);
+  await expect(page.locator('.message.user')).toHaveCount(1);
+});
+
+test('reloading during a first send retains the pending content and reconciles restored history without resending', async ({ page }) => {
+  const value = task(); value.threadId = undefined;
+  await state(page, value);
+  const prompt = page.getByLabel('メッセージ', { exact: true });
+  await prompt.fill('保存する指示'); await prompt.press('Enter');
+  const request = (await messages(page)).findLast(message => message.type === 'send')!;
+  await prompt.fill('次に書いた下書き');
+  await state(page, value);
+  await page.reload(); await state(page, value);
+  await expect(page.locator('.pending-send .user-text')).toHaveText('保存する指示');
+  await expect(prompt).toHaveValue('次に書いた下書き');
+  expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(0);
+  value.turns = [{ id: 'restored', status: 'completed', items: [{ id: 'user', kind: 'userMessage', data: { clientId: request.sendId, content: [{ type: 'text', text: request.text }] } }] }];
+  await state(page, value);
+  await expect(page.locator('.pending-send')).toHaveCount(0);
+  await expect(page.locator('.message.user')).toHaveCount(1);
+  await expect(prompt).toHaveValue('次に書いた下書き');
+});
+
+for (const running of [false, true]) for (const order of ['state-first', 'ack-first']) test(`follow-up input renders immediately ${running ? 'during a command' : 'after completion'} and reconciles ${order}`, async ({ page }) => {
+  const value = task();
+  const text = 'テストも確認してください。<script>安全に表示</script>';
+  value.status = running ? 'running' : 'idle'; value.activeTurnId = running ? 'existing-turn' : undefined;
+  value.turns = [{ id: 'existing-turn', status: running ? 'inProgress' : 'completed', items: [
+    { id: 'existing-user', kind: 'userMessage', data: { content: [{ type: 'text', text }] } },
+    { id: 'command', kind: 'commandExecution', data: { command: 'npm test', status: running ? 'inProgress' : 'completed', aggregatedOutput: 'テストを実行' } },
+  ] }];
+  await state(page, value);
+  const prompt = page.getByLabel('メッセージ', { exact: true });
+  await prompt.fill(text);
+  const immediate = await page.evaluate(() => {
+    (document.getElementById('composer') as HTMLFormElement).requestSubmit();
+    return { draft: (document.getElementById('prompt') as HTMLTextAreaElement).value,
+      text: document.querySelector('.pending-send .user-text')?.textContent,
+      status: document.querySelector('.pending-status')?.textContent,
+      disabled: (document.getElementById('send') as HTMLButtonElement).disabled };
+  });
+  expect(immediate).toEqual({ draft: '', text, status: '送信中…', disabled: true });
+  const request = (await messages(page)).findLast(message => message.type === 'send')!;
+  expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(1);
+  value.busy = true;
+  value.turns[0]!.items[1]!.data.aggregatedOutput = 'コマンドの出力が更新されました';
+  await state(page, value);
+  await expect(page.locator('.user-text')).toHaveText([text, text]);
+  await expect(page.locator('.pending-send')).toHaveCount(1);
+  await prompt.fill(text);
+  if (order === 'ack-first') {
+    await sendResult(page, 'sent');
+    await expect(page.locator('.pending-status')).toHaveText('送信済み');
+    await expect(page.locator('.user-text')).toHaveText([text, text]);
+  }
+  const item = { id: 'followup-user', kind: 'userMessage', data: {
+    ...(running ? {} : { clientId: request.sendId }), content: [{ type: 'text', text, text_elements: [] }],
+  } };
+  if (running) value.turns[0]!.items.push(item);
+  else value.turns.push({ id: 'followup-turn', status: 'inProgress', items: [item] });
+  value.busy = false; value.status = 'running'; value.activeTurnId = value.turns.at(-1)!.id;
+  await state(page, value);
+  if (order === 'state-first') {
+    await expect(page.locator('#send')).toBeDisabled();
+    await sendResult(page, 'sent');
+  }
+  await expect(page.locator('.pending-send')).toHaveCount(0);
+  await expect(page.locator('.user-text')).toHaveText([text, text]);
+  await expect(prompt).toHaveValue(text);
+  await expect(page.getByRole('button', { name: '追加入力', exact: true })).toBeEnabled();
+});
+
+test('identical queued follow-ups each wait for their own message across updates and reloads', async ({ page }, info) => {
+  const value = task(); value.status = 'running'; value.activeTurnId = 'active';
+  const text = '同じ指示を追加';
+  value.turns = [{ id: 'active', status: 'inProgress', items: [
+    { id: 'initial', kind: 'userMessage', data: { content: [{ type: 'text', text }] } },
+    { id: 'command', kind: 'commandExecution', data: { command: 'npm test', status: 'inProgress' } },
+  ] }];
+  await state(page, value);
+  const prompt = page.getByLabel('メッセージ', { exact: true });
+  for (let index = 0; index < 2; index++) {
+    await prompt.fill(text); await prompt.press('Enter'); await sendResult(page, 'sent');
+  }
+  expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(2);
+  await expect(page.locator('.pending-send .user-text')).toHaveText([text, text]);
+  await expect(page.locator('.user-text')).toHaveText([text, text, text]);
+  await page.screenshot({ path: info.outputPath('queued-followups.png') });
+  value.turns[0]!.items.push({ id: 'followup-1', kind: 'userMessage', data: { clientId: null, content: [{ type: 'text', text, text_elements: [] }] } });
+  await state(page, value); await state(page, value);
+  await expect(page.locator('.pending-send')).toHaveCount(1);
+  await expect(page.locator('.user-text')).toHaveText([text, text, text]);
+  await prompt.fill('次の下書き'); await state(page, value);
+  await page.reload(); await state(page, value);
+  await expect(page.locator('.pending-send .user-text')).toHaveText(text);
+  await expect(page.locator('.pending-status')).toHaveText('送信済み');
+  await expect(prompt).toHaveValue('次の下書き');
+  value.turns[0]!.items.push({ id: 'followup-2', kind: 'userMessage', data: { content: [{ type: 'text', text }] } });
+  await state(page, value);
+  await expect(page.locator('.pending-send')).toHaveCount(0);
+  await expect(page.locator('.user-text')).toHaveText([text, text, text]);
+  expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(0);
+});
+
+test('a failed follow-up preserves earlier queued input, attachments and the next draft', async ({ page }) => {
+  const value = task(); value.status = 'running'; value.activeTurnId = 'active';
+  value.turns = [{ id: 'active', status: 'inProgress', items: [{ id: 'command', kind: 'commandExecution', data: { command: 'npm test', status: 'inProgress' } }] }];
+  await state(page, value);
+  const prompt = page.getByLabel('メッセージ', { exact: true });
+  await prompt.fill('先に送った指示'); await prompt.press('Enter'); await sendResult(page, 'sent');
+  await pasteClipboardImages(page); await acceptImages(page, value, await imageRequest(page));
+  await prompt.fill('この画像も確認'); await prompt.press('Enter');
+  await sendResult(page, 'failure');
+  await expect(prompt).toHaveValue('この画像も確認');
+  await expect(page.locator('.pending-send .user-text')).toHaveText('先に送った指示');
+  await expect(page.locator('#attachments img')).toHaveCount(1);
+  await prompt.press('Enter');
+  await prompt.fill('次の下書き');
+  await sendResult(page, 'failure');
+  await expect(prompt).toHaveValue('次の下書き');
+  await expect(page.locator('.pending-send .user-text')).toHaveText(['先に送った指示', 'この画像も確認']);
+  await expect(page.locator('.pending-send img')).toHaveCount(1);
+  await expect(page.locator('#attachments')).toBeHidden();
+  await expect(page.getByRole('button', { name: '再送', exact: true })).toBeDisabled();
+  await prompt.press('Enter');
+  expect((await messages(page)).findLast(message => message.type === 'send')).toMatchObject({ text: '次の下書き', attachmentIds: [] });
+  await expect(page.locator('.pending-send .user-text')).toHaveText(['先に送った指示', 'この画像も確認', '次の下書き']);
+});
+
+test('the icon-only preset button requests each switch and reflects settings from the host', async ({ page }) => {
+  const value = task();
+  await state(page, value, undefined, true, 3);
+  const cycle = page.getByRole('button', { name: 'プリセットを切り替え' });
+  await expect(cycle).toBeEnabled();
+  await expect(cycle).toHaveText('');
+  await cycle.click();
+  await cycle.press('Enter');
+  await cycle.press('Space');
+  expect((await messages(page)).filter(message => message.type === 'cyclePreset')).toHaveLength(3);
+  expect((await messages(page)).filter(message => message.type === 'settings')).toHaveLength(0);
+  const beforeSwitch = await cycle.boundingBox();
+  value.settings = { model: 'catalog-model', effort: 'new-effort', mode: 'read-only' };
+  await state(page, value, undefined, true, 3);
+  await expect(page.locator('#model')).toHaveValue('catalog-model');
+  await expect(page.locator('#effort')).toHaveValue('new-effort');
+  await expect(page.locator('#mode')).toHaveValue('read-only');
+  expect((await cycle.boundingBox())!.x).toBeCloseTo(beforeSwitch!.x, 1);
+  for (const status of ['running', 'approval', 'input'] as const) {
+    value.status = status; await state(page, value);
+    await expect(cycle).toBeDisabled();
+  }
+  value.status = 'idle'; value.busy = true; await state(page, value);
+  await expect(cycle).toBeDisabled();
+  value.busy = false; value.activeTurnId = 'turn-1'; await state(page, value);
+  await expect(cycle).toBeDisabled();
+  value.activeTurnId = undefined; await state(page, value);
+  await expect(cycle).toBeEnabled();
+});
+
+test('Codex remaining gauges precede the model and show persistent hover and keyboard details', async ({ page }, info) => {
+  const errors: string[] = [];
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+  const value = task(); value.settings = { model: 'latest', effort: 'high', mode: 'auto-review' };
+  const usage = decodeUsage({ rateLimitsByLimitId: {
+    codex_other: { primary: { usedPercent: 99, windowDurationMins: 300 } },
+    codex: { primary: { usedPercent: 66, windowDurationMins: 10_080, resetsAt: 2_000_000_000 }, secondary: { usedPercent: 28, windowDurationMins: 300, resetsAt: 1_999_999_000 } },
+  } });
+  await state(page, value, usage);
+  const fiveHour = page.getByRole('meter', { name: 'Codex 5時間枠の残量' });
+  const weekly = page.getByRole('meter', { name: 'Codex 週次枠の残量' });
+  await expect(page.getByRole('meter')).toHaveCount(2);
+  await expect(fiveHour).toHaveAttribute('aria-valuenow', '72');
+  await expect(weekly).toHaveAttribute('aria-valuenow', '34');
+  await expect(page.locator('#composer .usage-value')).toHaveText(['72%', '34%']);
+  const boxes = await Promise.all([fiveHour.boundingBox(), weekly.boundingBox(), page.locator('#model').boundingBox(), page.locator('#cycle-preset').boundingBox(), page.locator('#send').boundingBox()]);
+  expect(boxes[0]!.x + boxes[0]!.width).toBeLessThan(boxes[1]!.x);
+  expect(boxes[1]!.x + boxes[1]!.width).toBeLessThan(boxes[2]!.x);
+  expect(boxes[2]!.x + boxes[2]!.width).toBeLessThan(boxes[3]!.x);
+  expect(boxes[3]!.x + boxes[3]!.width).toBeLessThan(boxes[4]!.x);
+  await page.screenshot({ path: info.outputPath('usage-gauges.png') });
+  await fiveHour.hover();
+  const tooltip = page.getByRole('tooltip');
+  await expect(tooltip).toContainText('Codex · 5時間枠');
+  await expect(tooltip).toContainText('残り 72%');
+  await expect(tooltip).toContainText('リセット予定:');
+  await tooltip.hover();
+  await expect(tooltip).toBeVisible();
+  await page.screenshot({ path: info.outputPath('usage-hover.png') });
+  await page.getByLabel('メッセージ', { exact: true }).hover({ position: { x: 15, y: 12 } });
+  await expect(tooltip).toHaveCount(0);
+  await weekly.focus();
+  await expect(tooltip).toContainText('Codex · 週次枠');
+  usage.buckets.find(bucket => bucket.id === 'codex')!.windows[0]!.usedPercent = 85;
+  await state(page, value, usage);
+  await expect(weekly).toBeFocused();
+  await expect(tooltip).toContainText('残り 15%');
+  await weekly.press('Escape');
+  await expect(tooltip).toHaveCount(0);
+  await fiveHour.hover();
+  await expect(tooltip).toContainText('5時間枠');
+  await page.getByLabel('メッセージ', { exact: true }).press('Escape');
+  await expect(tooltip).toHaveCount(0);
+  await page.getByLabel('メッセージ', { exact: true }).hover({ position: { x: 15, y: 12 } });
+  await page.setViewportSize({ width: 380, height: 800 });
+  await fiveHour.hover();
+  await expect(tooltip).toContainText('5時間枠');
+  expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
+  const splitModel = await page.locator('#model').boundingBox();
+  const splitWeek = await weekly.boundingBox();
+  const splitPreset = await page.locator('#cycle-preset').boundingBox();
+  const splitSend = await page.locator('#send').boundingBox();
+  expect(splitWeek!.x + splitWeek!.width).toBeLessThan(splitModel!.x);
+  expect(splitModel!.x + splitModel!.width).toBeLessThan(splitPreset!.x);
+  expect(splitPreset!.x + splitPreset!.width).toBeLessThan(splitSend!.x);
+  expect(splitModel!.y).toBeLessThan(splitWeek!.y + splitWeek!.height);
+  value.settings = { model: 'catalog-model', effort: 'new-effort', mode: 'read-only' };
+  await state(page, value, usage);
+  expect((await page.locator('#cycle-preset').boundingBox())!.x).toBeCloseTo(splitPreset!.x, 1);
+  expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
+  await page.screenshot({ path: info.outputPath('usage-split.png') });
+  expect(errors).toEqual([]);
+});
+
+test('weekly-only accounts show one gauge and missing balances never become zero percent', async ({ page }, info) => {
+  const value = task();
+  const usage = decodeUsage({ rateLimits: { limitId: 'codex', planType: 'pro', primary: { usedPercent: 12.5, windowDurationMins: 10_080 }, secondary: null } });
+  await state(page, value, usage);
+  const weekly = page.getByRole('meter', { name: 'Codex 週次枠の残量' });
+  await expect(page.getByRole('meter')).toHaveCount(1);
+  await expect(weekly).toHaveAttribute('aria-valuetext', '残り87.5%');
+  await weekly.hover();
+  await expect(page.getByRole('tooltip')).toHaveText('Codex · 週次枠残り 87.5%');
+  await page.screenshot({ path: info.outputPath('usage-weekly-only.png') });
+  usage.buckets[0]!.windows[0]!.usedPercent = 110;
+  await state(page, value, usage);
+  await expect(weekly).toHaveAttribute('aria-valuenow', '0');
+  await state(page, value, undefined);
+  await expect(page.locator('#usage-gauges')).toBeHidden();
+  await expect(page.getByRole('tooltip')).toHaveCount(0);
+  await state(page, value, usage, false);
+  await expect(page.locator('#usage-gauges')).toBeHidden();
+  await state(page, value, decodeUsage({ rateLimits: { primary: { usedPercent: 20 } } }));
+  await expect(page.locator('#usage-gauges')).toBeHidden();
+});
+
+test('clipboard images appear inside the composer with removable previews and block sends until attached', async ({ page }, info) => {
+  const value = task(); await state(page, value);
+  const prompt = page.getByLabel('メッセージ', { exact: true });
+  const send = page.getByRole('button', { name: '送信', exact: true });
+  await prompt.fill('test');
+  expect(await pasteClipboardImages(page, [{}, {}], false, true)).toBe(true);
+  expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(0);
+  const request = await imageRequest(page);
+  expect(request.urls).toHaveLength(2);
+  await expect(send).toBeDisabled();
+  await expect(page.locator('#image-status')).toHaveText('画像を読み込み中…');
+  await state(page, value); await receive(page, { type: 'failure' });
+  await prompt.press('Enter');
+  expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(0);
+  await acceptImages(page, value, request);
+  await expect(send).toBeEnabled();
+  await expect(page.locator('#image-status')).toBeHidden();
+  const previews = page.locator('#composer .attachment-image img');
+  await expect(previews).toHaveCount(2);
+  await expect.poll(() => previews.first().evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(240);
+  await expect(prompt).toHaveValue('test');
+  expect((await previews.first().boundingBox())!.y).toBeLessThan((await prompt.boundingBox())!.y);
+  await page.screenshot({ path: info.outputPath('clipboard-images.png') });
+  await page.setViewportSize({ width: 380, height: 800 });
+  expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
+  await page.screenshot({ path: info.outputPath('clipboard-images-split.png') });
+  await page.getByRole('button', { name: '貼り付けた画像を削除' }).first().click();
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'removeAttachment', id: value.attachments[0]!.id });
+  expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(0);
+  await expect(prompt).toBeFocused();
+  value.attachments.shift(); await state(page, value);
+  await expect(previews).toHaveCount(1);
+});
+
+test('image-only drafts survive send failures and show the sent image in the conversation', async ({ page }) => {
+  const value = task(); value.threadId = undefined; await state(page, value);
+  await pasteClipboardImages(page);
+  await acceptImages(page, value, await imageRequest(page));
+  const prompt = page.getByLabel('メッセージ', { exact: true });
+  await prompt.press('Enter');
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'send', text: '', skillPaths: [] });
+  await sendResult(page, 'failure');
+  await expect(page.locator('#attachments img')).toHaveCount(1);
+  await expect(page.getByRole('button', { name: '送信', exact: true })).toBeEnabled();
+  await prompt.fill('この画像を確認してください。'); await prompt.press('Enter');
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'send', text: 'この画像を確認してください。' });
+  await expect(prompt).toHaveValue('');
+  const request = (await messages(page)).findLast(message => message.type === 'send')!;
+  value.turns = [{ id: 'image-turn', status: 'inProgress', items: [{ id: 'user', kind: 'userMessage', data: { clientId: request.sendId, content: [{ type: 'text', text: 'この画像を確認してください。' }, value.attachments[0]!.input] } }] }];
+  value.attachments = []; await state(page, value);
+  await sendResult(page, 'sent');
+  await expect(prompt).toHaveValue('');
+  await expect(page.locator('#attachments')).toBeHidden();
+  await expect(page.locator('#transcript img')).toBeVisible();
+});
+
+test('invalid images and read failures show errors and allow a subsequent paste', async ({ page }) => {
+  const value = task(); await state(page, value);
+  const status = page.locator('#image-status');
+  for (const file of [{ size: 8 * 1024 * 1024 + 1 }, { type: 'image/svg+xml' }, { size: 0 }]) {
+    expect(await pasteClipboardImages(page, [file])).toBe(true);
+    await expect(status).toHaveText('8MB以下のPNG・JPEG・WebP・GIF画像を使用してください。');
+  }
+  await page.evaluate(() => {
+    const read = FileReader.prototype.readAsDataURL;
+    FileReader.prototype.readAsDataURL = function () {
+      FileReader.prototype.readAsDataURL = read;
+      this.dispatchEvent(new ProgressEvent('error'));
+    };
+  });
+  await pasteClipboardImages(page);
+  await expect(status).toHaveText('画像を読み込めませんでした。もう一度貼り付けてください。');
+  expect((await messages(page)).filter(message => message.type === 'pasteImages')).toHaveLength(0);
+  await expect(page.getByRole('button', { name: '送信', exact: true })).toBeEnabled();
+  await pasteClipboardImages(page);
+  const rejected = await imageRequest(page);
+  await receive(page, { type: 'imagesPasted', requestId: rejected.requestId, error: '画像を添付できませんでした。' });
+  await expect(status).toHaveText('画像を添付できませんでした。');
+  await expect(page.getByRole('button', { name: '送信', exact: true })).toBeEnabled();
+  await pasteClipboardImages(page);
+  await acceptImages(page, value, await imageRequest(page, 2));
+  await expect(status).toBeHidden();
+  await expect(page.locator('#attachments img')).toHaveCount(1);
+});
+
+test('successive pastes keep sending disabled until every image batch is acknowledged', async ({ page }) => {
+  const value = task(); await state(page, value);
+  await pasteClipboardImages(page); const first = await imageRequest(page);
+  await pasteClipboardImages(page); const second = await imageRequest(page, 2);
+  await acceptImages(page, value, first);
+  await expect(page.getByRole('button', { name: '送信', exact: true })).toBeDisabled();
+  await receive(page, { type: 'imagesPasted', requestId: first.requestId, attachments: [] });
+  await expect(page.getByRole('button', { name: '送信', exact: true })).toBeDisabled();
+  await expect(page.locator('#attachments img')).toHaveCount(1);
+  await acceptImages(page, value, second);
+  await expect(page.locator('#attachments img')).toHaveCount(2);
+  await expect(page.getByRole('button', { name: '送信', exact: true })).toBeEnabled();
+});
+
+test('text and non-image pastes keep native behavior, and clipboard files work without items', async ({ page }) => {
+  const value = task(); await state(page, value);
+  const prevented = await page.evaluate(() => {
+    const data = new DataTransfer(); data.setData('text/plain', '通常の貼り付け');
+    data.items.add(new File(['text'], 'notes.txt', { type: 'text/plain' }));
+    const event = new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true });
+    document.getElementById('prompt')!.dispatchEvent(event);
+    return event.defaultPrevented;
+  });
+  expect(prevented).toBe(false);
+  expect((await messages(page)).filter(message => message.type === 'pasteImages')).toHaveLength(0);
+  expect(await pasteClipboardImages(page, [{}], true)).toBe(true);
+  await acceptImages(page, value, await imageRequest(page));
+  await expect(page.locator('#attachments img')).toHaveCount(1);
+});
+
+for (const active of [false, true]) test(`multiple deep links stay compact when pasted and ${active ? 'steered into an active turn' : 'sent as a new turn'}`, async ({ page }, info) => {
+  const directory = await mkdtemp(join(tmpdir(), 'codex-deck-ui-references-'));
+  const gateway = new FakeGateway();
+  const answers = ['参照元だけにある最初の回答', '参照元だけにある二番目の回答'];
+  for (const [index, id] of ['first', 'second'].entries()) {
+    const source = thread(id);
+    source.turns = [{ id: `${id}-turn`, status: 'completed', items: [{ id: `${id}-answer`, kind: 'agentMessage', data: { text: answers[index] } }] }];
+    gateway.threads.set(id, source);
+  }
+  const reads: string[] = [];
+  gateway.threadReader = async id => { reads.push(id); return structuredClone(gateway.threads.get(id)!); };
+  const manager = new TaskManager(gateway, { async save() {} }, [], { schedule: false, referenceTempRoot: directory });
+  try {
+    const value = manager.create('/project');
+    if (active) await manager.send(value.id, 'このタスクで作業してください。');
+    await state(page, value);
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+    const text = '[最初の会話](codex://threads/first)[二番目の会話](codex://threads/second)\ncodex://threads/first、codex://threads/second を参照してください。';
+    await page.evaluate(text => navigator.clipboard.writeText(text), text);
+    const prompt = page.getByLabel('メッセージ', { exact: true });
+    await prompt.focus(); await prompt.press('ControlOrMeta+V');
+    await expect(prompt).toHaveValue(text);
+    expect(reads).toEqual([]);
+    await prompt.press('Enter');
+    const request = (await messages(page)).findLast(message => message.type === 'send')!;
+    expect(request.text).toBe(text);
+    await expect(page.locator('.pending-send .user-text')).toHaveText(text);
+    await manager.send(value.id, request.text as string, [], { clientId: request.sendId as string });
+    expect(reads).toEqual(['first', 'second']);
+    const input = (active ? gateway.steered.at(-1) : gateway.sent.at(-1))!.input;
+    expect(input).toHaveLength(3);
+    for (const [index, reference] of input.slice(1).entries()) {
+      const snapshot = /^スナップショット: (.+)$/m.exec(taskReferenceBody(reference.text!)!);
+      expect(snapshot).toBeTruthy();
+      const filename = JSON.parse(snapshot![1]!);
+      expect(await readFile(filename, 'utf8')).toContain(answers[index]);
+      expect(reference.text!.length).toBeLessThan(500);
+    }
+    if (active) gateway.events.emit({ type: 'item', threadId: value.threadId!, turnId: value.activeTurnId!, completed: true,
+      item: { id: 'steered-user', kind: 'userMessage', data: { content: input } } });
+    await state(page, value); await sendResult(page, 'sent');
+    await expect(prompt).toHaveValue('');
+    await expect(page.locator('.pending-send')).toHaveCount(0);
+    const message = page.locator('.message.user').last();
+    await expect(message.locator('.user-text')).toHaveCount(1);
+    await expect(message.locator('.user-bubble')).toHaveText(text);
+    const references = message.locator(':scope > .message-references');
+    await expect(references.locator('summary')).toHaveText('参照情報 · 2件（Codex Deckが自動追加）');
+    await expect(references).not.toHaveAttribute('open');
+    await expect(references.locator('.reference-text').first()).toBeHidden();
+    for (const answer of answers) await expect(page.locator('#conversation')).not.toContainText(answer);
+    await page.screenshot({ path: info.outputPath('multiple-deep-links.png') });
+    await references.locator('summary').click();
+    await expect(references.locator('.reference-text')).toHaveCount(2);
+    for (const [index, id] of ['first', 'second'].entries()) {
+      await expect(references.locator('.reference-text').nth(index)).toBeVisible();
+      await expect(references.locator('.reference-text').nth(index)).toContainText(`参照会話: codex://threads/${id}`);
+      await expect(references.locator('.reference-text').nth(index)).toContainText('必要に応じてスナップショットを読んでください。');
+    }
+    value.turns.at(-1)!.items.push({ id: 'progress', kind: 'agentMessage', data: { text: '会話を確認します。', phase: 'commentary' } });
+    await state(page, value);
+    await expect(references).toHaveAttribute('open', '');
+    if (active) await page.setViewportSize({ width: 390, height: 850 });
+    await page.screenshot({ path: info.outputPath('multiple-deep-links-expanded.png') });
+    await page.reload(); await state(page, value);
+    await expect(message.locator('.user-bubble')).toHaveText(text);
+    await expect(references).not.toHaveAttribute('open');
+    await expect(page.locator('.pending-send')).toHaveCount(0);
+  } finally { manager.dispose(); await manager.flush(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('skill selection inserts a token and sends exact skill paths only while their mentions remain in the draft', async ({ page }) => {
+  await state(page, task()); await catalog(page);
+  const prompt = page.getByLabel('メッセージ', { exact: true });
+  await page.getByRole('button', { name: '$registered-two 登録された二つ目のスキル' }).click();
+  await expect(prompt).toHaveValue('$registered-two ');
+  expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(0);
+  await prompt.press('End'); await prompt.pressSequentially('Use this'); await prompt.press('Enter');
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'send', text: '$registered-two Use this', skillPaths: ['/skills/two/SKILL.md'] });
+  await sendResult(page, 'failure');
+  await prompt.fill('スキル指定を取り消した'); await prompt.press('Enter');
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'send', text: 'スキル指定を取り消した', skillPaths: [] });
+});
+
+test('slash commands filter locally, use keyboard selection, and skills/mention open inline pickers', async ({ page }) => {
+  await state(page, task()); await catalog(page);
+  const prompt = page.getByLabel('メッセージ', { exact: true });
+  await prompt.fill('/');
+  await expect(page.getByRole('option', { name: '/model モデルと推論の強さを選択' })).toBeVisible();
+  await prompt.press('Escape');
+  await prompt.pressSequentially('m');
+  await expect(page.locator('#completion-list [role=option]')).toHaveCount(3);
+  await prompt.press('Backspace');
+  await expect(page.locator('#completion-list [role=option]')).toHaveCount(20);
+  await prompt.press('ArrowDown'); await prompt.press('Tab');
+  await expect(prompt).toHaveValue('/permissions ');
+  expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(0);
+  await prompt.fill('/per'); await prompt.press('Enter');
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'send', text: '/permissions ' });
+  await sendResult(page, 'sent');
+  await prompt.fill('/skills'); await prompt.press('Enter');
+  await expect(prompt).toHaveValue('$');
+  await expect(page.locator('#completion-list [role=option]')).toHaveCount(2);
+  await prompt.press('ArrowDown'); await prompt.press('Enter');
+  await expect(prompt).toHaveValue('$registered-two ');
+  expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(1);
+  await prompt.fill('/mention'); await page.getByRole('button', { name: '送信', exact: true }).click();
+  await expect(prompt).toHaveValue('@');
+  await fileRequest(page, '');
+  expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(1);
+});
+
+test('file lookup inserts a quoted path on Enter without submitting, and ignores stale responses after edits or Escape', async ({ page }, info) => {
+  await state(page, task()); await catalog(page);
+  const prompt = page.getByLabel('メッセージ', { exact: true });
+  await prompt.fill('確認 @src');
+  const first = await fileRequest(page, 'src');
+  await prompt.press('Enter');
+  expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(0);
+  await prompt.fill('確認 @docs'); const second = await fileRequest(page, 'docs');
+  await receive(page, { type: 'fileSearch', requestId: second.requestId, files: [{ path: 'docs/new file.md', kind: 'file' }] });
+  await receive(page, { type: 'fileSearch', requestId: first.requestId, files: [{ path: 'src/stale.ts', kind: 'file' }] });
+  await expect(page.getByRole('option', { name: 'docs/new file.md' })).toBeVisible();
+  await expect(page.getByRole('option', { name: 'src/stale.ts' })).toHaveCount(0);
+  await page.screenshot({ path: info.outputPath('file-completion.png') });
+  await prompt.press('Enter');
+  await expect(prompt).toHaveValue('確認 "docs/new file.md" ');
+  expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(0);
+  await prompt.fill('@again'); const third = await fileRequest(page, 'again');
+  await prompt.press('Escape');
+  await receive(page, { type: 'fileSearch', requestId: third.requestId, files: [{ path: 'again.md', kind: 'file' }] });
+  await expect(page.locator('#completions')).toBeHidden();
+  await prompt.fill('確認 "docs/new file.md" を読んで'); await prompt.press('Enter');
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'send', text: '確認 "docs/new file.md" を読んで', skillPaths: [] });
+});
+
+test('IME Enter and empty/error lookups do not send partial input; file completion works in the middle of a draft', async ({ page }) => {
+  await state(page, task()); await catalog(page);
+  const prompt = page.getByLabel('メッセージ', { exact: true });
+  await prompt.fill('日本語を入力中');
+  await prompt.dispatchEvent('keydown', { key: 'Enter', isComposing: true });
+  expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(0);
+  await prompt.fill('@missing'); const first = await fileRequest(page, 'missing');
+  await receive(page, { type: 'fileSearch', requestId: first.requestId, files: [], error: '検索できませんでした。' });
+  await prompt.press('Enter');
+  expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(0);
+  await prompt.fill('before @src/old.ts after');
+  await prompt.evaluate((element: HTMLTextAreaElement) => { element.setSelectionRange(11, 11); element.dispatchEvent(new Event('click')); });
+  const second = await fileRequest(page, 'src');
+  await receive(page, { type: 'fileSearch', requestId: second.requestId, files: [{ path: 'src/new.ts', kind: 'file' }] });
+  await prompt.press('Tab');
+  await expect(prompt).toHaveValue('before src/new.ts after');
+  expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(0);
+});
+
+test('catalog invalidation and workspace changes refresh skills; empty catalogs have no suggestions or headings', async ({ page }) => {
+  const value = task(); await state(page, value); await catalog(page);
+  await receive(page, { type: 'catalogInvalidated' });
+  const old = (await messages(page)).findLast(message => message.type === 'composerCatalog')!;
+  value.cwd = '/another'; await state(page, value);
+  await catalog(page, [], 'auto-review');
+  await receive(page, { type: 'composerCatalog', requestId: old.requestId, skills });
+  await expect(page.locator('#skills')).toBeHidden();
+  await expect(page.locator('#conversation')).toBeEmpty();
+});
+
+test('CLI permission names reflect inherited settings and rendering does not change permissions', async ({ page }) => {
+  const value = task(); await state(page, value); await catalog(page, skills, 'auto-review');
+  const mode = page.getByLabel('Permissions', { exact: true });
+  await expect(mode.locator('option')).toHaveText(['Ask for approval', 'Approve for me', 'Full Access']);
+  await expect(mode).toHaveValue('default');
+  expect((await messages(page)).filter(message => message.type === 'settings')).toHaveLength(0);
+  await mode.selectOption('workspace-write');
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'settings', mode: 'workspace-write' });
+  value.settings.mode = 'workspace-write'; await state(page, value);
+  await mode.selectOption('auto-review');
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'settings', mode: 'auto-review' });
+});
+
+test('unset CLI defaults are not mislabeled Custom and resolve when the server returns thread permissions', async ({ page }) => {
+  const value = task(); await state(page, value); await catalog(page, skills, 'default');
+  const mode = page.getByLabel('Permissions', { exact: true });
+  await expect(mode.locator('option:checked')).toHaveText('Permissions');
+  value.effectivePermissionMode = 'workspace-write'; await state(page, value);
+  await expect(mode.locator('option:checked')).toHaveText('Ask for approval');
+  await expect(mode).toHaveValue('default');
+  expect((await messages(page)).filter(message => message.type === 'settings')).toHaveLength(0);
+});
+
+test('registered metadata is rendered as text and long skill/file names fit split editors', async ({ page }, info) => {
+  await page.setViewportSize({ width: 380, height: 800 });
+  await state(page, task());
+  const long = '<img src=x onerror=alert(1)>' + 'long'.repeat(80);
+  await catalog(page, [{ name: long, description: long, path: '/skills/test/SKILL.md', scope: 'user' }]);
+  await expect(page.locator('#skills img')).toHaveCount(0);
+  expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
+  await page.getByLabel('メッセージ', { exact: true }).fill('@long'); const request = await fileRequest(page, 'long');
+  await receive(page, { type: 'fileSearch', requestId: request.requestId, files: [{ path: long, kind: 'file' }] });
+  expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
+  await page.screenshot({ path: info.outputPath('split-completion.png') });
+});
+
+test('read acknowledgements require the completed unread turn to be rendered', async ({ page }) => {
+  const value = task();
+  value.unreadTurnId = 'answer';
+  value.hydrated = false;
+  await state(page, value);
+  expect((await messages(page)).filter(message => message.type === 'read')).toEqual([]);
+  value.hydrated = true;
+  value.turns = [{ id: 'answer', status: 'inProgress', items: [] }];
+  await state(page, value);
+  expect((await messages(page)).filter(message => message.type === 'read')).toEqual([]);
+  value.turns = [{ id: 'answer', status: 'completed', items: [{ id: 'agent', kind: 'agentMessage', data: { text: 'The answer is ready.' } }] }];
+  await state(page, value);
+  await expect(page.getByText('The answer is ready.', { exact: true })).toBeVisible();
+  expect((await messages(page)).filter(message => message.type === 'read')).toEqual([{ type: 'read', turnId: 'answer' }]);
+  value.unreadTurnId = undefined;
+  await state(page, value);
+  expect((await messages(page)).filter(message => message.type === 'read')).toHaveLength(1);
+});
+
+test('message hover actions match their role, stay below the text, and address the selected message', async ({ page }, info) => {
+  const value = task();
+  value.turns = [{ id: 'earlier', status: 'completed', startedAt: Date.UTC(2026, 8, 9, 4, 29), completedAt: Date.UTC(2026, 8, 9, 4, 30), items: [
+    { id: 'user', kind: 'userMessage', data: { content: [{ type: 'text', text: 'modelloader/VS2022/DevelopTools/ このフォルダは何？' }] } },
+    { id: 'reply', kind: 'agentMessage', data: { text: '描画用の `GridLineView` コントロールを参照しています。\n\n要するに、開発用ツールをまとめたフォルダーです。' } },
+  ] }, { id: 'later', status: 'completed', items: [
+    { id: 'reply', kind: 'agentMessage', data: { text: '追加の回答です。' } },
+  ] }];
+  await state(page, value);
+  const turn = page.locator('.turn[data-turn="earlier"]');
+  const user = turn.locator('.message.user');
+  const reply = turn.locator('.message.assistant');
+  const later = page.locator('.turn[data-turn="later"] .message');
+  const userCopy = user.locator('[data-message-action="copy"]');
+  const replyCopy = reply.locator('[data-message-action="copy"]');
+  const fork = reply.getByRole('button', { name: '新しいチャットに分岐' });
+  await page.mouse.move(1, 1);
+  await expect(user.locator('.message-footer')).toHaveCSS('opacity', '0');
+  await expect(reply.locator('.message-footer')).toHaveCSS('opacity', '0');
+  await expect(user.getByRole('button', { name: '新しいチャットに分岐' })).toHaveCount(0);
+  const beforeHover = await reply.boundingBox();
+  await user.locator('.user-bubble').hover();
+  await expect(user.locator('.message-footer')).toHaveCSS('opacity', '1');
+  await expect(reply.locator('.message-footer')).toHaveCSS('opacity', '0');
+  const bubbleBox = (await user.locator('.user-bubble').boundingBox())!;
+  const userCopyBox = (await userCopy.boundingBox())!;
+  expect(userCopyBox.y).toBeGreaterThanOrEqual(bubbleBox.y + bubbleBox.height);
+  expect(userCopyBox.x + userCopyBox.width).toBeCloseTo(bubbleBox.x + bubbleBox.width, 0);
+  await expect(user.locator('time')).toHaveAttribute('datetime', '2026-09-09T04:29:00.000Z');
+  await expect(userCopy).toHaveAttribute('title', 'メッセージをコピー');
+  await page.screenshot({ path: info.outputPath('user-message-hover.png') });
+  await userCopy.locator('svg').click();
+  expect((await messages(page)).at(-1)).toEqual({ type: 'copyMessage', turnId: 'earlier', itemId: 'user' });
+  await receive(page, { type: 'messageCopied', turnId: 'earlier', itemId: 'user' });
+  await expect(userCopy).toHaveAccessibleName('コピーしました');
+  await expect(userCopy.locator('.copied-icon')).toBeVisible();
+  await page.locator('#prompt').focus();
+  await reply.locator('.markdown').hover();
+  await expect(user.locator('.message-footer')).toHaveCSS('opacity', '0');
+  await expect(reply.locator('.message-footer')).toHaveCSS('opacity', '1');
+  expect(await reply.boundingBox()).toEqual(beforeHover);
+  const replyCopyBox = (await replyCopy.boundingBox())!;
+  const markdownBox = (await reply.locator('.markdown').boundingBox())!;
+  expect(replyCopyBox.x).toBeCloseTo(markdownBox.x, 0);
+  expect(replyCopyBox.y).toBeGreaterThanOrEqual(markdownBox.y + markdownBox.height);
+  expect((await fork.boundingBox())!.x).toBeGreaterThan(replyCopyBox.x);
+  await page.screenshot({ path: info.outputPath('assistant-message-hover.png') });
+  await fork.locator('svg').click();
+  expect((await messages(page)).at(-1)).toEqual({ type: 'forkMessage', turnId: 'earlier', itemId: 'reply' });
+  await replyCopy.click();
+  expect((await messages(page)).at(-1)).toEqual({ type: 'copyMessage', turnId: 'earlier', itemId: 'reply' });
+  await receive(page, { type: 'messageCopied', turnId: 'earlier', itemId: 'reply' });
+  await expect(replyCopy).toHaveAttribute('data-copied');
+  await expect(later.locator('[data-message-action="copy"]')).not.toHaveAttribute('data-copied');
+  await expect(later.locator('time')).toHaveCount(0);
+
+  await page.locator('#prompt').hover();
+  await userCopy.focus();
+  await userCopy.press('Tab');
+  await expect(replyCopy).toBeFocused();
+  await expect(reply.locator('.message-footer')).toHaveCSS('opacity', '1');
+  value.status = 'running'; value.activeTurnId = 'later'; value.turns[1]!.status = 'inProgress';
+  value.turns[1]!.items[0]!.data.phase = 'final_answer';
+  value.turns[1]!.items[0]!.data.text += '処理中です。';
+  await state(page, value);
+  await expect(replyCopy).toBeFocused();
+  await expect(fork).toBeEnabled();
+  await expect(later.getByRole('button', { name: '新しいチャットに分岐' })).toBeDisabled();
+  await replyCopy.press('Tab');
+  await fork.press('Enter');
+  expect((await messages(page)).at(-1)).toEqual({ type: 'forkMessage', turnId: 'earlier', itemId: 'reply' });
+  await expect(replyCopy).toHaveAccessibleName('メッセージをコピー');
+  await page.setViewportSize({ width: 380, height: 800 });
+  expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
+  expect(await page.locator('#conversation').evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.screenshot({ path: info.outputPath('message-actions-split.png') });
+  value.turns[0]!.items[0]!.data.content = [{ type: 'text', text: 'はい' }];
+  await state(page, value);
+  const shortBubble = (await user.locator('.user-bubble').boundingBox())!;
+  const messageBox = (await user.boundingBox())!;
+  expect(shortBubble.width).toBeLessThan(messageBox.width);
+  expect(shortBubble.x + shortBubble.width).toBeCloseTo(messageBox.x + messageBox.width, 0);
+});
+
+test('completed work is collapsed above the final answer and preserves keyboard and nested tool state', async ({ page }, info) => {
+  const value = task();
+  value.turns = [{ id: 'completed', status: 'completed', durationMs: 712_345, items: [
+    { id: 'user', kind: 'userMessage', data: { content: [{ type: 'text', text: '途中経過の表示を合わせてください。' }] } },
+    { id: 'commentary', kind: 'agentMessage', data: { phase: 'commentary', text: '会話表示の実装を確認しています。' } },
+    { id: 'command', kind: 'commandExecution', data: { command: 'npm test', status: 'completed', aggregatedOutput: '32 tests passed', exitCode: 0 } },
+    { id: 'files', kind: 'fileChange', data: { changes: [{ path: 'src/webview/render.ts', diff: '+ progress group' }] } },
+    { id: 'final', kind: 'agentMessage', data: { phase: 'final_answer', text: '途中経過を折りたたむ表示に変更しました。\n\n- 作業時間の行から詳細を開閉できます。\n- 最終回答は常に表示します。\n\n型チェックと画面テストが成功しました。' } },
+  ] }];
+  await state(page, value);
+  const turn = page.locator('.turn[data-turn="completed"]');
+  const progress = turn.locator('.turn-progress');
+  const summary = progress.locator(':scope > summary');
+  await expect(summary).toHaveText('11m 52s作業しました');
+  await expect(progress).not.toHaveAttribute('open');
+  await expect(page.getByText('会話表示の実装を確認しています。')).toBeHidden();
+  await expect(page.getByText('コマンド · npm test')).toBeHidden();
+  await expect(page.getByText('途中経過を折りたたむ表示に変更しました。', { exact: true })).toBeVisible();
+  await page.screenshot({ path: info.outputPath('progress-collapsed.png') });
+
+  await summary.focus(); await summary.press('Enter');
+  await expect(page.getByText('会話表示の実装を確認しています。')).toBeVisible();
+  await expect(page.getByText('32 tests passed')).toBeHidden();
+  const command = turn.getByText('コマンド · npm test', { exact: true });
+  await command.click();
+  value.turns[0]!.items[2]!.data.aggregatedOutput = '33 tests passed';
+  await state(page, value);
+  await expect(turn.getByText('33 tests passed')).toBeVisible();
+  await expect(command).toBeFocused();
+  await page.screenshot({ path: info.outputPath('progress-expanded.png') });
+
+  value.turns.push({ ...structuredClone(value.turns[0]!), id: 'another', durationMs: 2500 });
+  await state(page, value);
+  await expect(page.locator('.turn[data-turn="another"] .turn-progress')).not.toHaveAttribute('open');
+  await expect(page.locator('.turn[data-turn="another"] details[data-item="command"]')).not.toHaveAttribute('open');
+  await expect(turn.getByText('33 tests passed')).toBeVisible();
+  await summary.click();
+  value.turns[0]!.items[1]!.data.text = '確認を完了しました。';
+  await state(page, value);
+  await expect(progress).not.toHaveAttribute('open');
+  await expect(summary).toBeFocused();
+  await page.setViewportSize({ width: 380, height: 800 });
+  expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
+  await page.screenshot({ path: info.outputPath('progress-split.png') });
+});
+
+test('live commentary remains visible while the final answer streams and collapses on completion', async ({ page }) => {
+  const value = task(); value.status = 'running'; value.activeTurnId = 'live';
+  value.turns = [{ id: 'live', status: 'inProgress', startedAt: 1_000_000, items: [
+    { id: 'commentary', kind: 'agentMessage', data: { phase: 'commentary', text: '調査を進めています。' } },
+  ] }];
+  await state(page, value);
+  const progress = page.locator('.turn-progress');
+  await expect(progress.locator(':scope > summary')).toHaveText('作業中');
+  await expect(progress).toHaveAttribute('open');
+  await expect(page.getByText('調査を進めています。')).toBeVisible();
+  value.turns[0]!.items.push({ id: 'command', kind: 'commandExecution', data: { command: 'npm test', status: 'inProgress', aggregatedOutput: '32 tests passed' } });
+  await state(page, value);
+  const command = progress.locator('details[data-item="command"]');
+  await expect(command.locator(':scope > summary')).toBeVisible();
+  await command.locator(':scope > summary').click();
+  value.turns[0]!.items.push({ id: 'final', kind: 'agentMessage', data: { phase: 'final_answer', text: '調査結果です。' } });
+  await state(page, value);
+  await expect(page.getByText('調査結果です。')).toBeVisible();
+  await expect(progress).toHaveAttribute('open');
+  await expect(page.getByText('32 tests passed')).toBeVisible();
+  value.status = 'idle'; value.activeTurnId = undefined;
+  value.turns[0]!.status = 'completed'; value.turns[0]!.completedAt = 1_061_000;
+  await state(page, value);
+  await expect(progress.locator(':scope > summary')).toHaveText('1m 1s作業しました');
+  await expect(progress).not.toHaveAttribute('open');
+  await expect(page.getByText('調査を進めています。')).toBeHidden();
+  await expect(page.getByText('32 tests passed')).toBeHidden();
+  await expect(page.getByText('調査結果です。')).toBeVisible();
+  await progress.locator(':scope > summary').click();
+  value.turns[0]!.items.at(-1)!.data.text = '調査結果をまとめました。';
+  await state(page, value);
+  await expect(progress).toHaveAttribute('open');
+  await expect(page.getByText('32 tests passed')).toBeVisible();
+  await expect(page.getByText('調査結果をまとめました。')).toBeVisible();
+});
+
+test('manual progress toggles survive streaming and every live group collapses only for the finished turn', async ({ page }) => {
+  const value = task(); value.status = 'running'; value.activeTurnId = 'live';
+  value.turns = [{ id: 'previous', status: 'completed', items: [
+    { id: 'commentary', kind: 'agentMessage', data: { phase: 'commentary', text: '前の作業の途中経過です。' } },
+  ] }, { id: 'live', status: 'inProgress', items: [
+    { id: 'commentary', kind: 'agentMessage', data: { phase: 'commentary', text: '調査を進めています。' } },
+  ] }];
+  await state(page, value);
+  const previous = page.locator('.turn[data-turn="previous"] .turn-progress');
+  const progress = page.locator('.turn[data-turn="live"] .turn-progress');
+  await previous.locator(':scope > summary').click();
+  await progress.locator(':scope > summary').click();
+  value.turns[1]!.items[0]!.data.text = '調査を続けています。';
+  await state(page, value);
+  await expect(previous).toHaveAttribute('open');
+  await expect(progress).not.toHaveAttribute('open');
+  await expect(page.getByText('調査を続けています。')).toBeHidden();
+  value.turns[1]!.items.push(
+    { id: 'steer', kind: 'userMessage', data: { content: [{ type: 'text', text: 'テストも確認して' }] } },
+    { id: 'command', kind: 'commandExecution', data: { command: 'npm test', status: 'inProgress' } },
+  );
+  await state(page, value);
+  await expect(progress).toHaveCount(2);
+  await expect(progress.first()).not.toHaveAttribute('open');
+  await expect(progress.last()).toHaveAttribute('open');
+  await expect(page.getByText('テストも確認して', { exact: true })).toBeVisible();
+  await expect(page.getByText('実行中 · npm test', { exact: true })).toBeVisible();
+  await progress.first().locator(':scope > summary').click();
+  value.status = 'idle'; value.activeTurnId = undefined;
+  value.turns[1]!.status = 'completed';
+  await state(page, value);
+  await expect(progress.first()).not.toHaveAttribute('open');
+  await expect(progress.last()).not.toHaveAttribute('open');
+  await expect(previous).toHaveAttribute('open');
+});
+
+test('nullable reply phases and steering preserve the final answer and user message order', async ({ page }) => {
+  const value = task();
+  value.turns = [{ id: 'steered', status: 'completed', items: [
+    { id: 'user', kind: 'userMessage', data: { content: [{ type: 'text', text: '表示を修正して' }] } },
+    { id: 'commentary', kind: 'agentMessage', data: { phase: null, text: '表示を確認します。' } },
+    { id: 'steer', kind: 'userMessage', data: { content: [{ type: 'text', text: '矢印も合わせて' }] } },
+    { id: 'command', kind: 'commandExecution', data: { command: 'npm test', status: 'completed' } },
+    { id: 'final', kind: 'agentMessage', data: { phase: null, text: '矢印も合わせました。' } },
+  ] }, { id: 'answer-only', status: 'completed', items: [
+    { id: 'reasoning', kind: 'reasoning', data: { summary: [], content: [] } },
+    { id: 'answer', kind: 'agentMessage', data: { phase: 'final_answer', text: '確認しました。' } },
+  ] }];
+  await state(page, value);
+  await expect(page.locator('.turn[data-turn="steered"] > *')).toHaveText(['表示を修正して', '途中経過表示を確認します。', '矢印も合わせて', '作業しましたコマンド · npm test', '矢印も合わせました。']);
+  await expect(page.getByText('表示を確認します。', { exact: true })).toBeHidden();
+  await expect(page.getByText('矢印も合わせて', { exact: true })).toBeVisible();
+  await expect(page.getByText('矢印も合わせました。', { exact: true })).toBeVisible();
+  await expect(page.locator('.turn[data-turn="answer-only"] details')).toHaveCount(0);
+  value.turns[0]!.startedAt = Date.UTC(2026, 8, 9, 4, 29);
+  await state(page, value);
+  await expect(page.locator('[data-message-id="user"] time')).toHaveCount(1);
+  await expect(page.locator('[data-message-id="steer"] time')).toHaveCount(0);
+});
+
+test('streaming, quota wait and questions preserve unsent answers across updates', async ({ page }, info) => {
+  const value = task(); value.autoResume = true; value.status = 'waiting'; value.recoveryAt = Date.now() + 600_000;
+  value.claims = [{ stoppedTurnId: 'old-stop', clientId: 'automatic-client', turnId: 'turn-1' }];
+  value.turns = [{ id: 'turn-1', status: 'failed', error: { kind: 'usageLimitExceeded', message: '使用量の上限に達しました。' }, items: [
+    { id: 'user-1', kind: 'userMessage', data: { content: [{ type: 'text', text: '作業を続けてください。' }] } },
+    { id: 'agent-1', kind: 'agentMessage', data: { text: '通信層を追加しました。\n\n- 要求IDで応答を照合\n- 未対応の要求にはエラーを返却\n\n```ts\nawait client.startThread(cwd);\n```' } },
+    { id: 'command-1', kind: 'commandExecution', data: { command: 'npm test', status: 'completed', aggregatedOutput: '32 tests passed', exitCode: 0 } },
+  ] }];
+  await state(page, value);
+  await expect(page.getByText('自動送信 · 使用量回復後の継続')).toBeVisible();
+  await expect(page.getByRole('status')).toContainText('回復予定');
+  await expect(page.locator('.turn-error')).toBeVisible();
+  await page.locator('.turn-progress > summary').click();
+  await page.getByText('コマンド · npm test').click();
+  await expect(page.getByText('32 tests passed')).toBeVisible();
+  await page.screenshot({ path: info.outputPath('usage-wait.png') });
+  value.status = 'input'; value.requests = [{ id: 'number:11', threadId: 'thread-1', turnId: 'turn-1', kind: 'questions', title: 'Codexからの質問', detail: '', choices: [], blocking: true, questions: [{ id: 'direction', header: '実装方針', question: '対象範囲を指定してください。', secret: false, options: [{ label: 'すべて', description: '全体に適用します。' }] }] }];
+  await state(page, value);
+  await page.getByLabel('自由入力').fill('まず接続層を進めてください。');
+  value.turns[0]!.items[1]!.data.text = '新しいストリーム通知';
+  await state(page, value);
+  await expect(page.getByLabel('自由入力')).toHaveValue('まず接続層を進めてください。');
+  await page.getByRole('button', { name: '回答を送信', exact: true }).click();
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'answer', requestId: 'number:11', answer: { answers: { direction: ['まず接続層を進めてください。'] } } });
+});
+
+test('async message questions show selectable cards after completion and submit one answer', async ({ page }, info) => {
+  const value = task(); value.status = 'input';
+  value.requests = [{ id: 'message:question', threadId: 'thread-1', turnId: 'turn-1', kind: 'questions', source: 'agentMessage', title: '質問', detail: '', choices: [], blocking: false,
+    questions: [{ id: '0', header: '', question: 'AかBどちらにしますか？', secret: false, options: [{ label: 'A', description: '' }, { label: 'B', description: '' }] }] }];
+  await state(page, value);
+  const send = page.getByRole('button', { name: '回答を送信', exact: true });
+  await expect(send).toBeDisabled();
+  await expect(page.locator('#stop')).toBeHidden();
+  await expect(page.locator('#send')).toHaveText('送信');
+  await expect(page.locator('#model')).toBeEnabled();
+  await page.getByLabel('メッセージ', { exact: true }).fill('入力中の作業指示');
+  await page.locator('.answer-label').filter({ hasText: /^B$/ }).click();
+  await expect(page.getByRole('radio', { name: 'B', exact: true })).toBeChecked();
+  await expect(send).toBeEnabled();
+  await page.screenshot({ path: info.outputPath('question-card.png') });
+  await send.click();
+  await expect(send).toBeDisabled();
+  await page.locator('.question-card').evaluate((form: HTMLFormElement) => form.requestSubmit());
+  expect((await messages(page)).filter(message => message.type === 'answer')).toEqual([{ type: 'answer', requestId: 'message:question', answer: { answers: { '0': ['B'] } } }]);
+  await expect(page.getByLabel('メッセージ', { exact: true })).toHaveValue('入力中の作業指示');
+  await receive(page, { type: 'failure', requestId: 'message:question' });
+  await expect(send).toBeEnabled();
+  await expect(page.getByRole('radio', { name: 'B', exact: true })).toBeChecked();
+  value.requests = []; value.status = 'running'; value.activeTurnId = 'next';
+  await state(page, value);
+  await expect(page.locator('#requests')).toBeHidden();
+});
+
+test('multiple questions require answers and freely switch between options and text', async ({ page }) => {
+  const value = task(); value.status = 'input';
+  value.requests = [{ id: 'number:12', threadId: 'thread-1', kind: 'questions', title: '質問', detail: '', choices: [], blocking: true, questions: [
+    { id: 'direction', header: '方針', question: '実装方針を選んでください。', secret: false, options: [{ label: 'A', description: '推奨の方針' }, { label: 'B', description: '' }, { label: 'C', description: '' }] },
+    { id: 'notes', header: '補足', question: '補足を入力してください。', secret: false, options: [] },
+    { id: 'secret', header: '秘密', question: '秘密の回答', secret: true, options: [] },
+  ] }];
+  await state(page, value);
+  const questions = page.locator('.question');
+  const send = page.getByRole('button', { name: '回答を送信', exact: true });
+  await questions.nth(0).getByRole('radio', { name: 'B', exact: true }).focus();
+  await page.keyboard.press('Space');
+  await expect(send).toBeDisabled();
+  await questions.nth(0).getByLabel('自由入力').fill('独自案');
+  await expect(questions.nth(0).locator('input[type=radio]:checked')).toHaveCount(0);
+  await questions.nth(0).getByRole('radio', { name: 'C', exact: true }).focus();
+  await page.keyboard.press('Space');
+  await expect(questions.nth(0).getByLabel('自由入力')).toHaveValue('');
+  await questions.nth(1).getByLabel('自由入力').fill('補足です');
+  await expect(send).toBeDisabled();
+  await questions.nth(2).getByLabel('自由入力').fill('秘密です');
+  await expect(questions.nth(2).getByLabel('自由入力')).toHaveAttribute('type', 'password');
+  await expect(send).toBeEnabled();
+  await questions.nth(1).getByLabel('自由入力').press('Enter');
+  expect((await messages(page)).filter(message => message.type === 'answer')).toEqual([{ type: 'answer', requestId: 'number:12', answer: { answers: { direction: ['C'], notes: ['補足です'], secret: ['秘密です'] } } }]);
+});
+
+test('request additions and removals preserve the other card draft, selection, and focus', async ({ page }) => {
+  const value = task(); value.status = 'input';
+  const first = { id: 'number:21', threadId: 'thread-1', kind: 'questions' as const, title: '質問', detail: '', choices: [], blocking: true, questions: [
+    { id: 'direction', header: '方針', question: '方針は？', secret: false, options: [{ label: 'A', description: '' }, { label: 'B', description: '' }] },
+    { id: 'notes', header: '補足', question: '補足は？', secret: false, options: [] },
+  ] };
+  value.requests = [first]; await state(page, value);
+  const card = page.locator('form[data-request="number:21"]');
+  await card.getByText('A', { exact: true }).click();
+  await card.getByLabel('自由入力').nth(1).fill('入力中の回答');
+  value.requests.push({ ...first, id: 'number:22' }); await state(page, value);
+  await expect(card.getByLabel('自由入力').nth(1)).toHaveValue('入力中の回答');
+  await expect(card.getByLabel('自由入力').nth(1)).toBeFocused();
+  value.requests.pop(); await state(page, value);
+  await expect(card.getByLabel('自由入力').nth(1)).toHaveValue('入力中の回答');
+  await expect(card.getByRole('radio', { name: 'A', exact: true })).toBeChecked();
+  await expect(card.getByLabel('自由入力').nth(1)).toBeFocused();
+});
+
+test('skip and close dismiss unanswered questions explicitly and stay disabled when disconnected', async ({ page }) => {
+  const value = task(); value.status = 'input';
+  const request = { id: 'number:31', threadId: 'thread-1', kind: 'questions' as const, title: '質問', detail: '', choices: [], blocking: true,
+    questions: [{ id: 'answer', header: '', question: '回答は？', secret: false, options: [] }] };
+  value.requests = [request]; await state(page, value);
+  await page.getByRole('button', { name: 'スキップ', exact: true }).click();
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'answer', requestId: 'number:31', answer: { skip: true } });
+  value.requests = [{ ...request, id: 'number:32' }]; await state(page, value);
+  await page.getByRole('button', { name: '質問をスキップ', exact: true }).click();
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'answer', requestId: 'number:32', answer: { skip: true } });
+  value.requests = [{ ...request, id: 'number:33' }]; await state(page, value, undefined, false);
+  await expect(page.getByRole('button', { name: 'スキップ', exact: true })).toBeDisabled();
+  await expect(page.getByLabel('自由入力')).toBeDisabled();
+});
+
+test('question cards escape model text and fit split views with long options', async ({ page }, info) => {
+  await page.setViewportSize({ width: 380, height: 800 });
+  const value = task(); value.status = 'input';
+  value.requests = [{ id: 'number:41', threadId: 'thread-1', kind: 'questions', title: '質問', detail: '', choices: [], blocking: true,
+    questions: [{ id: 'question', header: '', question: '<img src=x onerror="alert(1)">', secret: false, options: [{ label: 'very-long-option-'.repeat(15), description: '説明'.repeat(30) }] }] }];
+  await state(page, value);
+  await expect(page.locator('.question-card img')).toHaveCount(0);
+  await expect(page.locator('.question-title')).toHaveText('<img src=x onerror="alert(1)">');
+  expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
+  expect(await page.locator('#requests').evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.getByRole('button', { name: 'スキップ', exact: true }).scrollIntoViewIfNeeded();
+  await expect(page.getByRole('button', { name: 'スキップ', exact: true })).toBeInViewport();
+  await page.screenshot({ path: info.outputPath('question-split-view.png') });
+});
+
+test('MCP requests can be declined without filling required fields; split views have no horizontal overflow', async ({ page }, info) => {
+  await page.setViewportSize({ width: 380, height: 800 });
+  const value = task(); value.status = 'approval'; value.requests = [{ id: 'number:2', threadId: 'thread-1', kind: 'elicitation', title: 'MCP: service', detail: '入力を確認してください。', blocking: true, choices: ['回答を送信', '拒否', 'キャンセル'], schema: { type: 'object', required: ['email'], properties: { email: { type: 'string', title: 'メール' } } } }];
+  await state(page, value);
+  await page.getByRole('button', { name: '拒否', exact: true }).click();
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'answer', answer: { choice: 1 } });
+  expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
+  await page.screenshot({ path: info.outputPath('split-view.png') });
+});
