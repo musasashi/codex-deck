@@ -25,7 +25,7 @@
 ### Hugging Face経由のモデル
 
 1. [HFのトークン設定](https://huggingface.co/settings/tokens)で、**Make calls to Inference Providers**権限を持つトークンを作成します。
-2. VS Codeの拡張機能ホストを実行する環境に`HF_TOKEN`を設定し、VS Codeを再起動します。WSL・SSHでは接続先の環境変数を使用します。
+2. VS Codeの拡張機能ホストを実行する環境に`HF_TOKEN`を設定します。WSL・SSHでは接続先の`.bashrc`などに`export HF_TOKEN='トークン'`を記述します。設定後は「Developer: Reload Window」でウィンドウを再読み込みしてください。拡張機能ホストに変数がない場合、App Serverの起動時に対話シェルから読み込みます。Windowsでは環境変数の設定後にVS Codeを完全に終了して起動し直してください。
 3. 「Codex Deck: 設定」でプリセットを追加し、モデルに「Hugging Face（モデルIDを指定）」を選びます。
 4. HFのモデルIDを`組織/モデル`または`組織/モデル:プロバイダー`の形式で入力し、入力・出力単価を**USD／100万トークン**で設定して保存します。
 5. 新規タスクでそのプリセットへ切り替え、依頼を送信します。OpenAIのタスクと同時に実行できます。
@@ -107,4 +107,5 @@ VS Codeの再起動時にタブを復元すると、予約も復元して使用�
 | --- | --- |
 | CLIが見つからない | VS Codeの設定 `codexDeck.cliPath`に実行ファイルを指定。Windowsは`codex.exe`、WSL・SSHは接続先のCLIを使用 |
 | 未接続 | タスク右上の「•••」→「App Serverに再接続」 |
+| `Missing environment variable: HF_TOKEN` | WSL・SSHでは接続先の`.bashrc`などに`HF_TOKEN`を設定し、「Developer: Reload Window」を実行。ターミナル内だけの設定は引き継がれません |
 | エラーの詳細を見たい | 操作した画面と、出力パネルの「Codex Deck」を確認 |

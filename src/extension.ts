@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import { AppServerClient } from './appServer/client';
 import { StdioConnection } from './appServer/rpc';
+import { appServerEnvironment } from './appServer/environment';
 import { TaskManager, readTaskRecords } from './core/taskManager';
 import { messageMarkdown, taskMarkdown } from './core/taskCopy';
 import { linkedThreadId, taskDeepLink } from './core/taskReferences';
@@ -117,7 +118,9 @@ class DeckExtension implements PanelHost {
       const executable = vscode.workspace.getConfiguration('codexDeck').get<string>('cliPath', 'codex').trim();
       if (!executable) throw new Error('codexDeck.cliPathに公式Codex CLIの実行ファイルを指定してください。');
       this.invalidateComposerCatalogs();
-      await this.client.connect(this.connection.start(executable, this.workspaceCwd() || undefined));
+      const env = await appServerEnvironment();
+      if (this.stopping) return;
+      await this.client.connect(this.connection.start(executable, this.workspaceCwd() || undefined, env));
       void this.refreshCatalog().catch(error => this.report(error));
       for (const task of this.manager.openTasks) {
         if (task.threadId) void this.manager.restore(task.id).catch(error => this.report(error));

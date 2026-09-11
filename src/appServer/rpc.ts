@@ -103,10 +103,10 @@ export class StdioConnection {
   private child?: ChildProcessWithoutNullStreams;
   private peer?: JsonRpcPeer;
   constructor(private readonly log: (text: string) => void) {}
-  start(executable: string, cwd?: string): JsonRpcPeer {
+  start(executable: string, cwd?: string, env?: NodeJS.ProcessEnv): JsonRpcPeer {
     if (this.child) throw new Error('App Serverはすでに起動しています。');
     // No shell: executable settings and paths are never evaluated as commands.
-    const child = spawn(executable, ['app-server', ...HF_CONFIG_ARGS], { cwd, stdio: 'pipe', windowsHide: true });
+    const child = spawn(executable, ['app-server', ...HF_CONFIG_ARGS], { cwd, env, stdio: 'pipe', windowsHide: true });
     this.child = child;
     const peer = new JsonRpcPeer(child.stdout, child.stdin);
     this.peer = peer;

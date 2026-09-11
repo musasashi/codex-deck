@@ -1,5 +1,6 @@
 import { AppServerClient } from '../src/appServer/client';
 import { StdioConnection } from '../src/appServer/rpc';
+import { appServerEnvironment } from '../src/appServer/environment';
 import { object } from '../src/core/types';
 import { HF_PROVIDER } from '../src/core/huggingFace';
 
@@ -8,7 +9,7 @@ async function main(): Promise<void> {
   const connection = new StdioConnection(() => undefined);
   try {
     const started = performance.now();
-    await client.connect(connection.start(process.env.CODEX_DECK_CLI ?? 'codex', process.cwd()));
+    await client.connect(connection.start(process.env.CODEX_DECK_CLI ?? 'codex', process.cwd(), await appServerEnvironment()));
     const historyStarted = performance.now();
     const history = await client.listThreads();
     const historyFinished = performance.now();
