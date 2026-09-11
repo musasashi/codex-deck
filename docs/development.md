@@ -39,3 +39,25 @@ xvfb-run -a npm run test:history
 ```
 
 これらのテストは隔離した設定と模擬App Serverを使用します。
+
+## リリースする
+
+次のどちらかでバージョンを更新し、変更をコミットしてpushします。
+
+```sh
+npm version minor --no-git-tag-version
+npm version major --no-git-tag-version
+```
+
+パッケージを作成してGitHub Releasesに公開します。
+
+```sh
+npm run package
+release_version=$(node -p "require('./package.json').version")
+git tag "v${release_version}"
+git push origin "v${release_version}"
+gh release create "v${release_version}" "./codex-deck-${release_version}.vsix" \
+  --title "v${release_version}" \
+  --generate-notes \
+  --verify-tag
+```
