@@ -3,9 +3,14 @@ import { randomBytes } from 'node:crypto';
 import { readPresets, readTitleEffort, readTitleModel, selectedModel, validatePresets, validateTitleEffort, validateTitleModel } from '../core/settings';
 import { messageOf, object, string, type Model } from '../core/types';
 import { settingsHtml } from './settingsHtml';
+import { isExternalModel, parseResponsesModel, providerModels, readProviders, validateProviders, type ResponsesProvider } from '../core/providers';
+import { readTokenPrice, validateTokenPrice, type TokenPrice } from '../core/cost';
+import type { ProviderCheck, ProviderCheckPurpose } from '../core/providerCheck';
 
 interface SettingsHost {
   loadModels(): Promise<Model[]>;
+  checkProvider(model: string, purpose: ProviderCheckPurpose, providers: ResponsesProvider[], signal: AbortSignal, progress: (check: ProviderCheck) => void): Promise<ProviderCheck>;
+  providersChanged(): void;
   openCodexSettings(): Promise<void>;
   report(error: unknown): void;
 }
@@ -20,6 +25,7 @@ interface Scope {
 export class SettingsPanel implements vscode.Disposable {
   private panel?: vscode.WebviewPanel;
   private saving = false;
+  private operation?: { controller: AbortController; requestId: unknown };
   constructor(private readonly uri: vscode.Uri, private readonly host: SettingsHost) {}
 
   open(): void {
@@ -37,32 +43,55 @@ export class SettingsPanel implements vscode.Disposable {
     const receive = webview.onDidReceiveMessage(async value => {
       const message = object(value);
       try {
+        if (message.type === 'cancelProviderCheck') { const operation = this.operation; if (operation && operation.requestId === message.requestId) operation.controller.abort(); return; }
         if (message.type === 'openCodexSettings') { await this.host.openCodexSettings(); return; }
         if (message.type === 'openOtherSettings') { await vscode.commands.executeCommand('workbench.action.openSettings', '@ext:codex-deck.codex-deck'); return; }
-        if (message.type !== 'loadSettings' && message.type !== 'saveSettings') return;
-        if (this.saving) throw new Error('設定を保存中です。完了後に再読み込みしてください。');
+        if (message.type !== 'loadSettings' && message.type !== 'saveSettings' && message.type !== 'checkProviderModel') return;
+        if (this.saving) throw new Error('確認・保存中です。完了後に再読み込みしてください。');
         const scopes = this.scopes();
         const scope = scopes.find(scope => scope.id === string(message.scope, 'user'));
         if (!scope) throw new Error('保存先を選び直してください。');
         const saving = message.type === 'saveSettings';
-        if (saving) this.saving = true;
+        const checking = message.type === 'checkProviderModel';
+        const operation = { controller: new AbortController(), requestId: message.requestId };
+        if (saving || checking) { this.saving = true; this.operation = operation; }
+        const signal = operation.controller.signal;
         try {
-          const models = await this.host.loadModels();
+          const storedProviders = readProviders(this.read(scopes[0]!, 'providers'));
+          const providers = saving || checking ? validateProviders(message.providers ?? storedProviders) : storedProviders;
+          if (checking) {
+            const post = (result: ProviderCheck) => { if (this.panel === panel) void webview.postMessage({ type: 'providerCheckState', requestId: message.requestId, result }); };
+            const result = await this.host.checkProvider(string(message.model), message.purpose === 'title' ? 'title' : 'task', providers, signal, post);
+            if (this.panel === panel) void webview.postMessage({ type: 'providerCheckDone', requestId: message.requestId, result });
+            return;
+          }
+          let modelError = '';
+          const catalog = await this.host.loadModels().catch(error => { this.host.report(error); modelError = `モデル一覧: ${messageOf(error)}`; return [] as Model[]; });
+          const models = [...catalog.filter(model => !parseResponsesModel(model.id)), ...providerModels(providers)];
           if (saving) {
             const titleModel = validateTitleModel(message.titleModel, models);
-            await this.save(scope, validatePresets(message.presets, models), titleModel, validateTitleEffort(message.titleEffort, selectedModel(models, titleModel)));
+            const presets = validatePresets(message.presets, models);
+            const titleEffort = validateTitleEffort(message.titleEffort, selectedModel(models, titleModel));
+            const titlePricing = isExternalModel(titleModel) && message.titlePricing !== undefined ? validateTokenPrice(message.titlePricing) : undefined;
+            signal.throwIfAborted();
+            if (this.panel === panel) void webview.postMessage({ type: 'settingsSaving', requestId: message.requestId });
+            await this.save(scope, presets, titleModel, titleEffort, titlePricing);
+            if (JSON.stringify(providers) !== JSON.stringify(storedProviders)) {
+              await vscode.workspace.getConfiguration('codexDeck').update('providers', providers, vscode.ConfigurationTarget.Global);
+              this.host.providersChanged();
+            }
           }
           if (this.panel === panel) void webview.postMessage({ type: 'settingsState', requestId: message.requestId, saved: saving,
             scopes: scopes.map(({ id, label }) => ({ id, label })), scope: scope.id,
             presets: readPresets(this.read(scope, 'presets')), titleModel: readTitleModel(this.read(scope, 'titleModel')),
-            titleEffort: readTitleEffort(this.read(scope, 'titleEffort')), models });
-        } finally { if (saving) this.saving = false; }
+            titleEffort: readTitleEffort(this.read(scope, 'titleEffort')), titlePricing: readTokenPrice(this.read(scope, 'titlePricing')), providers, models, modelError });
+        } finally { if (this.operation === operation) { this.saving = false; this.operation = undefined; } }
       } catch (error) {
         this.host.report(error);
         if (this.panel === panel) void webview.postMessage({ type: 'settingsError', requestId: message.requestId, message: messageOf(error) });
       }
     });
-    panel.onDidDispose(() => { receive.dispose(); if (this.panel === panel) this.panel = undefined; });
+    panel.onDidDispose(() => { receive.dispose(); if (this.panel === panel) { this.panel = undefined; this.operation?.controller.abort(); } });
   }
 
   private scopes(): Scope[] {
@@ -78,11 +107,12 @@ export class SettingsPanel implements vscode.Disposable {
     return (scope.field === 'workspaceFolderValue' ? value?.workspaceFolderValue : undefined)
       ?? (scope.field !== 'globalValue' ? value?.workspaceValue : undefined) ?? value?.globalValue ?? value?.defaultValue;
   }
-  private async save(scope: Scope, presets: ReturnType<typeof validatePresets>, titleModel: string, titleEffort: string): Promise<void> {
+  private async save(scope: Scope, presets: ReturnType<typeof validatePresets>, titleModel: string, titleEffort: string, titlePricing?: TokenPrice): Promise<void> {
     const config = vscode.workspace.getConfiguration('codexDeck', scope.uri);
     await config.update('presets', presets, scope.target);
     await config.update('titleModel', titleModel, scope.target);
     await config.update('titleEffort', titleEffort, scope.target);
+    await config.update('titlePricing', titlePricing, scope.target);
   }
   dispose(): void { this.panel?.dispose(); }
 }

@@ -62,7 +62,7 @@ test('answering an async question steers its task without sending composer attac
   manager.attach(task.id, { id: 'draft', label: 'draft.png', input: { type: 'image', url: 'data:image/png;base64,YQ==' } });
   assert.throws(() => manager.answer(manager.adoptThread(thread('other')).id, request.id, { answers: { '0': ['B'] } }));
   await manager.answer(task.id, request.id, { answers: { '0': ['B'] } });
-  assert.deepEqual(gateway.steered, [{ threadId: task.threadId, turnId: 'turn', input: [{ type: 'text', text: 'AかBどちらにしますか？\nB' }] }]);
+  assert.deepEqual(gateway.steered, [{ threadId: task.threadId, turnId: 'turn', input: [{ type: 'text', text: '> AかBどちらにしますか？\n\nB' }] }]);
   assert.equal(gateway.sent.length, 0);
   assert.equal(gateway.answered.length, 0);
   assert.equal(task.attachments.length, 1);
@@ -87,7 +87,7 @@ test('completed questions start a new turn and reject blank or duplicate answers
   response.resolve(decodeTurn({ id: 'next', status: 'inProgress', items: [] }));
   await sending; await duplicate;
   assert.equal(gateway.sent.length, 1);
-  assert.deepEqual(gateway.sent[0]?.input, [{ type: 'text', text: 'AかBどちらにしますか？\n自分の案' }]);
+  assert.deepEqual(gateway.sent[0]?.input, [{ type: 'text', text: '> AかBどちらにしますか？\n\n自分の案' }]);
   assert.equal(task.activeTurnId, 'next');
   assert.equal(task.requests.length, 0);
   manager.dispose();

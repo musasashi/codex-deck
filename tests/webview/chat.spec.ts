@@ -5,14 +5,77 @@ import { join } from 'node:path';
 import { chatHtml } from '../../src/ui/html';
 import { decodeUsage } from '../../src/appServer/client';
 import { TaskManager } from '../../src/core/taskManager';
+import { questionAnswerText } from '../../src/core/questions';
 import { taskReferenceBody } from '../../src/core/taskReferenceText';
+import { selectionReference } from '../../src/core/selectionReference';
 import { FakeGateway, thread } from '../helpers';
 import type { Skill, Task, Usage } from '../../src/core/types';
+import { emptyTaskCost } from '../../src/core/cost';
+import { withHuggingFaceModels } from '../../src/core/huggingFace';
+import { providerModels, validateProviders } from '../../src/core/providers';
+
+test('Responses tasks only offer their own provider and declared efforts, including the provider default', async ({ page }) => {
+  const catalog = providerModels(validateProviders([
+    { id: 'one', name: 'First API', baseUrl: 'http://localhost/v1', models: [{ id: 'model', reasoningEfforts: ['low', 'high'] }, { id: 'plain' }] },
+    { id: 'two', name: 'Other API', baseUrl: 'http://localhost/v1', models: [{ id: 'model' }] },
+  ]));
+  const value = task();
+  value.settings = { model: 'responses:one:model', effort: 'high', mode: 'read-only' };
+  value.modelProvider = 'codex_deck_responses_one';
+  value.cost = emptyTaskCost();
+  await receive(page, { type: 'state', task: value, models: [...models, ...catalog], connected: true });
+  await expect(page.locator('#model option')).toHaveCount(3);
+  await expect(page.locator('#model option[value="responses:one:plain"]')).toHaveCount(1);
+  await expect(page.locator('#model option[value="responses:two:model"]')).toHaveCount(0);
+  await expect(page.locator('#model option[value="catalog-model"]')).toHaveCount(0);
+  await expect(page.locator('#effort option')).toHaveText(['モデルの既定値', 'low', 'high']);
+  await page.locator('#effort').selectOption('default');
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'settings', model: 'responses:one:model', effort: 'default' });
+  await expect(page.locator('#task-cost')).toBeVisible();
+  await expect(page.locator('#task-cost')).toHaveAttribute('aria-label', /外部API利用額/);
+  await expect(page.locator('#usage-gauges')).toBeHidden();
+  await expect(page.locator('#auto-resume')).toBeHidden();
+  value.settings = { model: 'responses:one:plain', mode: 'read-only' };
+  value.effectiveEffort = 'high';
+  await receive(page, { type: 'state', task: value, models: catalog, connected: true });
+  await expect(page.locator('#effort')).toHaveValue('default');
+  await expect(page.locator('#effort')).toBeDisabled();
+  await expect(page.locator('#effort option')).toHaveText(['モデルの既定値']);
+});
+
+test('HF task cost replaces quota gauges, updates live, and stays visible after disconnecting', async ({ page }, info) => {
+  const value = task();
+  value.settings = { model: 'hf:deepseek-ai/DeepSeek-V4-Flash:deepinfra', effort: 'default', mode: 'workspace-write', pricing: { input: 0.1, output: 0.2 } };
+  value.modelProvider = 'codex_deck_huggingface';
+  value.effectiveEffort = 'max';
+  value.cost = { ...emptyTaskCost(), usd: 0.1234 };
+  const usage = decodeUsage({ rateLimits: { limitId: 'codex', primary: { usedPercent: 10, windowDurationMins: 300 }, secondary: { usedPercent: 20, windowDurationMins: 10080 } } });
+  await state(page, value, usage);
+  await expect(page.locator('#task-cost')).toHaveText('$0.1234（概算）');
+  await expect(page.locator('#task-cost')).toHaveAttribute('title', /ユーザー設定の単価/);
+  await expect(page.locator('#usage-gauges')).toBeHidden();
+  await expect(page.locator('#auto-resume')).toBeHidden();
+  await expect(page.locator('#effort')).toHaveValue('default');
+  await expect(page.locator('#effort')).toBeDisabled();
+  await expect(page.locator('#effort option')).toHaveText(['モデルの既定値']);
+  await expect(page.locator('#model')).toHaveValue(value.settings.model!);
+  await expect(page.locator('#model option[value="catalog-model"]')).toHaveCount(0);
+  value.cost.usd = 0.2345;
+  await state(page, value, usage, false);
+  await expect(page.locator('#task-cost')).toHaveText('$0.2345（概算）');
+  await page.setViewportSize({ width: 380, height: 850 });
+  expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
+  await page.screenshot({ path: info.outputPath('hf-cost.png'), fullPage: true });
+  await state(page, task(), usage);
+  await expect(page.locator('#task-cost')).toBeHidden();
+  await expect(page.getByRole('meter', { name: 'Codex 5時間枠の残量' })).toBeVisible();
+  await expect(page.locator('#auto-resume')).toBeVisible();
+});
 
 const theme = `:root{--vscode-editor-background:#181a1e;--vscode-foreground:#e0e3e9;--vscode-descriptionForeground:#a0a7b3;--vscode-widget-border:#353940;--vscode-input-background:#22252b;--vscode-input-foreground:#e0e3e9;--vscode-input-placeholderForeground:#979faa;--vscode-button-background:#b6d8b1;--vscode-button-foreground:#193019;--vscode-button-hoverBackground:#c9e8c5;--vscode-button-secondaryBackground:#353941;--vscode-button-secondaryForeground:#e0e3e9;--vscode-focusBorder:#8eaf8a;--vscode-font-family:system-ui,sans-serif;--vscode-font-size:13px;--vscode-editor-font-family:monospace;--vscode-editor-font-size:12px;--vscode-textCodeBlock-background:#121417;--vscode-textLink-foreground:#a9c6ea;--vscode-progressBar-background:#b6d8b1;--vscode-editorWarning-foreground:#e2bd79;--vscode-errorForeground:#f5a59e;--vscode-inputValidation-warningBackground:#302b20;--vscode-editorWidget-background:#22252b;--vscode-dropdown-background:#22252b;--vscode-dropdown-foreground:#e0e3e9;}`;
 const models = [{ id: 'catalog-model', label: 'Catalog model', efforts: [{ id: 'new-effort', description: 'from server' }, { id: 'high', description: 'high' }], description: '', defaultEffort: 'new-effort', isDefault: true, inputModalities: ['text', 'image'] }];
 function task(): Task { return { id: 'task-1', threadId: 'thread-1', title: 'App Serverとの通信を実装する', cwd: '/workspace/codex-deck', open: true, autoResume: false, claims: [], settings: { mode: 'default' }, status: 'idle', turns: [], requests: [], attachments: [], busy: false, hydrated: true, instructionSources: [] }; }
-async function state(page: Page, value: Task, usage?: Usage, connected = true, presetCount = 1) { await page.evaluate(data => window.dispatchEvent(new MessageEvent('message', { data })), { type: 'state', task: value, models, usage, connected, presetCount, enterBehavior: 'enter' }); }
+async function state(page: Page, value: Task, usage?: Usage, connected = true, presetCount = 1) { await page.evaluate(data => window.dispatchEvent(new MessageEvent('message', { data })), { type: 'state', task: value, models: withHuggingFaceModels(models, [value.settings.model]), usage, connected, presetCount, enterBehavior: 'enter' }); }
 async function messages(page: Page) { return page.evaluate(() => (window as unknown as { sent: Record<string, unknown>[] }).sent); }
 async function receive(page: Page, data: Record<string, unknown>) { await page.evaluate(data => window.dispatchEvent(new MessageEvent('message', { data })), data); }
 async function sendResult(page: Page, type: 'sent' | 'failure') {
@@ -81,6 +144,119 @@ test.beforeEach(async ({ page }) => {
   await expect.poll(async () => (await messages(page)).some(message => message.type === 'ready')).toBe(true);
 });
 
+async function selectionMenuContext(page: Page, selector: string, point?: { x: number; y: number }) {
+  await page.evaluate(() => {
+    // VS Code reads the clicked element's inherited context in the window's
+    // bubbling listener and passes it to the contributed menu command.
+    window.addEventListener('contextmenu', event => {
+      let element = event.target as HTMLElement | null;
+      let context = {};
+      while (element) {
+        element = element.closest<HTMLElement>('[data-vscode-context]');
+        if (!element) break;
+        context = { ...JSON.parse(element.dataset.vscodeContext!), ...context };
+        element = element.parentElement;
+      }
+      document.body.dataset.menuContext = JSON.stringify(context);
+    }, { once: true });
+  });
+  if (point) await page.mouse.click(point.x, point.y, { button: 'right' });
+  else await page.locator(selector).click({ button: 'right' });
+  return JSON.parse((await page.locator('body').getAttribute('data-menu-context'))!) as Record<string, unknown>;
+}
+
+test('dragging an answer exposes a native selection mention and appends a quote followed by a comment', async ({ page }, info) => {
+  const value = task();
+  value.turns = [{ id: 'answer', status: 'completed', items: [{ id: 'reply', kind: 'agentMessage', data: { text: '前の説明。選択した文章です。後の説明。' } }] }];
+  await state(page, value);
+  const prompt = page.locator('#prompt');
+  await prompt.fill('入力中の下書き');
+  await prompt.selectText();
+  const paragraph = page.locator('.assistant .markdown p');
+  const bounds = await paragraph.evaluate(element => {
+    const range = document.createRange();
+    range.setStart(element.firstChild!, 5);
+    range.setEnd(element.firstChild!, 14);
+    const box = range.getBoundingClientRect();
+    return { left: box.left, right: box.right, y: box.top + box.height / 2 };
+  });
+  await page.mouse.move(bounds.left, bounds.y);
+  await page.mouse.down();
+  await page.mouse.move(bounds.right, bounds.y, { steps: 12 });
+  await page.mouse.up();
+  expect(await page.evaluate(() => window.getSelection()?.toString())).toBe('選択した文章です。');
+  const context = await selectionMenuContext(page, '.assistant .markdown p', { x: (bounds.left + bounds.right) / 2, y: bounds.y });
+  expect(context).toEqual({ codexDeckHasSelection: true, codexDeckTaskId: value.id, codexDeckSelectionText: '選択した文章です。' });
+  await receive(page, { type: 'insertReference', text: selectionReference(context.codexDeckSelectionText as string, `会話「${value.title}」`) });
+  const quoted = `入力中の下書き\n\n> 参照元: 会話「${value.title}」\n>\n> 選択した文章です。\n\n`;
+  await expect(prompt).toHaveValue(quoted);
+  await expect(prompt).toBeFocused();
+  expect(await prompt.evaluate(element => [(element as HTMLTextAreaElement).selectionStart, (element as HTMLTextAreaElement).selectionEnd])).toEqual([quoted.length, quoted.length]);
+  expect((await messages(page)).some(message => message.type === 'send')).toBe(false);
+  await expect(page.locator('#attachments')).toBeHidden();
+  await page.keyboard.insertText('この部分を詳しく説明してください。');
+  const draft = quoted + 'この部分を詳しく説明してください。';
+  await expect.poll(() => page.evaluate(() => JSON.parse(sessionStorage.getItem('webviewState')!).draft)).toBe(draft);
+  await page.reload();
+  await state(page, value);
+  await expect(prompt).toHaveValue(draft);
+  await prompt.press('Enter');
+  expect((await messages(page)).findLast(message => message.type === 'send')).toMatchObject({ text: draft, attachmentIds: [] });
+  const user = page.locator('.pending-send .message.user');
+  await expect(user.locator('.user-quote')).toContainText('選択した文章です。');
+  await expect(user.locator('.user-quote')).not.toContainText('この部分を詳しく');
+  await expect(user.locator('.user-text').last()).toHaveText('この部分を詳しく説明してください。');
+  await page.screenshot({ path: info.outputPath('selection-mention.png'), fullPage: true });
+});
+
+test('selection mentions preserve multiline code during streaming and hide outside selected conversation text', async ({ page }) => {
+  const value = task();
+  value.activeTurnId = 'streaming'; value.status = 'running';
+  value.turns = [{ id: 'streaming', status: 'inProgress', items: [{ id: 'reply', kind: 'agentMessage', data: { text: '```ts\nconst x = 1;\n  run(x);\n```' } }] }];
+  await state(page, value);
+  expect(await selectionMenuContext(page, '.assistant .markdown code')).toEqual({ codexDeckHasSelection: false });
+  await page.locator('.assistant .markdown code').evaluate(element => {
+    const text = element.firstChild!;
+    window.getSelection()!.setBaseAndExtent(text, text.textContent!.length, text, 0);
+  });
+  const context = await selectionMenuContext(page, '.assistant .markdown code');
+  expect(context.codexDeckSelectionText).toBe('const x = 1;\n  run(x);');
+  value.turns[0]!.items[0]!.data.text += '\n\n追加された説明';
+  value.turns[0]!.status = 'completed'; value.activeTurnId = undefined; value.status = 'idle';
+  value.unreadTurnId = 'streaming';
+  await state(page, value);
+  expect(await page.evaluate(() => window.getSelection()?.toString())).toBe(context.codexDeckSelectionText);
+  await expect(page.locator('.assistant .markdown')).not.toContainText('追加された説明');
+  expect((await messages(page)).filter(message => message.type === 'read')).toEqual([]);
+  await receive(page, { type: 'insertReference', text: selectionReference(context.codexDeckSelectionText as string, `会話「${value.title}」`) });
+  await expect(page.locator('.assistant .markdown')).toContainText('追加された説明');
+  expect((await messages(page)).filter(message => message.type === 'read')).toEqual([{ type: 'read', turnId: 'streaming' }]);
+  await expect(page.locator('#prompt')).toHaveValue(`> 参照元: 会話「${value.title}」\n>\n> const x = 1;\n>   run(x);\n\n`);
+  await page.locator('#prompt').selectText();
+  expect(await selectionMenuContext(page, '#prompt')).toEqual({});
+  await page.evaluate(() => window.getSelection()?.removeAllRanges());
+  expect(await selectionMenuContext(page, '.assistant .markdown code')).toEqual({ codexDeckHasSelection: false });
+});
+
+test('editor references can be added repeatedly while preserving an existing draft and exact selected text', async ({ page }) => {
+  await state(page, task());
+  const prompt = page.locator('#prompt');
+  await prompt.fill('既存のコメント\n');
+  await receive(page, { type: 'insertReference', text: selectionReference('  <script>選択文</script>\n\n> 引用内の引用', '/project/文書.md:2:3-4:8') });
+  await page.keyboard.insertText('最初のコメント');
+  await receive(page, { type: 'insertReference', text: selectionReference('次の選択文', '/project/文書.md:8:1-8:6') });
+  const expected = '既存のコメント\n\n> 参照元: /project/文書.md:2:3-4:8\n>\n>   <script>選択文</script>\n> \n> > 引用内の引用\n\n最初のコメント\n\n> 参照元: /project/文書.md:8:1-8:6\n>\n> 次の選択文\n\n';
+  await expect(prompt).toHaveValue(expected);
+  await expect(prompt).toBeFocused();
+  await page.keyboard.insertText('次のコメント');
+  await prompt.press('Enter');
+  expect((await messages(page)).findLast(message => message.type === 'send')?.text).toBe(expected + '次のコメント');
+  const user = page.locator('.pending-send .message.user');
+  await expect(user.locator('.user-quote')).toHaveCount(2);
+  await expect(user.locator('.user-quote').first()).toContainText('<script>選択文</script>');
+  await expect(user.locator('script')).toHaveCount(0);
+});
+
 test('empty chat shows only registered skills, dynamic settings, auto-resume toggle and keyboard input', async ({ page }, info) => {
   const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
   await receive(page, { type: 'state', task: task(), models, connected: true });
@@ -94,7 +270,7 @@ test('empty chat shows only registered skills, dynamic settings, auto-resume tog
   const prompt = page.getByLabel('メッセージ', { exact: true });
   const send = page.getByRole('button', { name: '送信', exact: true });
   await send.hover();
-  await expect(send).toHaveAttribute('title', '送信 (Ctrl+Enter / Cmd+Enter)');
+  await expect(send).toHaveAttribute('title', '送信 (Ctrl+Enter)');
   await prompt.fill('通信層を実装してください。');
   await prompt.press('Enter');
   await expect(prompt).toHaveValue('通信層を実装してください。\n');
@@ -680,7 +856,7 @@ test('slash commands filter locally, use keyboard selection, and skills/mention 
   await prompt.pressSequentially('m');
   await expect(page.locator('#completion-list [role=option]')).toHaveCount(3);
   await prompt.press('Backspace');
-  await expect(page.locator('#completion-list [role=option]')).toHaveCount(20);
+  await expect(page.locator('#completion-list [role=option]')).toHaveCount(21);
   await prompt.press('ArrowDown'); await prompt.press('Tab');
   await expect(prompt).toHaveValue('/permissions ');
   expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(0);
@@ -697,6 +873,73 @@ test('slash commands filter locally, use keyboard selection, and skills/mention 
   await expect(prompt).toHaveValue('@');
   await fileRequest(page, '');
   expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(1);
+});
+
+for (const enterBehavior of ['modEnter', 'enter']) test(`Tab-completed slash commands execute on Enter with ${enterBehavior} settings`, async ({ page }) => {
+  const value = task();
+  value.settings.collaborationMode = 'plan';
+  const update = () => receive(page, { type: 'state', task: value, models, connected: true, enterBehavior });
+  await update(); await catalog(page);
+  const prompt = page.getByLabel('メッセージ', { exact: true });
+  await expect(page.locator('#plan-mode')).toBeVisible();
+  for (const [index, name] of ['plan', 'permissions'].entries()) {
+    await prompt.fill(`/${name}`);
+    await prompt.press('Tab');
+    await expect(prompt).toHaveValue(`/${name} `);
+    await expect(page.locator('#completions')).toBeHidden();
+    expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(index);
+    await prompt.press('Enter');
+    expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(index + 1);
+    expect((await messages(page)).at(-1)).toMatchObject({ type: 'send', text: `/${name} ` });
+    value.settings.collaborationMode = 'default';
+    await update(); await sendResult(page, 'sent');
+    await expect(prompt).toHaveValue('');
+    await expect(page.locator('#plan-mode')).toBeHidden();
+  }
+});
+
+test('Tab completion keeps Shift+Enter as a newline and command arguments use the configured send key', async ({ page }) => {
+  await receive(page, { type: 'state', task: task(), models, connected: true, enterBehavior: 'modEnter' });
+  await catalog(page);
+  const prompt = page.getByLabel('メッセージ', { exact: true });
+  await prompt.fill('/plan'); await prompt.press('Tab'); await prompt.press('Shift+Enter');
+  await expect(prompt).toHaveValue('/plan \n');
+  expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(0);
+  for (const text of ['通常のメッセージ', '/plan 計画してください', '/unknown ']) {
+    await prompt.fill(text); await prompt.press('Enter');
+    await expect(prompt).toHaveValue(`${text}\n`);
+    expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(0);
+  }
+  await prompt.fill('/plan 計画してください'); await prompt.press('Control+Enter');
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'send', text: '/plan 計画してください' });
+});
+
+test('plan commands complete and submit with attachments while the current mode stays visible', async ({ page }, info) => {
+  const value = task();
+  await state(page, value); await catalog(page);
+  const prompt = page.getByLabel('メッセージ', { exact: true });
+  await expect(page.locator('#plan-mode')).toBeHidden();
+  await prompt.fill('/pl');
+  await expect(page.getByRole('option', { name: '/plan プランモードを切り替え・続けて指示を入力' })).toBeVisible();
+  await prompt.press('Enter');
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'send', text: '/plan ' });
+  value.settings.collaborationMode = 'plan';
+  await state(page, value); await sendResult(page, 'sent');
+  await expect(prompt).toHaveValue('');
+  await expect(page.locator('#plan-mode')).toHaveText('プランモード · /plan で通常モードに戻る');
+  await pasteClipboardImages(page); await acceptImages(page, value, await imageRequest(page));
+  await prompt.fill('/plan $registered-one この画像の画面を設計してください');
+  await prompt.press('Enter');
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'send', text: '/plan $registered-one この画像の画面を設計してください', attachmentIds: value.attachments.map(attachment => attachment.id) });
+  await sendResult(page, 'failure');
+  await expect(prompt).toHaveValue('/plan $registered-one この画像の画面を設計してください');
+  await expect(page.locator('#plan-mode')).toBeVisible();
+  await page.setViewportSize({ width: 380, height: 850 });
+  expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
+  await page.screenshot({ path: info.outputPath('plan-mode.png'), fullPage: true });
+  value.settings.collaborationMode = 'default';
+  await state(page, value);
+  await expect(page.locator('#plan-mode')).toBeHidden();
 });
 
 test('file lookup inserts a quoted path on Enter without submitting, and ignores stale responses after edits or Escape', async ({ page }, info) => {
@@ -1083,9 +1326,20 @@ test('async message questions show selectable cards after completion and submit 
   await receive(page, { type: 'failure', requestId: 'message:question' });
   await expect(send).toBeEnabled();
   await expect(page.getByRole('radio', { name: 'B', exact: true })).toBeChecked();
+  await send.click();
+  const text = questionAnswerText(value.requests[0]!, { answers: { '0': ['B'] } });
   value.requests = []; value.status = 'running'; value.activeTurnId = 'next';
+  value.turns = [{ id: 'next', status: 'inProgress', items: [{ id: 'answer', kind: 'userMessage', data: { content: [{ type: 'text', text }] } }] }];
   await state(page, value);
   await expect(page.locator('#requests')).toBeHidden();
+  const answer = page.locator('.message.user');
+  await expect(answer.locator('blockquote')).toHaveText('AかBどちらにしますか？');
+  await expect(answer.locator('blockquote')).toHaveCSS('border-left-style', 'solid');
+  await expect(answer.locator('.user-text')).toHaveText('B');
+  await page.screenshot({ path: info.outputPath('question-answer.png') });
+  await page.reload(); await state(page, value);
+  await expect(answer.locator('blockquote')).toHaveText('AかBどちらにしますか？');
+  await expect(answer.locator('.user-text')).toHaveText('B');
 });
 
 test('multiple questions require answers and freely switch between options and text', async ({ page }) => {

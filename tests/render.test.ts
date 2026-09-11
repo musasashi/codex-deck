@@ -16,6 +16,12 @@ test('tool output, automatic labels and native code fences render without raw HT
   assert.match(renderMarkdown('```ts\nconst value = 1;\n```'), /<pre><code class="language-ts">/);
   assert.ok(renderItem({ id: 'i', kind: 'userMessage', data: { content: [{ type: 'text', text: '<script>bad()</script>' }] } }, true).includes('自動送信'));
   assert.ok(!renderItem({ id: 'i', kind: 'commandExecution', data: { command: '<script>', aggregatedOutput: '<script>' } }, false).includes('<script>'));
+  const html = renderItem({ id: 'answer', kind: 'userMessage', data: { content: [{ type: 'text', text: '> <script>質問</script>\n> 2行目\n> \n> 補足\n\n**回答**\n\n> 次の質問\n\n```text\n> 回答内のコード\n```' }] } }, false);
+  assert.match(html, /<blockquote class="user-quote">&lt;script&gt;質問&lt;\/script&gt;\n2行目\n\n補足<\/blockquote>/);
+  assert.match(html, /<div class="user-text">\*\*回答\*\*<\/div>/);
+  assert.match(html, /<blockquote class="user-quote">次の質問<\/blockquote>/);
+  assert.match(html, /<div class="user-text">```text\n&gt; 回答内のコード\n```<\/div>/);
+  assert.doesNotMatch(html, /<script>|<strong>|<pre>/);
 });
 
 test('automatic references render outside the original user bubble and keep literal user markers visible', () => {

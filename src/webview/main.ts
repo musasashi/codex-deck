@@ -1,9 +1,12 @@
 import { array, object, string, statusLabel, isTaskRunning, type Attachment, type Model, type Task, type Usage } from '../core/types';
 import { escapeHtml, renderAttachments, renderItem, renderTranscript } from './render';
 import { IMAGE_FORMAT_ERROR, IMAGE_TYPES, MAX_ATTACHMENT_BYTES } from '../core/attachments';
-import { parseSlashCommand, permissionOptions } from '../core/composer';
-import { latestModel } from '../core/settings';
+import { parseSlashCommand, permissionOptions, slashCommands } from '../core/composer';
+import { latestModel, presetEffortOptions, selectedModel } from '../core/settings';
+import { isExternalTask, sameTaskProvider } from '../core/providers';
+import { costLabel } from '../core/cost';
 import { Composer } from './composer';
+import { bindSelectionContext, selectedTranscriptText } from './selection';
 import { UsageGauges } from './usage';
 import { Requests } from './requests';
 import { pendingSubmission, reconcilePendingSends, submissionContent, type PendingSend, type Submission } from './submissions';
@@ -31,6 +34,7 @@ let draftTimer: ReturnType<typeof setTimeout> | undefined;
 let initialFocus = true;
 const prompt = $<HTMLTextAreaElement>('prompt');
 const saved = object(vscode.getState());
+let dismissedNotice = string(saved.dismissedNotice);
 prompt.value = string(saved.draft);
 for (const savedSend of array(saved.pendingSends).map(object)) {
   if (typeof savedSend.id !== 'string' || typeof savedSend.text !== 'string') continue;
@@ -43,9 +47,17 @@ for (const savedSend of array(saved.pendingSends).map(object)) {
 const completion = new Composer(prompt, $('completions'), $('skills'), post, saveDraft, renderPermissions, array(saved.skillPaths).filter((value): value is string => typeof value === 'string'));
 const usageGauges = new UsageGauges($('usage-gauges'));
 const requests = new Requests($('requests'), post);
+bindSelectionContext($('transcript'), () => task?.id);
+let selectingTranscript = false;
+document.addEventListener('selectionchange', () => {
+  const selected = !!selectedTranscriptText($('transcript'));
+  const released = selectingTranscript && !selected;
+  selectingTranscript = selected;
+  if (released) render();
+});
 
 function saveDraft(): void {
-  if (task) vscode.setState({ taskId: task.id, draft: prompt.value, skillPaths: completion.skillPaths(), pendingSends });
+  if (task) vscode.setState({ taskId: task.id, draft: prompt.value, skillPaths: completion.skillPaths(), pendingSends, dismissedNotice });
 }
 function updateSendButton(): void {
   $<HTMLButtonElement>('send').disabled = !!sending || !!task?.busy || pendingPastes.size > 0;
@@ -140,20 +152,32 @@ function render(): void {
   pendingSends = reconcilePendingSends(pendingSends, task);
   completion.setContext(task, connected, pendingSends.length > 0);
   const busy = !!sending || task.busy;
-  usageGauges.render(connected ? usage : undefined);
+  const external = isExternalTask(task);
+  usageGauges.render(connected && !external ? usage : undefined);
+  const cost = costLabel(task.cost);
+  $('task-cost').hidden = !external;
+  $('task-cost').textContent = cost.label;
+  $('task-cost').title = cost.detail;
+  $('task-cost').setAttribute('aria-label', `このタスクの外部API利用額: ${cost.label}`);
   $('status').textContent = busy ? '送信中' : statusLabel[task.status];
   $('status-dot').className = `dot ${task.status}`;
   $<HTMLInputElement>('auto-resume').checked = task.autoResume;
+  $<HTMLInputElement>('auto-resume').disabled = external;
+  $<HTMLInputElement>('auto-resume').closest<HTMLElement>('label')!.hidden = external;
   const notice = $('notice');
   const waiting = task.status === 'waiting';
-  notice.textContent = waiting ? `使用量の回復を待っています。${task.recoveryAt ? ` 回復予定: ${new Date(task.recoveryAt).toLocaleString()}` : ''}` : task.error ?? (!connected ? 'App Serverに未接続です。メニューから再接続できます。' : '');
-  notice.hidden = !notice.textContent;
+  const noticeText = waiting ? `使用量の回復を待っています。${task.recoveryAt ? ` 回復予定: ${new Date(task.recoveryAt).toLocaleString()}` : ''}` : task.error ?? (!connected ? 'App Serverに未接続です。メニューから再接続できます。' : '');
+  if (waiting || dismissedNotice !== JSON.stringify([task.id, noticeText])) dismissedNotice = '';
+  $('notice-text').textContent = noticeText;
+  notice.hidden = !noticeText || !!dismissedNotice;
   notice.className = waiting ? 'waiting-notice' : 'error-notice';
+  $('dismiss-notice').hidden = waiting;
   const conversation = $('conversation');
   const atBottom = conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight < 80;
   const transcript = $('transcript');
+  const selected = !!selectedTranscriptText(transcript);
   const html = renderTranscript(task) + pendingSends.map(renderPendingSend).join('');
-  if (transcriptHtml !== html) {
+  if (transcriptHtml !== html && !selected) {
     const detailStates = new Map([...transcript.querySelectorAll<HTMLDetailsElement>('details[data-item]')].map(details => [
       detailKey(details), { open: details.open, status: details.closest<HTMLElement>('.turn')?.dataset.status },
     ]));
@@ -173,8 +197,9 @@ function render(): void {
     renderCopyFeedback();
   }
   const plan = task.plan;
+  $('plan-mode').hidden = task.settings.collaborationMode !== 'plan';
   $('plan').innerHTML = plan ? `<details class="plan"><summary>作業計画</summary><p>${escapeHtml(plan.explanation)}</p><ol>${plan.steps.map(step => `<li>${step.status === 'completed' ? '✓' : step.status === 'inProgress' ? '◉' : '○'} ${escapeHtml(step.step)}</li>`).join('')}</ol></details>` : '';
-  if (atBottom) conversation.scrollTop = conversation.scrollHeight;
+  if (atBottom && !selected) conversation.scrollTop = conversation.scrollHeight;
   requests.render(task.requests, busy, connected);
   updateAttachments();
   const running = isTaskRunning(task);
@@ -182,25 +207,28 @@ function render(): void {
   const send = $<HTMLButtonElement>('send');
   updateSendButton();
   send.textContent = running ? '追加入力' : '送信';
-  send.title = `${send.textContent} (${enterBehavior === 'modEnter' ? 'Ctrl+Enter / Cmd+Enter' : 'Enter'})`;
+  send.title = `${send.textContent} (${enterBehavior === 'modEnter' ? 'Ctrl+Enter' : 'Enter'})`;
   const latest = latestModel(models);
   options($<HTMLSelectElement>('model'), [
     ...(task.settings.model === 'latest' ? [{ id: 'latest', label: latest ? `最新モデル (${latest.label})` : '最新モデル' }] : []),
     { id: '', label: task.effectiveModel || 'モデル' },
-    ...models.map(model => ({ id: model.id, label: model.label })),
+    ...models.filter(model => !task!.threadId || sameTaskProvider(task!, model.id)).map(model => ({ id: model.id, label: model.label })),
   ], task.settings.model ?? '');
-  const model = task.settings.model === 'latest' ? latest : models.find(model => model.id === (task!.settings.model ?? task!.effectiveModel)) ?? models.find(model => model.isDefault);
-  options($<HTMLSelectElement>('effort'), [
+  const model = selectedModel(models, task.settings.model ?? task.effectiveModel ?? 'latest');
+  options($<HTMLSelectElement>('effort'), external ? presetEffortOptions(model) : [
     { id: '', label: task.effectiveEffort || '推論の強さ' },
     ...(task.settings.effort === 'default' ? [{ id: 'default', label: model?.defaultEffort || 'モデルの既定値' }] : []),
     ...(model?.efforts ?? []).map(effort => ({ id: effort.id, label: effort.id })),
-  ], task.settings.effort ?? '');
+  ], external ? task.settings.effort ?? 'default' : task.settings.effort ?? '');
   renderPermissions();
   for (const id of ['model', 'effort', 'mode']) $<HTMLSelectElement>(id).disabled = running || busy;
+  if (external && !model?.efforts.length) $<HTMLSelectElement>('effort').disabled = true;
   const cyclePreset = $<HTMLButtonElement>('cycle-preset');
   cyclePreset.disabled = running || busy || !presetCount || !models.length;
   cyclePreset.title = !presetCount ? '設定からプリセットを追加してください' : !models.length ? 'モデル一覧を読み込み中…' : '次のプリセットに切り替え';
   saveDraft();
+  const last = task.turns.at(-1);
+  if (transcriptHtml === html && last?.status === 'completed' && last.id === task.unreadTurnId) post('read', { turnId: last.id });
 }
 window.addEventListener('message', event => {
   const message = object(event.data);
@@ -214,8 +242,6 @@ window.addEventListener('message', event => {
     render();
     if (initialFocus && !task.threadId) prompt.focus();
     initialFocus = false;
-    const last = task.turns.at(-1);
-    if (last?.status === 'completed' && last.id === task.unreadTurnId) post('read', { turnId: last.id });
   } else if (message.type === 'messageCopied') {
     copiedMessage = JSON.stringify([message.turnId, message.itemId, 'copy']);
     clearTimeout(copyTimer);
@@ -270,7 +296,9 @@ $('composer').addEventListener('submit', event => {
 prompt.addEventListener('keydown', event => {
   if (completion.keydown(event)) return;
   if (event.key !== 'Enter' || event.isComposing || event.shiftKey || event.altKey) return;
-  if (enterBehavior === 'modEnter' && !event.ctrlKey && !event.metaKey) return;
+  const command = parseSlashCommand(prompt.value);
+  const bareCommand = command && !command.args && slashCommands.some(item => item.name === command.name);
+  if (enterBehavior === 'modEnter' && !event.ctrlKey && !event.metaKey && !bareCommand) return;
   event.preventDefault(); $<HTMLFormElement>('composer').requestSubmit();
 });
 prompt.addEventListener('paste', event => {
@@ -282,6 +310,13 @@ prompt.addEventListener('paste', event => {
   void pasteImages(files);
 });
 $('auto-resume').addEventListener('change', () => post('autoResume', { enabled: $<HTMLInputElement>('auto-resume').checked }));
+$('dismiss-notice').addEventListener('click', () => {
+  if (!task) return;
+  dismissedNotice = JSON.stringify([task.id, $('notice-text').textContent]);
+  $('notice').hidden = true;
+  saveDraft();
+  prompt.focus();
+});
 for (const [id, type] of [['menu', 'menu'], ['attach', 'attach'], ['stop', 'stop']]) $(id!).addEventListener('click', () => post(type!));
 $('cycle-preset').addEventListener('click', () => post('cyclePreset'));
 for (const id of ['model', 'effort', 'mode']) $(id).addEventListener('change', () => post('settings', {

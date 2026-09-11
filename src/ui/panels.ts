@@ -2,7 +2,8 @@ import * as vscode from 'vscode';
 import { randomBytes } from 'node:crypto';
 import { object, string, messageOf, statusLabel, type JsonObject, type Model, type Task, type TaskStatus } from '../core/types';
 import { TaskManager } from '../core/taskManager';
-import { readPresets } from '../core/settings';
+import { readPresets, taskPresets } from '../core/settings';
+import { withHuggingFaceModels } from '../core/huggingFace';
 import { chatHtml } from './html';
 
 function taskIcon(uri: vscode.Uri, status: TaskStatus): { light: vscode.Uri; dark: vscode.Uri } {
@@ -21,6 +22,8 @@ export interface PanelHost {
 
 export class TaskPanels implements vscode.WebviewPanelSerializer, vscode.Disposable {
   private panels = new Map<string, vscode.WebviewPanel>();
+  private ready = new Set<string>();
+  private pendingMessages = new Map<string, JsonObject[]>();
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
   private subscriptions: (() => void)[];
   private stopping = false;
@@ -66,7 +69,13 @@ export class TaskPanels implements vscode.WebviewPanelSerializer, vscode.Disposa
     const receive = webview.onDidReceiveMessage(async (value: unknown) => {
       const message = object(value);
       try {
-        if (message.type === 'ready') { this.post(task.id); return; }
+        if (message.type === 'ready') {
+          this.ready.add(task.id);
+          this.post(task.id);
+          for (const pending of this.pendingMessages.get(task.id) ?? []) void webview.postMessage(pending);
+          this.pendingMessages.delete(task.id);
+          return;
+        }
         if (message.type === 'read') {
           if (panel.active && vscode.window.state.focused) this.manager.markRead(task.id, string(message.turnId));
           return;
@@ -93,6 +102,8 @@ export class TaskPanels implements vscode.WebviewPanelSerializer, vscode.Disposa
       viewState.dispose();
       if (this.panels.get(task.id) !== panel) return;
       this.panels.delete(task.id);
+      this.ready.delete(task.id);
+      this.pendingMessages.delete(task.id);
       const timer = this.timers.get(task.id);
       if (timer) clearTimeout(timer);
       this.timers.delete(task.id);
@@ -104,7 +115,12 @@ export class TaskPanels implements vscode.WebviewPanelSerializer, vscode.Disposa
     if (!this.panels.has(id) || this.timers.has(id)) return;
     this.timers.set(id, setTimeout(() => { this.timers.delete(id); this.post(id); }, 75));
   }
-  message(id: string, message: JsonObject): void { void this.panels.get(id)?.webview.postMessage(message); }
+  message(id: string, message: JsonObject): void {
+    const panel = this.panels.get(id);
+    if (!panel) return;
+    if (this.ready.has(id)) void panel.webview.postMessage(message);
+    else this.pendingMessages.set(id, [...(this.pendingMessages.get(id) ?? []), message]);
+  }
   broadcast(message: JsonObject): void { for (const id of this.panels.keys()) this.message(id, message); }
   private post(id: string): void {
     const panel = this.panels.get(id);
@@ -113,8 +129,9 @@ export class TaskPanels implements vscode.WebviewPanelSerializer, vscode.Disposa
     panel.title = task.title;
     panel.iconPath = taskIcon(this.uri, task.status);
     const config = vscode.workspace.getConfiguration('codexDeck', vscode.Uri.file(task.cwd));
-    void panel.webview.postMessage({ type: 'state', task, models: this.host.models, connected: this.manager.gateway.connected,
-      usage: this.manager.usage, presetCount: readPresets(config.get('presets')).length, enterBehavior: config.get<string>('composerEnterBehavior', 'modEnter') });
+    const models = withHuggingFaceModels(this.host.models, [...readPresets(config.get('presets')).map(preset => preset.model), task.settings.model, task.effectiveModel]);
+    void panel.webview.postMessage({ type: 'state', task, models, connected: this.manager.gateway.connected,
+      usage: this.manager.usage, presetCount: taskPresets(task, readPresets(config.get('presets'))).length, enterBehavior: config.get<string>('composerEnterBehavior', 'modEnter') });
   }
   private html(webview: vscode.Webview): string {
     const nonce = randomBytes(18).toString('base64');

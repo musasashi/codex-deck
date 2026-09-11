@@ -40,5 +40,8 @@ export function questionAnswers(request: PendingRequest, answer: RequestAnswer):
 
 export function questionAnswerText(request: PendingRequest, answer: RequestAnswer): string {
   const answers = questionAnswers(request, answer);
-  return (request.questions ?? []).map(question => `${question.question}\n${answers[question.id]!.join('\n')}`).join('\n\n');
+  return (request.questions ?? []).map(question => {
+    const quote = question.question.split(/\r?\n/).map(line => `> ${line}`).join('\n');
+    return `${quote}\n\n${answers[question.id]!.join('\n')}`;
+  }).join('\n\n');
 }

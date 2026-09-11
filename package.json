@@ -2,8 +2,8 @@
   "name": "codex-deck",
   "displayName": "Codex Deck",
   "icon": "media/icon.png",
-  "description": "Codexタスクをエディタタブで並行実行するVS Code拡張機能",
-  "version": "0.1.0",
+  "description": "WSL内のCodexタスクをエディタタブで並行実行するVS Code拡張機能",
+  "version": "0.2.0",
   "publisher": "codex-deck",
   "private": true,
   "engines": {
@@ -88,8 +88,8 @@
         "category": "Codex Deck"
       },
       {
-        "command": "codexDeck.addSelection",
-        "title": "選択範囲をタスクに追加",
+        "command": "codexDeck.mentionSelection",
+        "title": "Codex-Deckで言及",
         "category": "Codex Deck"
       },
       {
@@ -248,8 +248,15 @@
       ],
       "editor/context": [
         {
-          "command": "codexDeck.addSelection",
+          "command": "codexDeck.mentionSelection",
           "when": "editorHasSelection",
+          "group": "codexDeck"
+        }
+      ],
+      "webview/context": [
+        {
+          "command": "codexDeck.mentionSelection",
+          "when": "webviewId == codexDeck.task && codexDeckHasSelection",
           "group": "codexDeck"
         }
       ],
@@ -274,7 +281,7 @@
           "type": "string",
           "default": "codex",
           "scope": "machine",
-          "description": "公式Codex CLIの実行ファイル。WSL・SSHでは接続先にインストールしてください。"
+          "description": "WSL内の公式Codex CLIの実行ファイル。codexまたはWSL内のパスを指定してください。"
         },
         "codexDeck.presets": {
           "type": "array",
@@ -301,13 +308,34 @@
                 "type": "string",
                 "minLength": 1,
                 "default": "latest",
-                "markdownDescription": "モデルID。`latest`は推奨モデルを自動選択します。"
+                "markdownDescription": "モデルID。`latest`は推奨モデルを自動選択します。HF経由は`hf:組織/モデル:プロバイダー`、登録したResponses APIは`responses:接続先ID:モデルID`を指定します。"
               },
               "effort": {
                 "type": "string",
                 "minLength": 1,
                 "default": "high",
                 "markdownDescription": "推論強度。`default`はモデルの既定値を使用します。"
+              },
+              "pricing": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "input",
+                  "output"
+                ],
+                "description": "外部APIの入力・出力単価（USD／100万トークン・任意）。タスクの利用額の概算に使用します。",
+                "properties": {
+                  "input": {
+                    "type": "number",
+                    "minimum": 0,
+                    "description": "入力単価（USD／100万トークン）"
+                  },
+                  "output": {
+                    "type": "number",
+                    "minimum": 0,
+                    "description": "出力単価（USD／100万トークン）"
+                  }
+                }
               },
               "mode": {
                 "type": "string",
@@ -337,12 +365,88 @@
             }
           }
         },
+        "codexDeck.providers": {
+          "type": "array",
+          "default": [],
+          "scope": "machine",
+          "description": "Responses API接続先。ユーザー設定に保存し、APIキーは環境変数で指定します。",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "name",
+              "baseUrl",
+              "models"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_-]{0,47}$",
+                "description": "接続先を識別する固定ID"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "description": "表示名"
+              },
+              "baseUrl": {
+                "type": "string",
+                "description": "Responses APIのBase URL（/responsesの前まで）"
+              },
+              "apiKeyEnv": {
+                "type": "string",
+                "default": "",
+                "description": "APIキーの環境変数名。認証不要なら空欄"
+              },
+              "models": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256,
+                      "description": "APIのモデルID"
+                    },
+                    "images": {
+                      "type": "boolean",
+                      "default": false,
+                      "description": "画像入力"
+                    },
+                    "reasoningEfforts": {
+                      "type": "array",
+                      "default": [],
+                      "uniqueItems": true,
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "対応する推論強度。未指定なら提供元の既定値"
+                    },
+                    "structuredOutput": {
+                      "type": "boolean",
+                      "default": false,
+                      "description": "JSON Schemaによる構造化出力"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
         "codexDeck.titleModel": {
           "type": "string",
           "default": "latest",
           "minLength": 1,
           "scope": "resource",
-          "markdownDescription": "タスク名の要約に使うモデルID。`latest`は最新の推奨モデルを自動選択します。コマンド「Codex Deck: 設定」の「タスク名」から選択できます。最初の依頼を送信した時点で要約します。分岐先では引き継いだ会話も参考にします。"
+          "markdownDescription": "タスク名の要約に使うモデルID。`latest`は最新の推奨モデル、外部APIタスクではそのタスクのモデルを使います。コマンド「Codex Deck: 設定」の「タスク名」から選択できます。"
         },
         "codexDeck.titleEffort": {
           "type": "string",
@@ -351,6 +455,26 @@
           "scope": "resource",
           "markdownDescription": "タスク名の要約に使う推論強度。`lowest`は選択したモデルで利用できる最も低い強度、`default`はモデルの既定値を使います。コマンド「Codex Deck: 設定」の「タスク名」からモデルに対応する強度を選択できます。"
         },
+        "codexDeck.titlePricing": {
+          "type": "object",
+          "scope": "resource",
+          "additionalProperties": false,
+          "required": [
+            "input",
+            "output"
+          ],
+          "description": "要約用外部APIモデルの単価（USD／100万トークン・任意）。要約モデルがlatestの場合はタスクの単価を使用します。",
+          "properties": {
+            "input": {
+              "type": "number",
+              "minimum": 0
+            },
+            "output": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        },
         "codexDeck.composerEnterBehavior": {
           "type": "string",
           "enum": [
@@ -358,7 +482,7 @@
             "modEnter"
           ],
           "default": "modEnter",
-          "description": "メッセージ送信のキー操作。enterはEnter、modEnterはCtrl+Enter／Cmd+Enterで送信します。Shift+Enterは改行します。"
+          "description": "メッセージ送信のキー操作。enterはEnter、modEnterはCtrl+Enterで送信します。Shift+Enterは改行します。"
         }
       }
     }
@@ -369,6 +493,8 @@
     "check": "tsc --noEmit",
     "test": "node --import tsx --test --test-isolation=none tests/*.test.ts",
     "test:smoke": "node --import tsx scripts/smoke.ts",
+    "test:hf": "node --import tsx scripts/testHuggingFace.ts",
+    "test:responses": "node --import tsx scripts/testResponses.ts",
     "vscode:prepublish": "npm run check && npm run build",
     "package": "vsce package --allow-missing-repository --no-dependencies --no-rewrite-relative-links --skip-license",
     "test:ui": "npm run build && playwright test",

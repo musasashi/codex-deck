@@ -11,6 +11,22 @@ markdown.use({ renderer: {
   image({ href, text }) { return `<button class="inline-link" data-link="${escapeHtml(href)}">画像: ${escapeHtml(text || '開く')}</button>`; },
 } });
 export function renderMarkdown(text: string): string { return markdown.parse(text, { async: false }); }
+function renderUserText(text: string): string {
+  const tokens = markdown.lexer(text);
+  if (!tokens.some(token => token.type === 'blockquote')) return `<div class="user-text">${escapeHtml(text)}</div>`;
+  const blocks: { quote: boolean; text: string }[] = [];
+  for (const token of tokens) {
+    const quote = token.type === 'blockquote';
+    const previous = blocks.at(-1);
+    if (!quote && previous && !previous.quote) previous.text += token.raw;
+    else blocks.push({ quote, text: quote ? token.text : token.raw });
+  }
+  return blocks.map(block => {
+    const content = escapeHtml(block.text.replace(/^\n+|\n+$/g, ''));
+    if (!content) return '';
+    return block.quote ? `<blockquote class="user-quote">${content}</blockquote>` : `<div class="user-text">${content}</div>`;
+  }).join('');
+}
 export function renderAttachments(attachments: Attachment[]): string {
   return attachments.map(({ id, label, input }) => {
     const preview = input.type === 'image' && isImageDataUrl(input.url);
@@ -46,7 +62,7 @@ export function renderItem(item: Item, automatic: boolean, options?: MessageOpti
         const reference = index > 0 && input.type === 'text' ? taskReferenceBody(string(input.text)) : undefined;
         if (reference !== undefined) { references.push(reference); return ''; }
         if (input.type === 'image' && isImageDataUrl(input.url)) return `<img class="user-image" src="${escapeHtml(input.url)}" alt="添付画像" loading="lazy">`;
-        return input.type === 'text' ? `<div class="user-text">${escapeHtml(string(input.text))}</div>` : `<span class="input-tag">${escapeHtml(input.type === 'skill' ? `$${string(input.name)}` : string(input.path) || '画像')}</span>`;
+        return input.type === 'text' ? renderUserText(string(input.text)) : `<span class="input-tag">${escapeHtml(input.type === 'skill' ? `$${string(input.name)}` : string(input.path) || '画像')}</span>`;
       }).join('');
       const context = references.length ? `<details class="message-references" data-item="${escapeHtml(`references:${item.id}`)}"><summary>参照情報 · ${references.length}件（Codex Deckが自動追加）</summary>${references.map(text => `<div class="reference-text">${escapeHtml(text)}</div>`).join('')}</details>` : '';
       return message(item, `${automatic ? '<span class="automatic">自動送信 · 使用量回復後の継続</span>' : ''}${content}`, options, context);

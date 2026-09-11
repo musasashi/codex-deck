@@ -48,7 +48,7 @@ test('forks wait for the first new instruction and summarize it with the selecte
       const expectedTurns = structuredClone(source.turns.slice(0, lastTurnId ? 2 : 3));
       assert.deepEqual(forked.turns, expectedTurns);
       const instruction = 'この修正の仕様ドキュメントを作成して';
-      manager.attach(forked.id, { id: 'doc', label: 'SPEC.md', input: { type: 'text', text: '既存の仕様書' } });
+      manager.attach(forked.id, { id: 'doc', label: 'README.md', input: { type: 'text', text: '既存のドキュメント' } });
       await manager.send(forked.id, instruction); await tick();
       assert.equal(requests.length, 1);
       assert.equal(forked.busy, false, 'sending must not wait for the summary');
@@ -63,8 +63,8 @@ test('forks wait for the first new instruction and summarize it with the selecte
       assert.match(request.input, /初期画面を作成/);
       assert.match(request.input, /ログインエラーを修正の対応内容/);
       assert.equal(JSON.parse(request.input).request, instruction);
-      assert.match(request.input, /SPEC.md/);
-      assert.match(request.input, /既存の仕様書/);
+      assert.match(request.input, /README.md/);
+      assert.match(request.input, /既存のドキュメント/);
       assert.doesNotMatch(JSON.stringify(JSON.parse(request.input).conversation), /仕様ドキュメント/, 'the new request is separate from inherited history');
       assert.doesNotMatch(request.input, /元タスクの手動名/);
       if (lastTurnId) assert.doesNotMatch(request.input, /通知機能/);

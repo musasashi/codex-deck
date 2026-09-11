@@ -37,7 +37,7 @@ test('the first preset supplies defaults and uses live dropdowns without saving 
   await expect(page.getByLabel('要約に使うモデル')).toHaveValue('latest');
   await expect(page.getByLabel('要約の推論強度')).toHaveValue('lowest');
   await expect(page.locator('#title-effort option')).toHaveText(['最低 (medium)', 'モデルの既定値', 'medium', 'high']);
-  await expect(page.locator('#preset-model-0 option')).toHaveText(['最新モデル (Recommended model)', 'Recommended model', 'Specialized model']);
+  await expect(page.locator('#preset-model-0 option')).toHaveText(['最新モデル (Recommended model)', 'Hugging Face（モデルIDを指定）', 'Recommended model', 'Specialized model']);
   await expect(page.getByLabel('推論強度', { exact: true })).toHaveValue('high');
   await expect(page.getByLabel('権限')).toHaveValue('auto-review');
   await expect(page.getByRole('button', { name: '保存', exact: true })).toBeDisabled();
@@ -115,7 +115,7 @@ test('reload discovers added models and stale responses do not replace the newes
   const updated = [...models, { ...models[0], id: 'new-model', label: 'New model' }];
   await snapshot(page, { models: updated });
   await receive(page, { type: 'settingsState', requestId: old.requestId, scope: 'user', presets: [initialPreset], models: [] });
-  await expect(page.locator('#preset-model-0 option')).toHaveCount(4);
+  await expect(page.locator('#preset-model-0 option')).toHaveCount(5);
   await expect(page.locator('#preset-model-0 option').last()).toHaveText('New model');
 });
 
@@ -219,4 +219,134 @@ test('unavailable title models and failed scope loads cannot be saved', async ({
   await expect(page.getByLabel('要約に使うモデル')).toBeDisabled();
   await expect(page.getByLabel('要約の推論強度')).toBeDisabled();
   await expect(page.getByRole('button', { name: '保存', exact: true })).toBeDisabled();
+});
+
+test('HF presets accept a model and user-entered prices without an OpenAI catalog', async ({ page }, info) => {
+  await snapshot(page, { models: [] });
+  await page.getByLabel('モデル', { exact: true }).selectOption('huggingface');
+  await page.getByLabel('HFのモデルID', { exact: true }).fill('deepseek-ai/DeepSeek-V4-Flash:deepinfra');
+  await expect(page.getByLabel('推論強度', { exact: true })).toHaveValue('default');
+  await expect(page.getByRole('button', { name: '保存', exact: true })).toBeEnabled();
+  await page.getByLabel('入力単価（USD／100万トークン）', { exact: true }).fill('0.09');
+  await page.getByLabel('出力単価（USD／100万トークン）', { exact: true }).fill('0.18');
+  await page.getByLabel('権限').selectOption('workspace-write');
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  const hfPreset = { model: 'hf:deepseek-ai/DeepSeek-V4-Flash:deepinfra', effort: 'default', mode: 'workspace-write', pricing: { input: 0.09, output: 0.18 } };
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'saveSettings', presets: [hfPreset], titleModel: 'latest' });
+  await snapshot(page, { saved: true, presets: [hfPreset], models: [] });
+  await expect(page.getByLabel('HFのモデルID', { exact: true })).toHaveValue('deepseek-ai/DeepSeek-V4-Flash:deepinfra');
+  await expect(page.getByLabel('入力単価（USD／100万トークン）', { exact: true })).toHaveValue('0.09');
+  await page.setViewportSize({ width: 380, height: 1000 });
+  expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
+  await page.screenshot({ path: info.outputPath('hf-preset.png'), fullPage: true });
+});
+
+test('HF model validation and title prices survive errors and do not interfere with native selections', async ({ page }) => {
+  await snapshot(page);
+  await page.getByLabel('要約に使うモデル').selectOption('huggingface');
+  await page.getByLabel('HFの要約モデルID').fill('invalid');
+  await page.getByLabel('要約の入力単価（USD／100万トークン）').fill('0');
+  await page.getByLabel('要約の出力単価（USD／100万トークン）').fill('0.2');
+  await expect(page.getByRole('button', { name: '保存', exact: true })).toBeDisabled();
+  await page.getByLabel('HFの要約モデルID').fill('org/model:provider');
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  expect((await messages(page)).at(-1)).toMatchObject({ titleModel: 'hf:org/model:provider', titlePricing: { input: 0, output: 0.2 } });
+  await receive(page, { type: 'settingsError', requestId: (await messages(page)).at(-1)!.requestId, message: '保存できませんでした。' });
+  await expect(page.getByLabel('HFの要約モデルID')).toHaveValue('org/model:provider');
+  await page.getByLabel('要約の入力単価（USD／100万トークン）').fill('-1');
+  await expect(page.getByRole('button', { name: '保存', exact: true })).toBeDisabled();
+  await page.getByLabel('要約に使うモデル').selectOption('latest');
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'saveSettings', titleModel: 'latest' });
+});
+
+test('HF checks show progress and failures, preserve the draft, and discard results for another model', async ({ page }) => {
+  const preset = { model: 'hf:fixture/model', effort: 'max', mode: 'read-only', pricing: { input: 1, output: 2 } };
+  await snapshot(page, { presets: [preset] });
+  await expect(page.getByLabel('推論強度', { exact: true })).toHaveValue('default');
+  const card = page.locator('.preset-card').first();
+  await card.getByRole('button', { name: '利用可否を確認' }).click();
+  const request = (await messages(page)).at(-1)!;
+  expect(request).toMatchObject({ type: 'checkProviderModel', model: preset.model, purpose: 'task' });
+  await expect(page.getByRole('button', { name: '保存', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '確認を中止' })).toBeVisible();
+  await receive(page, { type: 'providerCheckState', requestId: request.requestId,
+    result: { model: preset.model, purpose: 'task', status: 'checking', message: 'ツール呼び出しを確認中…' } });
+  await expect(card.locator('[data-field=hf-check]')).toHaveText('ツール呼び出しを確認中…');
+  await receive(page, { type: 'providerCheckDone', requestId: request.requestId,
+    result: { model: preset.model, purpose: 'task', status: 'failed', message: '利用トークン数が0のため利用額を計算できません。' } });
+  await expect(card.locator('[data-field=hf-check]')).toHaveClass('hint error');
+  await expect(card.getByRole('button', { name: '再確認' })).toBeEnabled();
+  await expect(page.getByLabel('入力単価（USD／100万トークン）', { exact: true })).toHaveValue('1');
+  await page.getByLabel('HFのモデルID', { exact: true }).fill('fixture/other');
+  await expect(card.locator('[data-field=hf-check]')).toContainText('未確認');
+  await card.getByRole('button', { name: '利用可否を確認' }).click();
+  const next = (await messages(page)).at(-1)!;
+  await receive(page, { type: 'providerCheckDone', requestId: request.requestId,
+    result: { model: preset.model, purpose: 'task', status: 'passed', message: '利用可' } });
+  await expect(page.getByLabel('HFのモデルID', { exact: true })).toBeDisabled();
+  await page.getByRole('button', { name: '確認を中止' }).click();
+  expect((await messages(page)).at(-1)).toEqual({ type: 'cancelProviderCheck', requestId: next.requestId });
+  await receive(page, { type: 'providerCheckDone', requestId: next.requestId,
+    result: { model: 'hf:fixture/other', purpose: 'task', status: 'failed', message: '確認を中止しました。' } });
+  await expect(page.getByLabel('HFのモデルID', { exact: true })).toBeEnabled();
+});
+
+test('saving an HF preset does not trigger checks and preserves input when saving fails', async ({ page }) => {
+  const preset = { model: 'hf:fixture/model', effort: 'default', mode: 'read-only', pricing: { input: 1, output: 2 } };
+  await snapshot(page, { presets: [preset] });
+  await page.getByLabel('出力単価（USD／100万トークン）', { exact: true }).fill('3');
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  const request = (await messages(page)).at(-1)!;
+  expect((await messages(page)).some(message => message.type === 'checkProviderModel')).toBe(false);
+  await expect(page.getByRole('button', { name: '確認を中止' })).toBeHidden();
+  await expect(page.getByRole('button', { name: '保存', exact: true })).toBeDisabled();
+  await receive(page, { type: 'settingsError', requestId: request.requestId, message: '設定を書き込めませんでした。' });
+  await expect(page.getByLabel('出力単価（USD／100万トークン）', { exact: true })).toHaveValue('3');
+  await expect(page.getByRole('button', { name: '保存', exact: true })).toBeEnabled();
+});
+
+test('registering a Responses API provider exposes model capabilities, saves offline, and keeps HF available', async ({ page }, info) => {
+  await snapshot(page, { models: [] });
+  await page.getByRole('button', { name: '接続先を追加', exact: true }).click();
+  await page.getByLabel('接続先の表示名').fill('Local API');
+  await page.getByLabel('接続先ID', { exact: true }).fill('local');
+  await page.getByLabel('Base URL', { exact: true }).fill('http://localhost:11434/v1');
+  await page.getByLabel('APIのモデルID', { exact: true }).fill('org/model:tag');
+  await page.getByLabel('対応する推論強度（カンマ区切り・任意）').fill('low, high');
+  await page.getByLabel('画像入力', { exact: true }).check();
+  const id = 'responses:local:org/model:tag';
+  await page.locator('#preset-model-0').selectOption(id);
+  await expect(page.locator('#preset-effort-0 option')).toHaveText(['モデルの既定値', 'low', 'high']);
+  await page.getByLabel('推論強度', { exact: true }).selectOption('high');
+  await expect(page.getByLabel('HFのモデルID', { exact: true })).toBeHidden();
+  await expect(page.getByRole('button', { name: '保存', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  const request = (await messages(page)).at(-1)!;
+  expect(request).toMatchObject({ type: 'saveSettings', presets: [{ model: id, effort: 'high', mode: 'auto-review' }],
+    providers: [{ id: 'local', name: 'Local API', apiKeyEnv: '', models: [{ id: 'org/model:tag', images: true, reasoningEfforts: ['low', 'high'], structuredOutput: false }] }] });
+  expect((await messages(page)).some(m => m.type === 'checkProviderModel')).toBe(false);
+  await snapshot(page, { ...request, type: 'settingsState', saved: true, models: [] });
+  await expect(page.getByLabel('APIのモデルID', { exact: true })).toHaveValue('org/model:tag');
+  await expect(page.locator('#preset-model-0 option[value=huggingface]')).toHaveCount(1);
+  await page.setViewportSize({ width: 380, height: 1000 });
+  expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
+  await page.screenshot({ path: info.outputPath('responses-provider.png'), fullPage: true });
+});
+
+test('provider changes invalidate old checks and missing models cannot be saved', async ({ page }) => {
+  const providers = [{ id: 'api', name: 'API', baseUrl: 'https://api.example/v1', apiKeyEnv: 'API_KEY', models: [{ id: 'model' }] }];
+  const preset = { model: 'responses:api:model', effort: 'default', mode: 'read-only' };
+  await snapshot(page, { providers, presets: [preset] });
+  const card = page.locator('.preset-card').first();
+  await card.getByRole('button', { name: '利用可否を確認' }).click();
+  const request = (await messages(page)).at(-1)!;
+  expect(request).toMatchObject({ type: 'checkProviderModel', providers });
+  await receive(page, { type: 'providerCheckDone', requestId: request.requestId, result: { model: preset.model, purpose: 'task', status: 'passed', message: '利用可' } });
+  await expect(card.locator('[data-field=hf-check]')).toHaveText('利用可');
+  await page.getByLabel('Base URL', { exact: true }).fill('https://other.example/v1');
+  await expect(card.locator('[data-field=hf-check]')).toContainText('未確認');
+  await page.getByLabel('APIのモデルID', { exact: true }).fill('different');
+  await expect(page.getByRole('button', { name: '保存', exact: true })).toBeDisabled();
+  await expect(page.locator('#preset-model-0 option:checked')).toContainText('候補にありません');
 });

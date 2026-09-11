@@ -4,6 +4,9 @@ import { questionAnswers } from '../core/questions';
 import { JsonRpcPeer, requestKey, RpcError, type ServerRequest } from './rpc';
 import { TitleGenerator } from './titleGenerator';
 import type { TitleRequest } from '../core/types';
+import { HF_MODEL_CONFIG, isHuggingFaceModel, isHuggingFaceProvider } from '../core/huggingFace';
+import { canonicalProvider, displayModel, externalModelConfig, isExternalModel, isExternalProvider, modelProvider, modelRequest, parseResponsesModel, providerId, providerModels, responsesModelId, type ResponsesProvider } from '../core/providers';
+import { costSample, type TokenPrice } from '../core/cost';
 
 function requiredString(value: unknown, field: string): string {
   if (typeof value !== 'string' || !value) throw new Error(`App Server応答に${field}がありません。`);
@@ -35,7 +38,8 @@ export function decodeThread(raw: unknown): Thread {
     id: requiredString(data.id, 'thread.id'), title: string(data.name) || string(data.preview).slice(0, 80) || '新規タスク', name: string(data.name) || undefined,
     cwd: string(data.cwd), status: string(status.type, 'unknown'), activeFlags: array(status.activeFlags).filter((v): v is string => typeof v === 'string'),
     turns: array(data.turns).map(decodeTurn), updatedAt: typeof data.updatedAt === 'number' ? data.updatedAt : undefined,
-    model: typeof data.model === 'string' ? data.model : undefined, effort: typeof data.reasoningEffort === 'string' ? data.reasoningEffort : undefined,
+    model: displayModel(typeof data.model === 'string' ? data.model : undefined, string(data.modelProvider)),
+    modelProvider: string(data.modelProvider) || undefined, effort: typeof data.reasoningEffort === 'string' ? data.reasoningEffort : undefined,
   };
 }
 export function decodeUsage(raw: unknown): Usage {
@@ -76,13 +80,40 @@ export class AppServerClient implements Gateway {
   private pending = new Map<string, { request: PendingRequest; raw: JsonObject; decisions: unknown[]; resolve: (value: unknown) => void; reject: (error: Error) => void }>();
   private subscriptions: (() => void)[] = [];
   private parentThreads = new Map<string, string>();
+  private threadProviders = new Map<string, string>();
+  private threadPricing = new Map<string, TokenPrice | undefined>();
+  private threadSettings = new Map<string, string>();
+  private threadDefaults = new Map<string, { model?: string; effort?: string }>();
   private modelList?: Promise<Model[]>;
   private titles?: TitleGenerator;
+
+  constructor(private readonly providers: () => ResponsesProvider[] = () => [],
+    private readonly connectionConfig: (model: string, effort?: string) => Promise<JsonObject> = async () => ({})) {}
+
+  private async runConfig(model?: string, effort?: string, provider?: string): Promise<JsonObject> {
+    if ((!model || model === 'latest') && isExternalProvider(provider)) {
+      if (isHuggingFaceProvider(provider)) return { serviceTier: null, config: HF_MODEL_CONFIG };
+      const entry = this.providers().find(p => providerId(p.id) === provider);
+      if (!entry?.models[0]) throw new Error('この会話のResponses API接続先を設定してください。');
+      return { serviceTier: null, config: { web_search: 'disabled', model_supports_reasoning_summaries: false, model_reasoning_summary: 'none',
+        ...await this.connectionConfig(responsesModelId(entry.id, entry.models[0].id), effort) } };
+    }
+    if (!model || !isExternalModel(model)) return effort ? { config: { model_reasoning_effort: effort } } : {};
+    return { serviceTier: null, config: { ...externalModelConfig(model, this.providers(), effort),
+      ...(!isHuggingFaceModel(model) ? await this.connectionConfig(model, effort) : {}) } };
+  }
+  private assertProvider(provider: string | undefined, model?: string): void {
+    if (provider && model && model !== 'latest' && canonicalProvider(provider) !== modelProvider(model))
+      throw new Error('会話の接続先は変更できません。別の接続先を使う場合は新規タスクでプリセットを選択してください。');
+  }
 
   async connect(peer: JsonRpcPeer): Promise<void> {
     this.detach();
     this.peer = peer;
-    this.titles = new TitleGenerator(peer, () => this.listModels());
+    this.titles = new TitleGenerator(peer, () => this.listModels(), 30_000, this.providers, this.connectionConfig);
+    this.titles.onTokenUsage = (request, sourceId, usage, turnId) => {
+      if (request.ownerThreadId && isExternalModel(request.model)) this.emitCost(request.ownerThreadId, sourceId, usage, request.pricing, turnId);
+    };
     peer.handleRequest = request => this.handleRequest(request);
     this.subscriptions.push(peer.notifications.subscribe(event => {
       try { this.handleNotification(event.method, object(event.params)); }
@@ -96,7 +127,7 @@ export class AppServerClient implements Gateway {
       this.pending.clear();
       this.events.emit({ type: 'connection', connected: false, message: error.message });
     }));
-    await peer.request('initialize', { clientInfo: { name: 'codex_deck', title: 'Codex Deck', version: '0.1.0' } });
+    await peer.request('initialize', { clientInfo: { name: 'codex_deck', title: 'Codex Deck', version: '0.1.0' }, capabilities: { experimentalApi: true } });
     peer.notify('initialized');
     this.connected = true;
     this.events.emit({ type: 'connection', connected: true });
@@ -108,6 +139,10 @@ export class AppServerClient implements Gateway {
     for (const pending of this.pending.values()) pending.reject(new Error('App Server接続を切り替えました。'));
     this.pending.clear();
     this.parentThreads.clear();
+    this.threadProviders.clear();
+    this.threadPricing.clear();
+    this.threadSettings.clear();
+    this.threadDefaults.clear();
     this.modelList = undefined;
     this.peer = undefined;
     this.connected = false;
@@ -117,24 +152,52 @@ export class AppServerClient implements Gateway {
     return object(await this.peer.request(method, params));
   }
   async startThread(cwd: string, settings: RunSettings = { mode: 'default' }): Promise<Thread> {
+    const external = isExternalModel(settings.model);
     // New threads have no stored history until the first user message.
-    return this.threadResult(await this.call('thread/start', {
-      ...(cwd ? { cwd } : {}), ...(settings.model ? { model: settings.model } : {}),
-      ...(settings.effort ? { config: { model_reasoning_effort: settings.effort } } : {}),
+    const thread = await this.threadResult(await this.call('thread/start', {
+      ...(cwd ? { cwd } : {}), ...modelRequest(settings.model),
+      ...await this.runConfig(settings.model, settings.effort),
       ...(settings.mode !== 'default' ? {
         sandbox: settings.mode === 'auto-review' ? 'workspace-write' : settings.mode,
         approvalPolicy: settings.mode === 'danger-full-access' ? 'never' : 'on-request',
         approvalsReviewer: settings.mode === 'auto-review' ? 'auto_review' : 'user',
       } : {}),
     }), false);
+    if (external) this.threadPricing.set(thread.id, settings.pricing);
+    this.threadSettings.set(thread.id, JSON.stringify([settings.model, settings.effort]));
+    return thread;
   }
-  async resumeThread(threadId: string): Promise<Thread> { return this.threadResult(await this.call('thread/resume', { threadId })); }
+  private async storedProvider(threadId: string): Promise<string | undefined> {
+    const known = this.threadProviders.get(threadId);
+    if (known) return known;
+    const result = await this.call('thread/read', { threadId, includeTurns: false });
+    const provider = string(object(result.thread).modelProvider) || undefined;
+    if (provider) this.threadProviders.set(threadId, provider);
+    return provider;
+  }
+  async resumeThread(threadId: string, settings?: RunSettings): Promise<Thread> {
+    const provider = await this.storedProvider(threadId);
+    const model = modelRequest(settings?.model);
+    this.assertProvider(provider, settings?.model);
+    if (isExternalProvider(provider) || isExternalModel(settings?.model)) this.threadPricing.set(threadId, settings?.pricing);
+    const thread = await this.threadResult(await this.call('thread/resume', { threadId,
+      ...(provider ? { modelProvider: provider } : model.modelProvider ? { modelProvider: model.modelProvider } : {}),
+      ...(model.model && model.model !== 'latest' ? { model: model.model } : {}),
+      ...await this.runConfig(settings?.model, settings?.effort, provider),
+    }));
+    this.threadSettings.set(threadId, JSON.stringify([settings?.model, settings?.effort]));
+    return thread;
+  }
   async readThread(threadId: string): Promise<Thread> { return this.threadResult(await this.call('thread/read', { threadId, includeTurns: true })); }
   private async threadResult(result: JsonObject, loadHistory = true): Promise<Thread> {
     const thread = decodeThread(result.thread);
+    thread.modelProvider = string(result.modelProvider) || thread.modelProvider || this.threadProviders.get(thread.id);
+    if (thread.modelProvider) this.threadProviders.set(thread.id, thread.modelProvider);
     thread.instructionSources = array(result.instructionSources).filter((v): v is string => typeof v === 'string');
-    if (typeof result.model === 'string') thread.model = result.model;
+    if (typeof result.model === 'string') thread.model = displayModel(result.model, thread.modelProvider);
     if (typeof result.reasoningEffort === 'string') thread.effort = result.reasoningEffort;
+    if (isHuggingFaceProvider(thread.modelProvider)) thread.effort = undefined;
+    this.threadDefaults.set(thread.id, { model: modelRequest(thread.model).model, effort: thread.effort });
     thread.permissionMode = permissionMode(object(result.sandbox).type, result.approvalsReviewer, result.approvalPolicy);
     if (loadHistory && (object(result.thread).historyMode === 'paginated' || typeof result.turnsBackwardsCursor === 'string')) {
       const turns = await this.pages('thread/turns/list', { threadId: thread.id, sortDirection: 'asc', itemsView: 'full', limit: 100 });
@@ -147,8 +210,14 @@ export class AppServerClient implements Gateway {
     const result = await this.call('thread/list', { limit: 50, archived, useStateDbOnly: true, ...(cursor ? { cursor } : {}) });
     return { threads: array(result.data).map(decodeThread), cursor: typeof result.nextCursor === 'string' ? result.nextCursor : undefined };
   }
-  async forkThread(threadId: string, options: { cwd?: string; lastTurnId?: string } = {}): Promise<Thread> {
-    return this.threadResult(await this.call('thread/fork', { threadId, ...(options.cwd ? { cwd: options.cwd } : {}), ...(options.lastTurnId ? { lastTurnId: options.lastTurnId } : {}) }));
+  async forkThread(threadId: string, options: { cwd?: string; lastTurnId?: string; settings?: RunSettings } = {}): Promise<Thread> {
+    const provider = await this.storedProvider(threadId);
+    const model = modelRequest(options.settings?.model);
+    this.assertProvider(provider, options.settings?.model);
+    return this.threadResult(await this.call('thread/fork', { threadId, ...(provider ? { modelProvider: provider } : {}),
+      ...(model.model && model.model !== 'latest' ? { model: model.model } : {}),
+      ...await this.runConfig(options.settings?.model, options.settings?.effort, provider),
+      ...(options.cwd ? { cwd: options.cwd } : {}), ...(options.lastTurnId ? { lastTurnId: options.lastTurnId } : {}) }));
   }
   async renameThread(threadId: string, name: string): Promise<void> { await this.call('thread/name/set', { threadId, name }); }
   async generateTitle(request: TitleRequest, signal: AbortSignal): Promise<string> {
@@ -164,14 +233,31 @@ export class AppServerClient implements Gateway {
     return [...input, ...mentions].map(item => ({ ...item, ...(item.type === 'text' ? { text_elements: [] } : {}) }));
   }
   async startTurn(threadId: string, input: Input[], settings: RunSettings, clientId: string): Promise<Turn> {
+    const provider = this.threadProviders.get(threadId);
+    this.assertProvider(provider, settings.model);
+    if (parseResponsesModel(settings.model) && this.threadSettings.get(threadId) !== JSON.stringify([settings.model, settings.effort]))
+      await this.resumeThread(threadId, settings);
+    const { model } = modelRequest(settings.model);
+    if (isExternalProvider(provider) || isExternalModel(settings.model)) this.threadPricing.set(threadId, settings.pricing);
+    const defaults = this.threadDefaults.get(threadId);
+    const hf = isHuggingFaceProvider(provider) || isHuggingFaceModel(settings.model);
+    const effort = hf || settings.effort === 'default' ? undefined : settings.effort
+      ?? (isExternalProvider(provider) || isExternalModel(settings.model) ? undefined : defaults?.effort);
+    const collaborationMode = settings.collaborationMode ? { mode: settings.collaborationMode, settings: {
+      model: requiredString(model ?? defaults?.model, 'プランモードのモデル'),
+      reasoning_effort: effort ?? null, developer_instructions: null,
+    } } : undefined;
     const sandbox = settings.mode === 'default' ? undefined : settings.mode === 'read-only' ? { type: 'readOnly', networkAccess: false }
       : settings.mode === 'workspace-write' || settings.mode === 'auto-review' ? { type: 'workspaceWrite', writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false }
       : { type: 'dangerFullAccess' };
     const result = await this.call('turn/start', {
       threadId, input: this.encodeInput(input), clientUserMessageId: clientId,
-      ...(settings.model ? { model: settings.model } : {}), ...(settings.effort ? { effort: settings.effort } : {}),
+      ...(model ? { model } : {}), ...(parseResponsesModel(settings.model) ? { effort: settings.effort ?? null }
+        : settings.effort && !isHuggingFaceProvider(provider) && !isHuggingFaceModel(settings.model) ? { effort: settings.effort } : {}),
       ...(sandbox ? { sandboxPolicy: sandbox, approvalPolicy: settings.mode === 'danger-full-access' ? 'never' : 'on-request', approvalsReviewer: settings.mode === 'auto-review' ? 'auto_review' : 'user' } : {}),
+      ...(collaborationMode ? { collaborationMode } : {}),
     });
+    this.threadDefaults.set(threadId, { model: model ?? defaults?.model, effort });
     return decodeTurn(result.turn);
   }
   async steerTurn(threadId: string, turnId: string, input: Input[]): Promise<void> { await this.call('turn/steer', { threadId, expectedTurnId: turnId, input: this.encodeInput(input) }); }
@@ -184,9 +270,11 @@ export class AppServerClient implements Gateway {
     try {
       const models = await listing;
       // A refresh or account change may supersede an in-flight catalog read.
-      return this.modelList === listing ? models : this.listModels();
+      return this.modelList === listing ? [...models, ...providerModels(this.providers())] : this.listModels();
     } catch (error) {
       if (this.modelList === listing) this.modelList = undefined;
+      const custom = providerModels(this.providers());
+      if (custom.length) return custom;
       throw error;
     }
   }
@@ -296,6 +384,10 @@ export class AppServerClient implements Gateway {
     this.pending.get(id)?.reject(new RpcError(-32602, message));
     this.pending.delete(id);
   }
+  private emitCost(threadId: string, sourceId: string, usage: unknown, price?: TokenPrice, turnId?: string): void {
+    const sample = costSample(sourceId, usage, price, turnId);
+    if (sample) this.events.emit({ type: 'cost', threadId, sample });
+  }
   private handleNotification(method: string, data: JsonObject): void {
     const threadId = string(data.threadId);
     if (this.titles?.threadIds.has(threadId)) return;
@@ -317,7 +409,12 @@ export class AppServerClient implements Gateway {
       case 'skills/changed': this.events.emit({ type: 'skills' }); break;
       case 'account/updated': this.modelList = undefined; this.events.emit({ type: 'account' }); break;
       case 'account/login/completed': this.modelList = undefined; this.events.emit({ type: 'account', success: data.success === true, error: typeof data.error === 'string' ? data.error : undefined }); break;
-      case 'thread/tokenUsage/updated': this.events.emit({ type: 'tokens', threadId, value: data.tokenUsage }); break;
+      case 'thread/tokenUsage/updated':
+        this.events.emit({ type: 'tokens', threadId, value: data.tokenUsage });
+        if (this.threadPricing.has(threadId) || isExternalProvider(this.threadProviders.get(threadId))) {
+          this.emitCost(threadId, threadId, data.tokenUsage, this.threadPricing.get(threadId), turnId);
+        }
+        break;
       case 'thread/archived': case 'thread/deleted': this.events.emit({ type: 'archived', threadId }); break;
       case 'serverRequest/resolved': {
         if (typeof data.requestId !== 'string' && typeof data.requestId !== 'number') break;

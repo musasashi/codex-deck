@@ -18,7 +18,7 @@ button.secondary { background: var(--vscode-button-secondaryBackground); color: 
 .dot.error, .dot.limited { background: var(--vscode-errorForeground); }
 .auto-resume { display: flex; align-items: center; margin-left: auto; gap: 6px; font-size: 11px; cursor: pointer; }
 input[type=checkbox], input[type=radio] { accent-color: var(--vscode-focusBorder); }
-#notice { font-size: 12px; padding: 9px 20px; border-bottom: 1px solid var(--border); white-space: pre-wrap; }
+#notice { position: relative; font-size: 12px; padding: 9px 40px 9px 20px; border-bottom: 1px solid var(--border); white-space: pre-wrap; overflow-wrap: anywhere; }
 .waiting-notice { background: var(--vscode-inputValidation-warningBackground); }
 .error-notice, .turn-error { color: var(--vscode-errorForeground); }
 #conversation { flex: 1; overflow-y: auto; min-height: 80px; padding: 24px max(22px, calc((100% - 820px) / 2)); scrollbar-gutter: stable; }
@@ -43,6 +43,8 @@ h1 { font-size: 26px; font-weight: 550; line-height: 1.4; margin: 14px 0 12px; l
 .message-action[data-copied] .copied-icon { display: block; }
 @media (hover: none) { .message-footer { opacity: 1; pointer-events: auto; } }
 .user-text { white-space: pre-wrap; }
+.user-quote { margin: 0 0 10px; padding-left: 12px; border-left: 3px solid var(--vscode-textBlockQuote-border, var(--muted)); color: var(--muted); white-space: pre-wrap; }
+.user-text + .user-quote { margin-top: 14px; }
 .user-image { display: inline-block; max-width: min(100%, 240px); max-height: 180px; object-fit: contain; border: 1px solid var(--border); border-radius: 6px; margin: 6px 6px 0 0; vertical-align: top; }
 .message-label { font-size: 10px; font-weight: 650; letter-spacing: .15em; color: var(--muted); margin-bottom: 6px; }
 .automatic { display: block; color: var(--muted); font-size: 11px; margin-bottom: 7px; }
@@ -76,6 +78,7 @@ summary { cursor: pointer; font-size: 12px; overflow-wrap: anywhere; }
 .composer-area { padding: 12px max(20px, calc((100% - 820px) / 2)) 10px; }
 #composer { position: relative; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); }
 #composer:focus-within { border-color: var(--vscode-focusBorder); }
+#plan-mode { padding: 8px 12px 0; color: var(--vscode-textLink-foreground); font-size: 11px; }
 #completions { position: absolute; bottom: calc(100% + 5px); left: 0; right: 0; z-index: 2; max-height: 45vh; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--vscode-editorWidget-background, var(--surface)); box-shadow: 0 3px 10px #0003; }
 #completion-list button { display: flex; flex-direction: column; gap: 1px; width: 100%; color: var(--vscode-foreground); background: transparent; text-align: left; border-radius: 0; padding: 7px 11px; overflow-wrap: anywhere; }
 #completion-list button[aria-selected=true] { background: var(--vscode-list-activeSelectionBackground, var(--vscode-button-secondaryBackground)); color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground)); }
@@ -119,8 +122,9 @@ select option { background: var(--vscode-dropdown-background); color: var(--vsco
 .attachment button { color: var(--muted); background: none; padding: 0 0 0 8px; }
 .attachment-image { position: relative; width: 78px; height: 78px; padding: 0; border-radius: 8px; flex-shrink: 0; }
 .attachment-image img { width: 100%; height: 100%; object-fit: contain; border-radius: inherit; }
-.attachment-image button { position: absolute; top: 3px; right: 3px; display: grid; place-items: center; width: 22px; height: 22px; padding: 0; border-radius: 50%; background: var(--vscode-editor-background); color: var(--vscode-foreground); border: 1px solid var(--border); font-size: 16px; line-height: 1; }
-.attachment-image button:hover { background: var(--vscode-button-secondaryBackground); }
+.attachment-image button, #dismiss-notice { position: absolute; top: 3px; right: 3px; display: grid; place-items: center; width: 22px; height: 22px; padding: 0; border-radius: 50%; background: var(--vscode-editor-background); color: var(--vscode-foreground); border: 1px solid var(--border); font-size: 16px; line-height: 1; }
+.attachment-image button:hover, #dismiss-notice:hover { background: var(--vscode-button-secondaryBackground); }
+#dismiss-notice { top: 8px; right: 8px; }
 #image-status { padding: 4px 14px; font-size: 12px; }
 #requests { flex-shrink: 0; max-height: 45vh; overflow-y: auto; padding: 10px max(14px, calc((100% - 820px) / 2)); }
 #requests form + form { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); }
@@ -155,3 +159,4 @@ legend { color: var(--muted); font-size: 11px; }
 @keyframes pulse { 50% { opacity: .35; } }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
 @media (max-width: 450px) { .topbar { padding: 8px 10px; gap: 5px; } .auto-resume { font-size: 10px; } #conversation { padding: 18px 14px; } .composer-area { padding: 8px 12px; } h1 { font-size: 22px; } }
+.task-cost { flex: 0 0 auto; color: var(--vscode-descriptionForeground); font-size: 11px; white-space: nowrap; }

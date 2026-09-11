@@ -84,12 +84,13 @@ export class Composer {
     } else if (message.type === 'fileSearch' && this.fileRequest !== undefined && message.requestId === this.fileRequest) {
       this.fileRequest = undefined; this.loading = false; this.error = string(message.error);
       this.candidates = (array(message.files) as FileReference[]).map(file => {
-        const path = file.path + (file.kind === 'directory' && !/[\\/]$/.test(file.path) ? '/' : '');
+        const path = file.path + (file.kind === 'directory' && !file.path.endsWith('/') ? '/' : '');
         return { label: path, description: '', value: fileMention(path) };
       });
       this.renderPopup();
     } else if (message.type === 'insertSkill') this.insertSkill(message.skill as Skill);
     else if (message.type === 'insertMention') this.insertMarker('@');
+    else if (message.type === 'insertReference') this.insertReference(string(message.text));
   }
 
   private renderSkills(): void {
@@ -123,6 +124,17 @@ export class Composer {
     this.prompt.value = result.text;
     this.prompt.setSelectionRange(result.caret, result.caret);
     this.close(); this.prompt.focus(); this.changed(); this.refresh();
+  }
+
+  private insertReference(text: string): void {
+    if (!text) return;
+    const draft = this.prompt.value;
+    const separator = !draft || draft.endsWith('\n\n') ? '' : draft.endsWith('\n') ? '\n' : '\n\n';
+    this.prompt.value = draft + separator + text;
+    this.prompt.setSelectionRange(this.prompt.value.length, this.prompt.value.length);
+    window.getSelection()?.removeAllRanges();
+    this.close(); this.prompt.focus(); this.changed(); this.refresh();
+    this.prompt.scrollTop = this.prompt.scrollHeight;
   }
 
   private insertSkill(skill: Skill): void {

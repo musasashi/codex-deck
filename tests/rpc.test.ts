@@ -49,11 +49,11 @@ test('broken framing, disconnection and RPC errors reject outstanding requests',
   await assert.rejects(h.peer.request('late'), /接続/);
 });
 
-test('initialization completes before initialized and uses stable API capabilities', async () => {
+test('initialization completes before initialized and enables collaboration mode fields', async () => {
   const h = harness(); const client = new AppServerClient();
   const connecting = client.connect(h.peer);
   const initialize = h.messages[0]!;
-  assert.equal(initialize.method, 'initialize'); assert.equal(object(initialize.params).capabilities, undefined);
+  assert.equal(initialize.method, 'initialize'); assert.deepEqual(object(initialize.params).capabilities, { experimentalApi: true });
   assert.equal(h.messages.length, 1);
   h.send({ id: initialize.id, result: { userAgent: 'fake', future: true } });
   await connecting;
@@ -300,6 +300,7 @@ test('message forks request history through the selected turn while ordinary for
   const server = new JsonRpcPeer(h.output, h.input);
   server.handleRequest = async ({ method, params }) => {
     if (method === 'initialize') return {};
+    if (method === 'thread/read') return { thread: { id: 'source' } };
     assert.equal(method, 'thread/fork');
     assert.equal(object(params).threadId, 'source');
     const lastTurnId = object(params).lastTurnId;
@@ -389,6 +390,50 @@ test('clipboard image data reaches both turn/start and turn/steer unchanged', as
   assert.deepEqual(object(h.messages.at(-1)!.params).input, input);
   h.send({ id: h.messages.at(-1)!.id, result: {} });
   await steering; h.peer.close(); client.detach();
+});
+
+test('plan and default modes use built-in instructions and preserve the resumed model, effort, and permissions', async () => {
+  const h = harness(); const client = new AppServerClient();
+  const server = new JsonRpcPeer(h.output, h.input);
+  server.handleRequest = async ({ method }) => {
+    if (method === 'thread/read') return { thread: { id: 'thread', modelProvider: 'openai' } };
+    if (method === 'thread/resume') return { thread: { id: 'thread', turns: [] }, model: 'session-model', reasoningEffort: 'high' };
+    if (method === 'turn/start') return { turn: { id: 'turn', status: 'completed', items: [] } };
+    return {};
+  };
+  try {
+    await client.connect(h.peer);
+    await client.resumeThread('thread');
+    for (const collaborationMode of ['plan', 'default'] as const) {
+      await client.startTurn('thread', [{ type: 'text', text: 'Continue' }], { mode: 'auto-review', collaborationMode }, 'message');
+      const params = object(h.messages.at(-1)!.params);
+      assert.deepEqual(params.collaborationMode, { mode: collaborationMode, settings: {
+        model: 'session-model', reasoning_effort: 'high', developer_instructions: null,
+      } });
+      assert.equal(params.clientUserMessageId, 'message');
+      assert.equal(params.approvalsReviewer, 'auto_review');
+      assert.equal(params.approvalPolicy, 'on-request');
+      assert.equal(object(params.sandboxPolicy).type, 'workspaceWrite');
+    }
+    await client.startTurn('thread', [], { mode: 'default', model: 'changed-model', effort: 'low', collaborationMode: 'plan' }, 'changed');
+    await client.startTurn('thread', [], { mode: 'default', collaborationMode: 'default' }, 'inherited');
+    const params = object(h.messages.at(-1)!.params);
+    assert.deepEqual(params.collaborationMode, { mode: 'default', settings: { model: 'changed-model', reasoning_effort: 'low', developer_instructions: null } });
+    assert.equal(params.sandboxPolicy, undefined);
+  } finally { client.detach(); h.peer.close(); server.close(); }
+});
+
+test('plan mode uses external provider model IDs without inheriting Codex reasoning effort', async () => {
+  const h = harness(); const client = new AppServerClient();
+  const server = new JsonRpcPeer(h.output, h.input);
+  server.handleRequest = async ({ method }) => method === 'turn/start' ? { turn: { id: 'turn', status: 'completed', items: [] } } : {};
+  try {
+    await client.connect(h.peer);
+    await client.startTurn('hf', [], { mode: 'read-only', model: 'hf:org/model:provider', effort: 'default', collaborationMode: 'plan' }, 'hf');
+    assert.deepEqual(object(h.messages.at(-1)!.params).collaborationMode, {
+      mode: 'plan', settings: { model: 'org/model:provider', reasoning_effort: null, developer_instructions: null },
+    });
+  } finally { client.detach(); h.peer.close(); server.close(); }
 });
 
 test('registered skills exclude disabled entries and keep distinct paths with the same name; changes invalidate the catalog', async () => {
