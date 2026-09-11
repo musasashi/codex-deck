@@ -65,6 +65,7 @@ class DeckExtension implements PanelHost {
         }
         return models;
       },
+      checkHuggingFace: async (model, purpose, signal, progress) => { await this.connect(); signal.throwIfAborted(); return this.huggingFace.check(model, purpose, signal, progress); },
       openCodexSettings: () => this.codexSettings(), report: error => this.report(error),
     });
     const tree = new TaskTree(context.extensionUri, this.manager);

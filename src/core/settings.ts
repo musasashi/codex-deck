@@ -65,7 +65,7 @@ export function readPresets(value: unknown): SettingsPreset[] {
     const data = object(value);
     const model = string(data.model), effort = string(data.effort), mode = string(data.mode);
     return model && effort && presetPermissionOptions.some(option => option.id === mode)
-      ? [{ model, effort, mode: mode as ExecutionMode, ...(isHuggingFaceModel(model) && readTokenPrice(data.pricing) ? { pricing: readTokenPrice(data.pricing) } : {}) }] : [];
+      ? [{ model, effort: isHuggingFaceModel(model) ? 'default' : effort, mode: mode as ExecutionMode, ...(isHuggingFaceModel(model) && readTokenPrice(data.pricing) ? { pricing: readTokenPrice(data.pricing) } : {}) }] : [];
   });
   return presets.length ? presets : [{ ...DEFAULT_PRESET }];
 }

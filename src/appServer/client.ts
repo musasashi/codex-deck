@@ -170,6 +170,7 @@ export class AppServerClient implements Gateway {
     thread.instructionSources = array(result.instructionSources).filter((v): v is string => typeof v === 'string');
     if (typeof result.model === 'string') thread.model = displayModel(result.model, thread.modelProvider);
     if (typeof result.reasoningEffort === 'string') thread.effort = result.reasoningEffort;
+    if (isHuggingFaceProvider(thread.modelProvider)) thread.effort = undefined;
     thread.permissionMode = permissionMode(object(result.sandbox).type, result.approvalsReviewer, result.approvalPolicy);
     if (loadHistory && (object(result.thread).historyMode === 'paginated' || typeof result.turnsBackwardsCursor === 'string')) {
       const turns = await this.pages('thread/turns/list', { threadId: thread.id, sortDirection: 'asc', itemsView: 'full', limit: 100 });

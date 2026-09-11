@@ -25,7 +25,8 @@ button:hover { background: var(--vscode-button-hoverBackground); }
 button.secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
 button:disabled, select:disabled { opacity: .6; cursor: default; }
 #status { min-height: 20px; line-height: 1.6; overflow-wrap: anywhere; }
-#status.error { color: var(--vscode-errorForeground); }
+.error { color: var(--vscode-errorForeground); }
+.hf-check { margin-top: 14px; }
 footer { display: flex; flex-wrap: wrap; gap: 20px; border-top: 1px solid var(--vscode-widget-border); margin-top: 24px; padding-top: 18px; }
 button.link { background: transparent; color: var(--vscode-textLink-foreground); padding: 0; text-align: left; }
 @media (max-width: 420px) { main { margin: 24px auto; padding: 0 16px; } .preset-fields { grid-template-columns: minmax(0, 1fr); gap: 0; } }

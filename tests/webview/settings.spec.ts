@@ -259,3 +259,49 @@ test('HF model validation and title prices survive errors and do not interfere w
   await page.getByRole('button', { name: '保存', exact: true }).click();
   expect((await messages(page)).at(-1)).toMatchObject({ type: 'saveSettings', titleModel: 'latest' });
 });
+
+test('HF checks show progress and failures, preserve the draft, and discard results for another model', async ({ page }) => {
+  const preset = { model: 'hf:fixture/model', effort: 'max', mode: 'read-only', pricing: { input: 1, output: 2 } };
+  await snapshot(page, { presets: [preset] });
+  await expect(page.getByLabel('推論強度', { exact: true })).toHaveValue('default');
+  const card = page.locator('.preset-card').first();
+  await card.getByRole('button', { name: '利用可否を確認' }).click();
+  const request = (await messages(page)).at(-1)!;
+  expect(request).toMatchObject({ type: 'checkHfModel', model: preset.model, purpose: 'task' });
+  await expect(page.getByRole('button', { name: '保存', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '確認を中止' })).toBeVisible();
+  await receive(page, { type: 'hfCheckState', requestId: request.requestId,
+    result: { model: preset.model, purpose: 'task', status: 'checking', message: 'ツール呼び出しを確認中…' } });
+  await expect(card.locator('[data-field=hf-check]')).toHaveText('ツール呼び出しを確認中…');
+  await receive(page, { type: 'hfCheckDone', requestId: request.requestId,
+    result: { model: preset.model, purpose: 'task', status: 'failed', message: '利用トークン数が0のため利用額を計算できません。' } });
+  await expect(card.locator('[data-field=hf-check]')).toHaveClass('hint error');
+  await expect(card.getByRole('button', { name: '再確認' })).toBeEnabled();
+  await expect(page.getByLabel('入力単価（USD／100万トークン）', { exact: true })).toHaveValue('1');
+  await page.getByLabel('HFのモデルID', { exact: true }).fill('fixture/other');
+  await expect(card.locator('[data-field=hf-check]')).toContainText('未確認');
+  await card.getByRole('button', { name: '利用可否を確認' }).click();
+  const next = (await messages(page)).at(-1)!;
+  await receive(page, { type: 'hfCheckDone', requestId: request.requestId,
+    result: { model: preset.model, purpose: 'task', status: 'passed', message: '利用可' } });
+  await expect(page.getByLabel('HFのモデルID', { exact: true })).toBeDisabled();
+  await page.getByRole('button', { name: '確認を中止' }).click();
+  expect((await messages(page)).at(-1)).toEqual({ type: 'cancelHfCheck', requestId: next.requestId });
+  await receive(page, { type: 'hfCheckDone', requestId: next.requestId,
+    result: { model: 'hf:fixture/other', purpose: 'task', status: 'failed', message: '確認を中止しました。' } });
+  await expect(page.getByLabel('HFのモデルID', { exact: true })).toBeEnabled();
+});
+
+test('saving an HF preset stays busy through checks and preserves input when compatibility fails', async ({ page }) => {
+  const preset = { model: 'hf:fixture/model', effort: 'default', mode: 'read-only', pricing: { input: 1, output: 2 } };
+  await snapshot(page, { presets: [preset] });
+  await page.getByLabel('出力単価（USD／100万トークン）', { exact: true }).fill('3');
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  const request = (await messages(page)).at(-1)!;
+  await receive(page, { type: 'hfCheckState', requestId: request.requestId,
+    result: { model: preset.model, purpose: 'task', status: 'failed', message: 'ツール往復に失敗しました。' } });
+  await expect(page.getByRole('button', { name: '保存', exact: true })).toBeDisabled();
+  await receive(page, { type: 'settingsError', requestId: request.requestId, message: '互換チェックに失敗しました。設定は保存していません。' });
+  await expect(page.getByLabel('出力単価（USD／100万トークン）', { exact: true })).toHaveValue('3');
+  await expect(page.getByRole('button', { name: '保存', exact: true })).toBeEnabled();
+});

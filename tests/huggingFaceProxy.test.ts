@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer, type RequestListener } from 'node:http';
 import { once } from 'node:events';
 import { HuggingFaceProxy } from '../src/appServer/huggingFaceProxy';
+import { hfEvents, hfMessage } from './fixtures/hfResponses';
 
 async function harness(t: TestContext, handle: RequestListener) {
   const upstream = createServer(handle);
@@ -20,15 +21,11 @@ async function harness(t: TestContext, handle: RequestListener) {
 test('the HF adapter streams fragmented UTF-8/SSE and restores tool identities through completion', async t => {
   let request: Record<string, any> = {};
   const h = await harness(t, async (req, res) => {
-    assert.equal(req.url, '/v1/chat/completions');
+    assert.equal(req.url, '/v1/responses');
     assert.equal(req.headers.authorization, 'Bearer hf_proxy_fixture');
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     request = JSON.parse(Buffer.concat(chunks).toString());
-    const frames = [
-      { choices: [{ index: 0, delta: { reasoning_content: '日本語' } }] },
-      { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call-1', function: { name: request.tools[0].function.name, arguments: '{"text":"日本語"}' } }] }, finish_reason: 'tool_calls' }] },
-      { choices: [], usage: { prompt_tokens: 4, completion_tokens: 3, total_tokens: 7 } },
-    ];
+    const frames = hfEvents([hfMessage('日本語'), { type: 'function_call', id: 'item', call_id: 'call-1', name: request.tools[0].name, arguments: '{"text":"日本語"}' }], { input_tokens: 4, output_tokens: 3, total_tokens: 7 });
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     const bytes = Buffer.from(frames.map(frame => `data: ${JSON.stringify(frame)}\r\n\r\n`).join('') + 'data: [DONE]\n\n');
     const split = bytes.indexOf(Buffer.from('日')) + 1;
@@ -70,7 +67,7 @@ test('non-streaming responses restore tools and closing the adapter cancels in-f
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString());
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ choices: [{ index: 0, finish_reason: 'tool_calls', message: { tool_calls: [{ id: 'call', type: 'function', function: { name: body.tools[0].function.name, arguments: '{}' } }] } }] }));
+    res.end(JSON.stringify({ status: 'completed', output: [{ type: 'function_call', name: body.tools[0].name, call_id: 'call', arguments: '{}' }] }));
   });
   const response = await h.post({ tools: [{ type: 'namespace', name: 'fixture', tools: [{ type: 'function', name: 'echo', parameters: {} }] }] });
   const result = await response.json() as { output: { name: string; namespace: string; arguments: string }[] };
@@ -81,4 +78,9 @@ test('non-streaming responses restore tools and closing the adapter cancels in-f
   h.proxy.dispose();
   await assert.rejects(read);
   await cancelled;
+});
+
+test('HF streams without a terminal event fail instead of reporting a completed answer', async t => {
+  const h = await harness(t, (_req, res) => { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end('data: {"type":"response.created"}\n\n'); });
+  await assert.rejects(async () => (await h.post({ stream: true })).text());
 });

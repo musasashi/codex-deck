@@ -61,6 +61,12 @@ test('long and similarly named namespaces stay distinct; unsupported tools fail 
   assert.equal(new Set(tools.map(tool => tool.name)).size, 4);
   assert.ok(tools.every(tool => string(tool.name).length <= 64));
   assert.throws(() => huggingFaceRequest({ tools: [{ type: 'namespace', name: 'custom', tools: [{ type: 'custom', name: 'patch' }] }] }), /形式/);
-  assert.deepEqual(huggingFaceRequest({ reasoning: { effort: 'high', summary: 'concise' } }).body, { reasoning: { summary: 'concise' } });
+  assert.deepEqual(huggingFaceRequest({ reasoning: { effort: 'high', summary: 'concise' } }).body, {});
   assert.deepEqual(huggingFaceRequest({ reasoning: { effort: 'max', summary: 'none' } }).body, {});
+});
+
+test('HF replay omits unsupported reasoning items while keeping function calls and results', () => {
+  const call = { type: 'function_call', name: 'echo', call_id: 'one', arguments: '{}' };
+  const result = { type: 'function_call_output', call_id: 'one', output: 'test' };
+  assert.deepEqual(huggingFaceRequest({ input: [{ type: 'reasoning', summary: [] }, call, result] }).body.input, [call, result]);
 });

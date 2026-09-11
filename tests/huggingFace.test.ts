@@ -5,7 +5,7 @@ import { AppServerClient } from '../src/appServer/client';
 import { JsonRpcPeer } from '../src/appServer/rpc';
 import { TaskManager } from '../src/core/taskManager';
 import { HF_PROVIDER, huggingFaceModel, modelRequest, withHuggingFaceModels } from '../src/core/huggingFace';
-import { DEFAULT_PRESET, latestModel, resolveRunSettings, taskPresets, validatePreset, validateTitleModel } from '../src/core/settings';
+import { DEFAULT_PRESET, latestModel, readPresets, resolveRunSettings, taskPresets, validatePreset, validateTitleModel } from '../src/core/settings';
 import { object, string, type JsonObject, type RunSettings, type TitleRequest } from '../src/core/types';
 import { FakeGateway } from './helpers';
 
@@ -17,6 +17,7 @@ test('HF presets preserve routing suffixes and work without an OpenAI model cata
   assert.deepEqual(validatePreset(hfPreset, []), hfPreset);
   assert.equal(validateTitleModel(hfModel, []), hfModel);
   assert.deepEqual(resolveRunSettings(hfPreset, []), { ...hfPreset, effort: undefined });
+  assert.equal(readPresets([{ ...hfPreset, effort: 'max' }])[0]!.effort, 'default');
   assert.deepEqual(modelRequest(hfModel), { model: 'deepseek-ai/DeepSeek-V4-Flash:deepinfra', modelProvider: HF_PROVIDER });
   assert.deepEqual(modelRequest('gpt-model'), { model: 'gpt-model' });
   assert.equal(huggingFaceModel('hf:org/model:cheapest')?.label, 'HF · org/model:cheapest');
@@ -45,7 +46,7 @@ test('HF and OpenAI tasks route independently; restored and forked HF history ke
     if (method === 'model/list') return { data: [{ model: 'openai-model', isDefault: true, defaultReasoningEffort: 'high', supportedReasoningEfforts: [{ reasoningEffort: 'high' }] }] };
     if (method === 'thread/start') {
       const id = `thread-${++sequence}`;
-      const value = { thread: { id, cwd: '/project', modelProvider: params.modelProvider ?? 'openai', turns: [], status: { type: 'idle' } }, model: string(params.model) };
+      const value = { thread: { id, cwd: '/project', modelProvider: params.modelProvider ?? 'openai', turns: [], status: { type: 'idle' } }, model: string(params.model), reasoningEffort: 'max' };
       stored.set(id, value); return structuredClone(value);
     }
     const value = stored.get(string(params.threadId))!;
@@ -69,6 +70,8 @@ test('HF and OpenAI tasks route independently; restored and forked HF history ke
     await Promise.all([manager.send(hf.id, 'HF task'), manager.send(openai.id, 'OpenAI task')]);
     assert.equal(hf.status, 'running'); assert.equal(openai.status, 'running');
     assert.equal(hf.effectiveModel, hfModel); assert.equal(hf.modelProvider, HF_PROVIDER);
+    assert.equal(hf.effectiveEffort, undefined, 'the host effort must not appear as the HF model effort');
+    assert.equal(hf.settings.effort, 'default');
     const starts = calls.filter(call => call.method === 'thread/start');
     const hfStart = starts.find(call => call.params.modelProvider === HF_PROVIDER)!.params;
     assert.equal(hfStart.model, 'deepseek-ai/DeepSeek-V4-Flash:deepinfra');

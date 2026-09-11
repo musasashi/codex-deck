@@ -29,18 +29,15 @@ export function huggingFaceRequest(raw: JsonObject): { body: JsonObject; restore
         description: [tool.description, fn.description].filter(value => typeof value === 'string' && value).join('\n\n') };
     });
   });
-  if (Array.isArray(raw.input)) body.input = raw.input.map(call);
+  // HF's Responses input schema does not accept the reasoning items it returns.
+  if (Array.isArray(raw.input)) body.input = raw.input.filter(item => object(item).type !== 'reasoning').map(call);
   const choice = object(raw.tool_choice);
   if (choice.type === 'function' && typeof choice.namespace === 'string' && typeof choice.name === 'string') {
     const { namespace, ...rest } = choice;
     body.tool_choice = { ...rest, name: functionName(choice.name, namespace) };
   }
   // HF presets use the model's default effort, not the host's OpenAI effort setting.
-  if (raw.reasoning) {
-    const { effort: _effort, ...reasoning } = object(raw.reasoning);
-    if (reasoning.summary === 'none') delete reasoning.summary;
-    if (Object.keys(reasoning).length) body.reasoning = reasoning; else delete body.reasoning;
-  }
+  delete body.reasoning;
   const restore = (value: unknown): unknown => {
     if (Array.isArray(value)) return value.map(restore);
     if (!value || typeof value !== 'object') return value;

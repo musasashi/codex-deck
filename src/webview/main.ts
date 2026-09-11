@@ -204,13 +204,14 @@ function render(): void {
     ...models.filter(model => !task!.threadId || isHuggingFaceModel(model.id) === huggingFace).map(model => ({ id: model.id, label: model.label })),
   ], task.settings.model ?? '');
   const model = selectedModel(models, task.settings.model ?? task.effectiveModel ?? 'latest');
-  options($<HTMLSelectElement>('effort'), [
+  options($<HTMLSelectElement>('effort'), huggingFace ? [{ id: 'default', label: 'モデルの既定値' }] : [
     { id: '', label: task.effectiveEffort || '推論の強さ' },
     ...(task.settings.effort === 'default' ? [{ id: 'default', label: model?.defaultEffort || 'モデルの既定値' }] : []),
     ...(model?.efforts ?? []).map(effort => ({ id: effort.id, label: effort.id })),
-  ], task.settings.effort ?? '');
+  ], huggingFace ? 'default' : task.settings.effort ?? '');
   renderPermissions();
   for (const id of ['model', 'effort', 'mode']) $<HTMLSelectElement>(id).disabled = running || busy;
+  if (huggingFace) $<HTMLSelectElement>('effort').disabled = true;
   const cyclePreset = $<HTMLButtonElement>('cycle-preset');
   cyclePreset.disabled = running || busy || !presetCount || !models.length;
   cyclePreset.title = !presetCount ? '設定からプリセットを追加してください' : !models.length ? 'モデル一覧を読み込み中…' : '次のプリセットに切り替え';

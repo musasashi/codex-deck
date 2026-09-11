@@ -160,7 +160,8 @@ export class TaskManager {
     task.modelProvider = thread.modelProvider ?? task.modelProvider;
     if (!task.settings.model && isHuggingFaceModel(thread.model)) task.settings.model = thread.model;
     if (isHuggingFaceTask(task)) { task.autoResume = false; this.cancel(task); task.cost ??= emptyTaskCost(thread.turns.length > 0, thread.turns.map(turn => turn.id)); }
-    task.effectiveEffort = thread.effort;
+    task.effectiveEffort = isHuggingFaceTask(task) ? undefined : thread.effort;
+    if (isHuggingFaceTask(task)) task.settings.effort = 'default';
     task.effectivePermissionMode = thread.permissionMode ?? task.effectivePermissionMode;
     task.hydrated = true;
     task.error = undefined;
@@ -438,7 +439,7 @@ export class TaskManager {
     this.updateLastTurn(task, turn);
     if (turn.status === 'inProgress') {
       task.effectiveModel = task.settings.model ?? task.effectiveModel;
-      task.effectiveEffort = task.settings.effort ?? task.effectiveEffort;
+      task.effectiveEffort = isHuggingFaceTask(task) ? undefined : task.settings.effort ?? task.effectiveEffort;
       if (task.settings.mode !== 'default') task.effectivePermissionMode = task.settings.mode;
       this.cancel(task);
       task.activeTurnId = turn.id;

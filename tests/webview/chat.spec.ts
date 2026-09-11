@@ -15,6 +15,7 @@ test('HF task cost replaces quota gauges, updates live, and stays visible after 
   const value = task();
   value.settings = { model: 'hf:deepseek-ai/DeepSeek-V4-Flash:deepinfra', effort: 'default', mode: 'workspace-write', pricing: { input: 0.1, output: 0.2 } };
   value.modelProvider = 'codex_deck_huggingface';
+  value.effectiveEffort = 'max';
   value.cost = { ...emptyTaskCost(), usd: 0.1234 };
   const usage = decodeUsage({ rateLimits: { limitId: 'codex', primary: { usedPercent: 10, windowDurationMins: 300 }, secondary: { usedPercent: 20, windowDurationMins: 10080 } } });
   await state(page, value, usage);
@@ -22,6 +23,9 @@ test('HF task cost replaces quota gauges, updates live, and stays visible after 
   await expect(page.locator('#task-cost')).toHaveAttribute('title', /ユーザー設定の単価/);
   await expect(page.locator('#usage-gauges')).toBeHidden();
   await expect(page.locator('#auto-resume')).toBeHidden();
+  await expect(page.locator('#effort')).toHaveValue('default');
+  await expect(page.locator('#effort')).toBeDisabled();
+  await expect(page.locator('#effort option')).toHaveText(['モデルの既定値']);
   await expect(page.locator('#model')).toHaveValue(value.settings.model!);
   await expect(page.locator('#model option[value="catalog-model"]')).toHaveCount(0);
   value.cost.usd = 0.2345;
