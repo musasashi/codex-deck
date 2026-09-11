@@ -6,6 +6,7 @@ import { latestModel, presetEffortOptions, selectedModel } from '../core/setting
 import { isExternalTask, sameTaskProvider } from '../core/providers';
 import { costLabel } from '../core/cost';
 import { Composer } from './composer';
+import { bindSelectionContext, selectedTranscriptText } from './selection';
 import { UsageGauges } from './usage';
 import { Requests } from './requests';
 import { pendingSubmission, reconcilePendingSends, submissionContent, type PendingSend, type Submission } from './submissions';
@@ -46,6 +47,14 @@ for (const savedSend of array(saved.pendingSends).map(object)) {
 const completion = new Composer(prompt, $('completions'), $('skills'), post, saveDraft, renderPermissions, array(saved.skillPaths).filter((value): value is string => typeof value === 'string'));
 const usageGauges = new UsageGauges($('usage-gauges'));
 const requests = new Requests($('requests'), post);
+bindSelectionContext($('transcript'), () => task?.id);
+let selectingTranscript = false;
+document.addEventListener('selectionchange', () => {
+  const selected = !!selectedTranscriptText($('transcript'));
+  const released = selectingTranscript && !selected;
+  selectingTranscript = selected;
+  if (released) render();
+});
 
 function saveDraft(): void {
   if (task) vscode.setState({ taskId: task.id, draft: prompt.value, skillPaths: completion.skillPaths(), pendingSends, dismissedNotice });
@@ -166,8 +175,9 @@ function render(): void {
   const conversation = $('conversation');
   const atBottom = conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight < 80;
   const transcript = $('transcript');
+  const selected = !!selectedTranscriptText(transcript);
   const html = renderTranscript(task) + pendingSends.map(renderPendingSend).join('');
-  if (transcriptHtml !== html) {
+  if (transcriptHtml !== html && !selected) {
     const detailStates = new Map([...transcript.querySelectorAll<HTMLDetailsElement>('details[data-item]')].map(details => [
       detailKey(details), { open: details.open, status: details.closest<HTMLElement>('.turn')?.dataset.status },
     ]));
@@ -189,7 +199,7 @@ function render(): void {
   const plan = task.plan;
   $('plan-mode').hidden = task.settings.collaborationMode !== 'plan';
   $('plan').innerHTML = plan ? `<details class="plan"><summary>作業計画</summary><p>${escapeHtml(plan.explanation)}</p><ol>${plan.steps.map(step => `<li>${step.status === 'completed' ? '✓' : step.status === 'inProgress' ? '◉' : '○'} ${escapeHtml(step.step)}</li>`).join('')}</ol></details>` : '';
-  if (atBottom) conversation.scrollTop = conversation.scrollHeight;
+  if (atBottom && !selected) conversation.scrollTop = conversation.scrollHeight;
   requests.render(task.requests, busy, connected);
   updateAttachments();
   const running = isTaskRunning(task);
@@ -217,6 +227,8 @@ function render(): void {
   cyclePreset.disabled = running || busy || !presetCount || !models.length;
   cyclePreset.title = !presetCount ? '設定からプリセットを追加してください' : !models.length ? 'モデル一覧を読み込み中…' : '次のプリセットに切り替え';
   saveDraft();
+  const last = task.turns.at(-1);
+  if (transcriptHtml === html && last?.status === 'completed' && last.id === task.unreadTurnId) post('read', { turnId: last.id });
 }
 window.addEventListener('message', event => {
   const message = object(event.data);
@@ -230,8 +242,6 @@ window.addEventListener('message', event => {
     render();
     if (initialFocus && !task.threadId) prompt.focus();
     initialFocus = false;
-    const last = task.turns.at(-1);
-    if (last?.status === 'completed' && last.id === task.unreadTurnId) post('read', { turnId: last.id });
   } else if (message.type === 'messageCopied') {
     copiedMessage = JSON.stringify([message.turnId, message.itemId, 'copy']);
     clearTimeout(copyTimer);

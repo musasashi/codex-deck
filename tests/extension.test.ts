@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import { buildSync } from 'esbuild';
 import type * as vscode from 'vscode';
-import type { Task, TaskRecord } from '../src/core/types';
+import type { JsonObject, Task, TaskRecord } from '../src/core/types';
 import type { TaskManager } from '../src/core/taskManager';
 import type { PanelHost } from '../src/ui/panels';
 import { FakeGateway, thread } from './helpers';
@@ -29,36 +29,46 @@ function record(id: string, open: boolean, draft = false): TaskRecord {
     autoResume: false, claims: [], settings: { mode: 'default' } };
 }
 
-function panel(): vscode.WebviewPanel {
+function panel() {
   const disposed = new Emitter<void>();
-  return {
+  const messages: JsonObject[] = [];
+  let receive = async (_value: unknown): Promise<void> => {};
+  const webviewPanel = {
     active: true, viewColumn: 1,
-    webview: { cspSource: 'test:', asWebviewUri: (uri: vscode.Uri) => uri, onDidReceiveMessage: disposable, postMessage: async () => true },
+    webview: { cspSource: 'test:', asWebviewUri: (uri: vscode.Uri) => uri,
+      onDidReceiveMessage(listener: typeof receive) { receive = listener; return disposable(); },
+      async postMessage(message: JsonObject) { messages.push(structuredClone(message)); return true; } },
     reveal() {}, onDidChangeViewState: disposable, onDidDispose: disposed.event, dispose() { disposed.fire(); },
   } as unknown as vscode.WebviewPanel;
+  return Object.assign(webviewPanel, { messages, receive: (value: unknown) => receive(value) });
 }
 
 function activate(records: TaskRecord[], options: { remoteName?: string; isTrusted?: boolean; cliPath?: string } = { remoteName: 'wsl' }) {
   let stored: unknown = { version: 1, tasks: structuredClone(records) };
   let serializer!: vscode.WebviewPanelSerializer;
   let createdPanels = 0;
+  const openedPanels: ReturnType<typeof panel>[] = [];
   const trees = new Map<string, { getChildren(): Task[] }>();
   const commands = new Map<string, (arg?: unknown) => unknown>();
   const api = {
     EventEmitter: Emitter,
+    ViewColumn: { Active: -1 },
     env: { remoteName: options.remoteName },
     Uri: { file: (value: string) => new URL(`file://${value}`),
       joinPath: (uri: URL, ...parts: string[]) => new URL(`${uri}/${parts.join('/')}`) },
     window: {
       state: { focused: true },
+      activeTextEditor: undefined as vscode.TextEditor | undefined,
+      showQuickPick: async (_items: { label: string; task: Task }[]): Promise<{ label: string; task: Task } | undefined> => undefined,
       createOutputChannel: () => ({ ...disposable(), append() {}, appendLine() {} }),
       onDidChangeWindowState: disposable, registerFileDecorationProvider: disposable,
       registerTreeDataProvider(id: string, tree: { getChildren(): Task[] }) { trees.set(id, tree); return disposable(); },
       registerWebviewPanelSerializer(_type: string, value: vscode.WebviewPanelSerializer) { serializer = value; return disposable(); },
-      createWebviewPanel() { createdPanels++; return panel(); },
+      createWebviewPanel() { createdPanels++; const value = panel(); openedPanels.push(value); return value; },
     },
     workspace: {
       isTrusted: options.isTrusted ?? false, // Restoration must populate the tree even when connecting is unavailable.
+      workspaceFolders: [{ uri: { fsPath: '/project' } }],
       onDidChangeConfiguration: disposable, onDidCloseTextDocument: disposable, registerTextDocumentContentProvider: disposable,
       getConfiguration: () => ({ get: (key: string, fallback: unknown) => key === 'cliPath' ? options.cliPath ?? fallback : fallback }),
     },
@@ -73,7 +83,7 @@ function activate(records: TaskRecord[], options: { remoteName?: string; isTrust
   new Function('require', 'module', 'exports', bundle)((id: string) => id === 'vscode' ? api : nodeRequire(id), module, module.exports);
   module.exports.activate(context as unknown as vscode.ExtensionContext);
   return {
-    rows: () => trees.get('codexDeck.tasks')!.getChildren(), serializer, commands,
+    rows: () => trees.get('codexDeck.tasks')!.getChildren(), serializer, commands, api, openedPanels,
     createdPanels: () => createdPanels,
     records: () => (stored as { tasks: TaskRecord[] }).tasks,
     async shutdown() {
@@ -86,6 +96,69 @@ function activate(records: TaskRecord[], options: { remoteName?: string; isTrust
 test('unsupported remote hosts cannot activate the extension', () => {
   assert.throws(() => activate([], { remoteName: 'ssh-remote' }), /WSL接続で開き/);
   assert.throws(() => activate([], { remoteName: 'dev-container' }), /WSL接続で開き/);
+});
+
+test('selection mentions replace the old command and use the source chat instead of another active task', async () => {
+  const extension = activate([record('first', true), record('source', true)]);
+  const first = panel(), source = panel();
+  try {
+    await extension.serializer.deserializeWebviewPanel(first, { taskId: 'first' });
+    await extension.serializer.deserializeWebviewPanel(source, { taskId: 'source' });
+    await source.receive({ type: 'ready' });
+    assert.equal(extension.commands.has('codexDeck.addSelection'), false);
+    const manifest = nodeRequire('./package.json');
+    assert.equal(manifest.contributes.commands.some((command: { command: string }) => command.command === 'codexDeck.addSelection'), false);
+    assert.equal(manifest.contributes.commands.find((command: { command: string }) => command.command === 'codexDeck.mentionSelection').title, 'Codex-Deckで言及');
+    assert.equal(manifest.contributes.menus['editor/context'][0].command, 'codexDeck.mentionSelection');
+    assert.deepEqual(manifest.contributes.menus['webview/context'], [{ command: 'codexDeck.mentionSelection', when: 'webviewId == codexDeck.task && codexDeckHasSelection', group: 'codexDeck' }]);
+
+    await extension.commands.get('codexDeck.mentionSelection')!({ webview: 'codexDeck.task', codexDeckTaskId: 'source', codexDeckSelectionText: '選択した文章\n  字下げを保持' });
+    assert.deepEqual(source.messages.at(-1), { type: 'insertReference', text: '> 参照元: 会話「source」\n>\n> 選択した文章\n>   字下げを保持\n\n' });
+    assert.equal(first.messages.some(message => message.type === 'insertReference'), false);
+    assert.ok(extension.rows().every(task => !task.attachments.length && !task.turns.length));
+  } finally { await extension.shutdown(); }
+});
+
+test('editor mentions snapshot unsaved text before choosing a task and wait for its composer to be ready', async () => {
+  const extension = activate([record('first', true), record('target', true)]);
+  let selectedText = '一行目\r\n\r\n  <tag>二行目</tag>';
+  extension.api.window.activeTextEditor = {
+    document: { uri: { scheme: 'file', fsPath: '/project/開いている文章.md' }, getText: () => selectedText },
+    selection: { isEmpty: false, start: { line: 4, character: 2 }, end: { line: 6, character: 18 } },
+  } as unknown as vscode.TextEditor;
+  extension.api.window.showQuickPick = async items => {
+    selectedText = '選択後に変更された文章';
+    extension.api.window.activeTextEditor = undefined;
+    return items.find(item => item.task.id === 'target');
+  };
+  try {
+    await extension.commands.get('codexDeck.mentionSelection')!();
+    const target = extension.openedPanels[0]!;
+    assert.equal(extension.createdPanels(), 1);
+    assert.equal(target.messages.some(message => message.type === 'insertReference'), false);
+    await target.receive({ type: 'ready' });
+    assert.deepEqual(target.messages.at(-1), { type: 'insertReference', text: '> 参照元: /project/開いている文章.md:5:3-7:19\n>\n> 一行目\n> \n>   <tag>二行目</tag>\n\n' });
+    await target.receive({ type: 'ready' });
+    assert.equal(target.messages.filter(message => message.type === 'insertReference').length, 1);
+    assert.ok(extension.rows().every(task => !task.attachments.length && !task.turns.length));
+  } finally { await extension.shutdown(); }
+});
+
+test('editor mentions create a draft when no task is open and retain untitled document locations', async () => {
+  const extension = activate([]);
+  extension.api.window.activeTextEditor = {
+    document: { uri: { scheme: 'untitled', toString: () => 'untitled:Untitled-1' }, getText: () => 'まだ保存していない文章' },
+    selection: { isEmpty: false, start: { line: 0, character: 0 }, end: { line: 0, character: 13 } },
+  } as unknown as vscode.TextEditor;
+  try {
+    await extension.commands.get('codexDeck.mentionSelection')!();
+    assert.equal(extension.rows().length, 1);
+    const target = extension.openedPanels[0]!;
+    await target.receive({ type: 'ready' });
+    assert.deepEqual(target.messages.at(-1), { type: 'insertReference', text: '> 参照元: untitled:Untitled-1:1:1-1:14\n>\n> まだ保存していない文章\n\n' });
+    assert.equal(extension.rows()[0]!.threadId, undefined);
+    assert.equal(extension.rows()[0]!.attachments.length, 0);
+  } finally { await extension.shutdown(); }
 });
 
 test('Windows CLI paths are rejected before connecting from WSL', async () => {

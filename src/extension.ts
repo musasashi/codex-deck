@@ -11,6 +11,7 @@ import { ResponsesConnections } from './appServer/responsesConnections';
 import { TaskManager, readTaskRecords } from './core/taskManager';
 import { messageMarkdown, taskMarkdown } from './core/taskCopy';
 import { linkedThreadId, taskDeepLink } from './core/taskReferences';
+import { selectionReference } from './core/selectionReference';
 import { IMAGE_FORMAT_ERROR, isImageDataUrl, MAX_ATTACHMENT_BYTES } from './core/attachments';
 import { configPermissionMode, parseSlashCommand, permissionOptions, permissionPresets, resolveSkillMentions, slashCommands } from './core/composer';
 import { workingDiff } from './core/gitDiff';
@@ -112,7 +113,7 @@ class DeckExtension implements PanelHost {
       renameTask: async arg => this.rename(await this.task(arg)), archiveTask: async arg => this.archive(await this.task(arg)), forkTask: async arg => this.fork(await this.task(arg)),
       copyTaskDeepLink: async arg => this.copyTaskDeepLink(await this.task(arg)),
       copyTaskMarkdown: async arg => this.copyTaskMarkdown(await this.task(arg)),
-      addSelection: () => this.addSelection(), addFile: arg => this.addFile(arg instanceof vscode.Uri ? arg : undefined),
+      mentionSelection: arg => this.mentionSelection(arg), addFile: arg => this.addFile(arg instanceof vscode.Uri ? arg : undefined),
       signIn: () => this.signIn(), signOut: () => this.signOut(), settings: () => this.settings(),
       mcp: () => this.mcp(), skills: async () => this.skills(await this.task()), review: async () => this.review(await this.task()),
       showDiff: async () => this.showDiff(await this.task()), worktree: () => this.worktree(),
@@ -370,15 +371,28 @@ class DeckExtension implements PanelHost {
     }
     this.panels.open(task);
   }
-  private async addSelection(): Promise<void> {
+  private async mentionSelection(arg?: unknown): Promise<void> {
+    const context = object(arg);
+    const taskId = string(context.codexDeckTaskId);
+    if (taskId) {
+      const text = string(context.codexDeckSelectionText);
+      if (!text.trim()) return;
+      const task = this.manager.get(taskId);
+      this.panels.open(task);
+      this.panels.message(task.id, { type: 'insertReference', text: selectionReference(text, `会話「${task.title}」`) });
+      return;
+    }
     const editor = vscode.window.activeTextEditor;
-    if (!editor || editor.selection.isEmpty) throw new Error('エディタで追加する範囲を選択してください。');
+    if (!editor || editor.selection.isEmpty) throw new Error('言及する文章を範囲選択してください。');
     const text = editor.document.getText(editor.selection);
-    const filename = editor.document.uri.fsPath;
-    const range = `${editor.selection.start.line + 1}-${editor.selection.end.line + 1}`;
+    if (!text.trim()) return;
+    const uri = editor.document.uri;
+    const filename = uri.scheme === 'file' ? uri.fsPath : uri.toString();
+    const { start, end } = editor.selection;
+    const source = `${filename}:${start.line + 1}:${start.character + 1}-${end.line + 1}:${end.character + 1}`;
     const task = await this.task();
-    this.manager.attach(task.id, { id: randomUUID(), label: `${path.basename(filename)}:${range}`, input: { type: 'text', text: `選択範囲: ${filename}:${range}\n\n${text}` } });
     this.panels.open(task);
+    this.panels.message(task.id, { type: 'insertReference', text: selectionReference(text, source) });
   }
   private async signIn(): Promise<void> {
     await this.connect();

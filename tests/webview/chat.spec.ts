@@ -7,6 +7,7 @@ import { decodeUsage } from '../../src/appServer/client';
 import { TaskManager } from '../../src/core/taskManager';
 import { questionAnswerText } from '../../src/core/questions';
 import { taskReferenceBody } from '../../src/core/taskReferenceText';
+import { selectionReference } from '../../src/core/selectionReference';
 import { FakeGateway, thread } from '../helpers';
 import type { Skill, Task, Usage } from '../../src/core/types';
 import { emptyTaskCost } from '../../src/core/cost';
@@ -141,6 +142,119 @@ test.beforeEach(async ({ page }) => {
   });
   await page.goto('http://localhost/');
   await expect.poll(async () => (await messages(page)).some(message => message.type === 'ready')).toBe(true);
+});
+
+async function selectionMenuContext(page: Page, selector: string, point?: { x: number; y: number }) {
+  await page.evaluate(() => {
+    // VS Code reads the clicked element's inherited context in the window's
+    // bubbling listener and passes it to the contributed menu command.
+    window.addEventListener('contextmenu', event => {
+      let element = event.target as HTMLElement | null;
+      let context = {};
+      while (element) {
+        element = element.closest<HTMLElement>('[data-vscode-context]');
+        if (!element) break;
+        context = { ...JSON.parse(element.dataset.vscodeContext!), ...context };
+        element = element.parentElement;
+      }
+      document.body.dataset.menuContext = JSON.stringify(context);
+    }, { once: true });
+  });
+  if (point) await page.mouse.click(point.x, point.y, { button: 'right' });
+  else await page.locator(selector).click({ button: 'right' });
+  return JSON.parse((await page.locator('body').getAttribute('data-menu-context'))!) as Record<string, unknown>;
+}
+
+test('dragging an answer exposes a native selection mention and appends a quote followed by a comment', async ({ page }, info) => {
+  const value = task();
+  value.turns = [{ id: 'answer', status: 'completed', items: [{ id: 'reply', kind: 'agentMessage', data: { text: '前の説明。選択した文章です。後の説明。' } }] }];
+  await state(page, value);
+  const prompt = page.locator('#prompt');
+  await prompt.fill('入力中の下書き');
+  await prompt.selectText();
+  const paragraph = page.locator('.assistant .markdown p');
+  const bounds = await paragraph.evaluate(element => {
+    const range = document.createRange();
+    range.setStart(element.firstChild!, 5);
+    range.setEnd(element.firstChild!, 14);
+    const box = range.getBoundingClientRect();
+    return { left: box.left, right: box.right, y: box.top + box.height / 2 };
+  });
+  await page.mouse.move(bounds.left, bounds.y);
+  await page.mouse.down();
+  await page.mouse.move(bounds.right, bounds.y, { steps: 12 });
+  await page.mouse.up();
+  expect(await page.evaluate(() => window.getSelection()?.toString())).toBe('選択した文章です。');
+  const context = await selectionMenuContext(page, '.assistant .markdown p', { x: (bounds.left + bounds.right) / 2, y: bounds.y });
+  expect(context).toEqual({ codexDeckHasSelection: true, codexDeckTaskId: value.id, codexDeckSelectionText: '選択した文章です。' });
+  await receive(page, { type: 'insertReference', text: selectionReference(context.codexDeckSelectionText as string, `会話「${value.title}」`) });
+  const quoted = `入力中の下書き\n\n> 参照元: 会話「${value.title}」\n>\n> 選択した文章です。\n\n`;
+  await expect(prompt).toHaveValue(quoted);
+  await expect(prompt).toBeFocused();
+  expect(await prompt.evaluate(element => [(element as HTMLTextAreaElement).selectionStart, (element as HTMLTextAreaElement).selectionEnd])).toEqual([quoted.length, quoted.length]);
+  expect((await messages(page)).some(message => message.type === 'send')).toBe(false);
+  await expect(page.locator('#attachments')).toBeHidden();
+  await page.keyboard.insertText('この部分を詳しく説明してください。');
+  const draft = quoted + 'この部分を詳しく説明してください。';
+  await expect.poll(() => page.evaluate(() => JSON.parse(sessionStorage.getItem('webviewState')!).draft)).toBe(draft);
+  await page.reload();
+  await state(page, value);
+  await expect(prompt).toHaveValue(draft);
+  await prompt.press('Enter');
+  expect((await messages(page)).findLast(message => message.type === 'send')).toMatchObject({ text: draft, attachmentIds: [] });
+  const user = page.locator('.pending-send .message.user');
+  await expect(user.locator('.user-quote')).toContainText('選択した文章です。');
+  await expect(user.locator('.user-quote')).not.toContainText('この部分を詳しく');
+  await expect(user.locator('.user-text').last()).toHaveText('この部分を詳しく説明してください。');
+  await page.screenshot({ path: info.outputPath('selection-mention.png'), fullPage: true });
+});
+
+test('selection mentions preserve multiline code during streaming and hide outside selected conversation text', async ({ page }) => {
+  const value = task();
+  value.activeTurnId = 'streaming'; value.status = 'running';
+  value.turns = [{ id: 'streaming', status: 'inProgress', items: [{ id: 'reply', kind: 'agentMessage', data: { text: '```ts\nconst x = 1;\n  run(x);\n```' } }] }];
+  await state(page, value);
+  expect(await selectionMenuContext(page, '.assistant .markdown code')).toEqual({ codexDeckHasSelection: false });
+  await page.locator('.assistant .markdown code').evaluate(element => {
+    const text = element.firstChild!;
+    window.getSelection()!.setBaseAndExtent(text, text.textContent!.length, text, 0);
+  });
+  const context = await selectionMenuContext(page, '.assistant .markdown code');
+  expect(context.codexDeckSelectionText).toBe('const x = 1;\n  run(x);');
+  value.turns[0]!.items[0]!.data.text += '\n\n追加された説明';
+  value.turns[0]!.status = 'completed'; value.activeTurnId = undefined; value.status = 'idle';
+  value.unreadTurnId = 'streaming';
+  await state(page, value);
+  expect(await page.evaluate(() => window.getSelection()?.toString())).toBe(context.codexDeckSelectionText);
+  await expect(page.locator('.assistant .markdown')).not.toContainText('追加された説明');
+  expect((await messages(page)).filter(message => message.type === 'read')).toEqual([]);
+  await receive(page, { type: 'insertReference', text: selectionReference(context.codexDeckSelectionText as string, `会話「${value.title}」`) });
+  await expect(page.locator('.assistant .markdown')).toContainText('追加された説明');
+  expect((await messages(page)).filter(message => message.type === 'read')).toEqual([{ type: 'read', turnId: 'streaming' }]);
+  await expect(page.locator('#prompt')).toHaveValue(`> 参照元: 会話「${value.title}」\n>\n> const x = 1;\n>   run(x);\n\n`);
+  await page.locator('#prompt').selectText();
+  expect(await selectionMenuContext(page, '#prompt')).toEqual({});
+  await page.evaluate(() => window.getSelection()?.removeAllRanges());
+  expect(await selectionMenuContext(page, '.assistant .markdown code')).toEqual({ codexDeckHasSelection: false });
+});
+
+test('editor references can be added repeatedly while preserving an existing draft and exact selected text', async ({ page }) => {
+  await state(page, task());
+  const prompt = page.locator('#prompt');
+  await prompt.fill('既存のコメント\n');
+  await receive(page, { type: 'insertReference', text: selectionReference('  <script>選択文</script>\n\n> 引用内の引用', '/project/文書.md:2:3-4:8') });
+  await page.keyboard.insertText('最初のコメント');
+  await receive(page, { type: 'insertReference', text: selectionReference('次の選択文', '/project/文書.md:8:1-8:6') });
+  const expected = '既存のコメント\n\n> 参照元: /project/文書.md:2:3-4:8\n>\n>   <script>選択文</script>\n> \n> > 引用内の引用\n\n最初のコメント\n\n> 参照元: /project/文書.md:8:1-8:6\n>\n> 次の選択文\n\n';
+  await expect(prompt).toHaveValue(expected);
+  await expect(prompt).toBeFocused();
+  await page.keyboard.insertText('次のコメント');
+  await prompt.press('Enter');
+  expect((await messages(page)).findLast(message => message.type === 'send')?.text).toBe(expected + '次のコメント');
+  const user = page.locator('.pending-send .message.user');
+  await expect(user.locator('.user-quote')).toHaveCount(2);
+  await expect(user.locator('.user-quote').first()).toContainText('<script>選択文</script>');
+  await expect(user.locator('script')).toHaveCount(0);
 });
 
 test('empty chat shows only registered skills, dynamic settings, auto-resume toggle and keyboard input', async ({ page }, info) => {

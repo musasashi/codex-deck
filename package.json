@@ -88,8 +88,8 @@
         "category": "Codex Deck"
       },
       {
-        "command": "codexDeck.addSelection",
-        "title": "選択範囲をタスクに追加",
+        "command": "codexDeck.mentionSelection",
+        "title": "Codex-Deckで言及",
         "category": "Codex Deck"
       },
       {
@@ -248,8 +248,15 @@
       ],
       "editor/context": [
         {
-          "command": "codexDeck.addSelection",
+          "command": "codexDeck.mentionSelection",
           "when": "editorHasSelection",
+          "group": "codexDeck"
+        }
+      ],
+      "webview/context": [
+        {
+          "command": "codexDeck.mentionSelection",
+          "when": "webviewId == codexDeck.task && codexDeckHasSelection",
           "group": "codexDeck"
         }
       ],
