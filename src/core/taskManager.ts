@@ -7,7 +7,7 @@ import { addTaskCost, emptyTaskCost, type TokenPrice } from './cost';
 import { messageQuestions, questionAnswerText } from './questions';
 import { referencedTaskInput } from './taskReferences';
 import { FORK_TITLE, provisionalTitle, titleInput } from './taskTitle';
-import { array, object, string, messageOf, Signal, type Attachment, type Gateway, type Input, type PendingRequest, type RequestAnswer, type RunSettings, type ServerEvent, type Task, type TaskRecord, type Thread, type TitleSource, type Turn, type Usage } from './types';
+import { array, object, string, messageOf, isTaskRunning, Signal, type Attachment, type CollaborationMode, type Gateway, type Input, type PendingRequest, type RequestAnswer, type RunSettings, type ServerEvent, type Task, type TaskRecord, type Thread, type TitleSource, type Turn, type Usage } from './types';
 
 export const CONTINUE_MESSAGE = '使用量上限で中断した作業を直前の状態から続行してください。';
 const POLL_MS = 10 * 60 * 1000;
@@ -97,6 +97,7 @@ export class TaskManager {
       task.effectiveEffort = settings.effort === 'default' ? undefined : settings.effort;
       task.cost = emptyTaskCost(false, thread.turns.map(turn => turn.id));
     }
+    if (source.settings.collaborationMode) task.settings.collaborationMode = source.settings.collaborationMode;
     task.titleSource = 'fork';
     // Persist the fallback so history and reloads also stop using the inherited name.
     try { await this.writeTitle(task, task.title, 'fork'); }
@@ -215,9 +216,15 @@ export class TaskManager {
     if (task.threadId && settings.model && !sameTaskProvider(task, settings.model)) {
       throw new Error('会話の接続先は変更できません。別の接続先を使う場合は新規タスクでプリセットを選択してください。');
     }
-    task.settings = { ...settings };
+    const collaborationMode = settings.collaborationMode ?? task.settings.collaborationMode;
+    task.settings = { ...settings, ...(collaborationMode ? { collaborationMode } : {}) };
     if (isExternalTask(task)) { task.autoResume = false; this.cancel(task); task.cost ??= emptyTaskCost(!!task.threadId); }
     this.touch(task, true);
+  }
+  setCollaborationMode(id: string, mode: CollaborationMode): void {
+    const task = this.get(id);
+    if (isTaskRunning(task) || task.busy) throw new Error('実行が完了してからプランモードを切り替えてください。');
+    this.updateSettings(id, { ...task.settings, collaborationMode: mode });
   }
   async rename(id: string, name: string): Promise<void> {
     const task = this.get(id);

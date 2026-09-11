@@ -11,6 +11,7 @@ export function chatHtml(options: { cspSource: string; script: string; css: stri
       <section id="requests" aria-label="承認と質問" hidden></section>
       <footer class="composer-area"><form id="composer">
         <div id="completions" hidden></div><div id="attachments" class="attachments" role="list" aria-label="添付ファイル" hidden></div>
+        <div id="plan-mode" role="status" hidden>プランモード · /plan で通常モードに戻る</div>
         <label class="sr-only" for="prompt">メッセージ</label><textarea id="prompt" rows="2" placeholder="作業内容を入力。 / コマンド · @ ファイル · $ スキル" aria-autocomplete="list" aria-controls="completion-list" aria-expanded="false" autofocus></textarea>
         <div id="image-status" role="status" hidden></div>
         <div class="composer-tools">

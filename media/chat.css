@@ -78,6 +78,7 @@ summary { cursor: pointer; font-size: 12px; overflow-wrap: anywhere; }
 .composer-area { padding: 12px max(20px, calc((100% - 820px) / 2)) 10px; }
 #composer { position: relative; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); }
 #composer:focus-within { border-color: var(--vscode-focusBorder); }
+#plan-mode { padding: 8px 12px 0; color: var(--vscode-textLink-foreground); font-size: 11px; }
 #completions { position: absolute; bottom: calc(100% + 5px); left: 0; right: 0; z-index: 2; max-height: 45vh; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--vscode-editorWidget-background, var(--surface)); box-shadow: 0 3px 10px #0003; }
 #completion-list button { display: flex; flex-direction: column; gap: 1px; width: 100%; color: var(--vscode-foreground); background: transparent; text-align: left; border-radius: 0; padding: 7px 11px; overflow-wrap: anywhere; }
 #completion-list button[aria-selected=true] { background: var(--vscode-list-activeSelectionBackground, var(--vscode-button-secondaryBackground)); color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground)); }

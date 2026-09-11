@@ -34,6 +34,42 @@ test('new tasks are listed immediately and stay listed after completion; closing
   assert.ok(manager.openTasks.includes(task));
 });
 
+test('plan mode stays scoped to its task and survives settings changes, forks, and reloads', async () => {
+  const { manager, gateway, task } = setup();
+  let restored: TaskManager | undefined;
+  try {
+    manager.setCollaborationMode(task.id, 'plan');
+    assert.equal(manager.create('/other').settings.collaborationMode, undefined);
+    manager.updateSettings(task.id, { model: 'test-model', effort: 'high', mode: 'auto-review' });
+    assert.equal(task.settings.collaborationMode, 'plan');
+    await manager.send(task.id, '計画を作成');
+    assert.equal(gateway.sent[0]?.settings.collaborationMode, 'plan');
+    assert.throws(() => manager.setCollaborationMode(task.id, 'default'), /実行が完了/);
+    gateway.finish(task.threadId!, task.activeTurnId!, 'completed');
+    const fork = await manager.fork(task.id);
+    assert.equal(fork.settings.collaborationMode, 'plan');
+    const records = readTaskRecords(JSON.parse(JSON.stringify({ version: 1, tasks: manager.records() })));
+    restored = new TaskManager(gateway, { async save() {} }, records, { schedule: false });
+    await restored.restore(task.id);
+    assert.equal(restored.get(task.id).settings.collaborationMode, 'plan');
+    restored.setCollaborationMode(task.id, 'default');
+    await restored.send(task.id, '実装してください');
+    assert.equal(gateway.sent.at(-1)?.settings.collaborationMode, 'default');
+    assert.equal(restored.get(fork.id).settings.collaborationMode, 'plan');
+  } finally { restored?.dispose(); manager.dispose(); }
+});
+
+test('automatic continuation retains plan mode', async () => {
+  const state = setup();
+  try {
+    state.manager.setCollaborationMode(state.task.id, 'plan');
+    waitForUsage(state);
+    await state.manager.checkUsage();
+    assert.equal(state.gateway.sent.length, 1);
+    assert.equal(state.gateway.sent[0]?.settings.collaborationMode, 'plan');
+  } finally { state.manager.dispose(); }
+});
+
 test('only completed answers become unread and acknowledgements are scoped to the task and turn', async () => {
   const { manager, gateway, task, saved } = setup();
   const other = manager.adoptThread(thread('other'));

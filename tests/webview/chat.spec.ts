@@ -742,7 +742,7 @@ test('slash commands filter locally, use keyboard selection, and skills/mention 
   await prompt.pressSequentially('m');
   await expect(page.locator('#completion-list [role=option]')).toHaveCount(3);
   await prompt.press('Backspace');
-  await expect(page.locator('#completion-list [role=option]')).toHaveCount(20);
+  await expect(page.locator('#completion-list [role=option]')).toHaveCount(21);
   await prompt.press('ArrowDown'); await prompt.press('Tab');
   await expect(prompt).toHaveValue('/permissions ');
   expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(0);
@@ -759,6 +759,73 @@ test('slash commands filter locally, use keyboard selection, and skills/mention 
   await expect(prompt).toHaveValue('@');
   await fileRequest(page, '');
   expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(1);
+});
+
+for (const enterBehavior of ['modEnter', 'enter']) test(`Tab-completed slash commands execute on Enter with ${enterBehavior} settings`, async ({ page }) => {
+  const value = task();
+  value.settings.collaborationMode = 'plan';
+  const update = () => receive(page, { type: 'state', task: value, models, connected: true, enterBehavior });
+  await update(); await catalog(page);
+  const prompt = page.getByLabel('メッセージ', { exact: true });
+  await expect(page.locator('#plan-mode')).toBeVisible();
+  for (const [index, name] of ['plan', 'permissions'].entries()) {
+    await prompt.fill(`/${name}`);
+    await prompt.press('Tab');
+    await expect(prompt).toHaveValue(`/${name} `);
+    await expect(page.locator('#completions')).toBeHidden();
+    expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(index);
+    await prompt.press('Enter');
+    expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(index + 1);
+    expect((await messages(page)).at(-1)).toMatchObject({ type: 'send', text: `/${name} ` });
+    value.settings.collaborationMode = 'default';
+    await update(); await sendResult(page, 'sent');
+    await expect(prompt).toHaveValue('');
+    await expect(page.locator('#plan-mode')).toBeHidden();
+  }
+});
+
+test('Tab completion keeps Shift+Enter as a newline and command arguments use the configured send key', async ({ page }) => {
+  await receive(page, { type: 'state', task: task(), models, connected: true, enterBehavior: 'modEnter' });
+  await catalog(page);
+  const prompt = page.getByLabel('メッセージ', { exact: true });
+  await prompt.fill('/plan'); await prompt.press('Tab'); await prompt.press('Shift+Enter');
+  await expect(prompt).toHaveValue('/plan \n');
+  expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(0);
+  for (const text of ['通常のメッセージ', '/plan 計画してください', '/unknown ']) {
+    await prompt.fill(text); await prompt.press('Enter');
+    await expect(prompt).toHaveValue(`${text}\n`);
+    expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(0);
+  }
+  await prompt.fill('/plan 計画してください'); await prompt.press('Control+Enter');
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'send', text: '/plan 計画してください' });
+});
+
+test('plan commands complete and submit with attachments while the current mode stays visible', async ({ page }, info) => {
+  const value = task();
+  await state(page, value); await catalog(page);
+  const prompt = page.getByLabel('メッセージ', { exact: true });
+  await expect(page.locator('#plan-mode')).toBeHidden();
+  await prompt.fill('/pl');
+  await expect(page.getByRole('option', { name: '/plan プランモードを切り替え・続けて指示を入力' })).toBeVisible();
+  await prompt.press('Enter');
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'send', text: '/plan ' });
+  value.settings.collaborationMode = 'plan';
+  await state(page, value); await sendResult(page, 'sent');
+  await expect(prompt).toHaveValue('');
+  await expect(page.locator('#plan-mode')).toHaveText('プランモード · /plan で通常モードに戻る');
+  await pasteClipboardImages(page); await acceptImages(page, value, await imageRequest(page));
+  await prompt.fill('/plan $registered-one この画像の画面を設計してください');
+  await prompt.press('Enter');
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'send', text: '/plan $registered-one この画像の画面を設計してください', attachmentIds: value.attachments.map(attachment => attachment.id) });
+  await sendResult(page, 'failure');
+  await expect(prompt).toHaveValue('/plan $registered-one この画像の画面を設計してください');
+  await expect(page.locator('#plan-mode')).toBeVisible();
+  await page.setViewportSize({ width: 380, height: 850 });
+  expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
+  await page.screenshot({ path: info.outputPath('plan-mode.png'), fullPage: true });
+  value.settings.collaborationMode = 'default';
+  await state(page, value);
+  await expect(page.locator('#plan-mode')).toBeHidden();
 });
 
 test('file lookup inserts a quoted path on Enter without submitting, and ignores stale responses after edits or Escape', async ({ page }, info) => {

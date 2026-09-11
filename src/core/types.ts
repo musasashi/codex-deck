@@ -39,7 +39,8 @@ export interface Model {
   structuredOutput?: boolean;
 }
 export type ExecutionMode = 'default' | 'read-only' | 'workspace-write' | 'auto-review' | 'danger-full-access';
-export interface RunSettings { model?: string; effort?: string; mode: ExecutionMode; pricing?: TokenPrice }
+export type CollaborationMode = 'default' | 'plan';
+export interface RunSettings { model?: string; effort?: string; mode: ExecutionMode; collaborationMode?: CollaborationMode; pricing?: TokenPrice }
 export interface SettingsPreset extends RunSettings { model: string; effort: string }
 export interface TurnError { message: string; kind?: string }
 export interface Item { id: string; kind: string; data: JsonObject }

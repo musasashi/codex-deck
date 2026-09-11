@@ -83,6 +83,7 @@ export class AppServerClient implements Gateway {
   private threadProviders = new Map<string, string>();
   private threadPricing = new Map<string, TokenPrice | undefined>();
   private threadSettings = new Map<string, string>();
+  private threadDefaults = new Map<string, { model?: string; effort?: string }>();
   private modelList?: Promise<Model[]>;
   private titles?: TitleGenerator;
 
@@ -126,7 +127,7 @@ export class AppServerClient implements Gateway {
       this.pending.clear();
       this.events.emit({ type: 'connection', connected: false, message: error.message });
     }));
-    await peer.request('initialize', { clientInfo: { name: 'codex_deck', title: 'Codex Deck', version: '0.1.0' } });
+    await peer.request('initialize', { clientInfo: { name: 'codex_deck', title: 'Codex Deck', version: '0.1.0' }, capabilities: { experimentalApi: true } });
     peer.notify('initialized');
     this.connected = true;
     this.events.emit({ type: 'connection', connected: true });
@@ -141,6 +142,7 @@ export class AppServerClient implements Gateway {
     this.threadProviders.clear();
     this.threadPricing.clear();
     this.threadSettings.clear();
+    this.threadDefaults.clear();
     this.modelList = undefined;
     this.peer = undefined;
     this.connected = false;
@@ -195,6 +197,7 @@ export class AppServerClient implements Gateway {
     if (typeof result.model === 'string') thread.model = displayModel(result.model, thread.modelProvider);
     if (typeof result.reasoningEffort === 'string') thread.effort = result.reasoningEffort;
     if (isHuggingFaceProvider(thread.modelProvider)) thread.effort = undefined;
+    this.threadDefaults.set(thread.id, { model: modelRequest(thread.model).model, effort: thread.effort });
     thread.permissionMode = permissionMode(object(result.sandbox).type, result.approvalsReviewer, result.approvalPolicy);
     if (loadHistory && (object(result.thread).historyMode === 'paginated' || typeof result.turnsBackwardsCursor === 'string')) {
       const turns = await this.pages('thread/turns/list', { threadId: thread.id, sortDirection: 'asc', itemsView: 'full', limit: 100 });
@@ -236,6 +239,14 @@ export class AppServerClient implements Gateway {
       await this.resumeThread(threadId, settings);
     const { model } = modelRequest(settings.model);
     if (isExternalProvider(provider) || isExternalModel(settings.model)) this.threadPricing.set(threadId, settings.pricing);
+    const defaults = this.threadDefaults.get(threadId);
+    const hf = isHuggingFaceProvider(provider) || isHuggingFaceModel(settings.model);
+    const effort = hf || settings.effort === 'default' ? undefined : settings.effort
+      ?? (isExternalProvider(provider) || isExternalModel(settings.model) ? undefined : defaults?.effort);
+    const collaborationMode = settings.collaborationMode ? { mode: settings.collaborationMode, settings: {
+      model: requiredString(model ?? defaults?.model, 'プランモードのモデル'),
+      reasoning_effort: effort ?? null, developer_instructions: null,
+    } } : undefined;
     const sandbox = settings.mode === 'default' ? undefined : settings.mode === 'read-only' ? { type: 'readOnly', networkAccess: false }
       : settings.mode === 'workspace-write' || settings.mode === 'auto-review' ? { type: 'workspaceWrite', writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false }
       : { type: 'dangerFullAccess' };
@@ -244,7 +255,9 @@ export class AppServerClient implements Gateway {
       ...(model ? { model } : {}), ...(parseResponsesModel(settings.model) ? { effort: settings.effort ?? null }
         : settings.effort && !isHuggingFaceProvider(provider) && !isHuggingFaceModel(settings.model) ? { effort: settings.effort } : {}),
       ...(sandbox ? { sandboxPolicy: sandbox, approvalPolicy: settings.mode === 'danger-full-access' ? 'never' : 'on-request', approvalsReviewer: settings.mode === 'auto-review' ? 'auto_review' : 'user' } : {}),
+      ...(collaborationMode ? { collaborationMode } : {}),
     });
+    this.threadDefaults.set(threadId, { model: model ?? defaults?.model, effort });
     return decodeTurn(result.turn);
   }
   async steerTurn(threadId: string, turnId: string, input: Input[]): Promise<void> { await this.call('turn/steer', { threadId, expectedTurnId: turnId, input: this.encodeInput(input) }); }

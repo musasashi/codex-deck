@@ -1,7 +1,7 @@
 import { array, object, string, statusLabel, isTaskRunning, type Attachment, type Model, type Task, type Usage } from '../core/types';
 import { escapeHtml, renderAttachments, renderItem, renderTranscript } from './render';
 import { IMAGE_FORMAT_ERROR, IMAGE_TYPES, MAX_ATTACHMENT_BYTES } from '../core/attachments';
-import { parseSlashCommand, permissionOptions } from '../core/composer';
+import { parseSlashCommand, permissionOptions, slashCommands } from '../core/composer';
 import { latestModel, presetEffortOptions, selectedModel } from '../core/settings';
 import { isExternalTask, sameTaskProvider } from '../core/providers';
 import { costLabel } from '../core/cost';
@@ -187,6 +187,7 @@ function render(): void {
     renderCopyFeedback();
   }
   const plan = task.plan;
+  $('plan-mode').hidden = task.settings.collaborationMode !== 'plan';
   $('plan').innerHTML = plan ? `<details class="plan"><summary>作業計画</summary><p>${escapeHtml(plan.explanation)}</p><ol>${plan.steps.map(step => `<li>${step.status === 'completed' ? '✓' : step.status === 'inProgress' ? '◉' : '○'} ${escapeHtml(step.step)}</li>`).join('')}</ol></details>` : '';
   if (atBottom) conversation.scrollTop = conversation.scrollHeight;
   requests.render(task.requests, busy, connected);
@@ -285,7 +286,9 @@ $('composer').addEventListener('submit', event => {
 prompt.addEventListener('keydown', event => {
   if (completion.keydown(event)) return;
   if (event.key !== 'Enter' || event.isComposing || event.shiftKey || event.altKey) return;
-  if (enterBehavior === 'modEnter' && !event.ctrlKey && !event.metaKey) return;
+  const command = parseSlashCommand(prompt.value);
+  const bareCommand = command && !command.args && slashCommands.some(item => item.name === command.name);
+  if (enterBehavior === 'modEnter' && !event.ctrlKey && !event.metaKey && !bareCommand) return;
   event.preventDefault(); $<HTMLFormElement>('composer').requestSubmit();
 });
 prompt.addEventListener('paste', event => {

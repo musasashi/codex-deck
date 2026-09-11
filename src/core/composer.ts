@@ -34,6 +34,7 @@ export function permissionOptions(selected: ExecutionMode, inherited?: Execution
 export const slashCommands = [
   { name: 'model', description: 'モデルと推論の強さを選択' },
   { name: 'permissions', description: 'Codexの権限を選択' },
+  { name: 'plan', description: 'プランモードを切り替え・続けて指示を入力' },
   { name: 'skills', description: '登録されたスキルを選択' },
   { name: 'review', description: '作業ツリーをレビュー' },
   { name: 'new', description: '新しいチャットを開始' },

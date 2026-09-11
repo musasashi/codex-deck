@@ -269,18 +269,21 @@ class DeckExtension implements PanelHost {
       case 'send': {
         const text = string(message.text);
         if (text.length > 2 * 1024 * 1024) throw new Error('メッセージが大きすぎます。');
-        if (await this.slash(task, text.trim())) return;
-        this.manager.prepareInput(task.id);
-        await this.connect();
-        const selected = array(message.skillPaths).filter((value): value is string => typeof value === 'string');
-        const catalog = text.includes('$') || selected.length ? await this.composerCatalog(task) : { skills: [] };
-        if (selected.some(path => !catalog.skills.some(skill => skill.path === path))) throw new Error('スキル一覧が更新されています。スキルを選び直してください。');
-        const skills = resolveSkillMentions(text, catalog.skills, selected);
-        await this.manager.send(task.id, text, skills.map(skill => ({ type: 'skill', name: skill.name, path: skill.path })), {
-          clientId: string(message.sendId), attachmentIds: array(message.attachmentIds).filter((value): value is string => typeof value === 'string'),
-        }); return;
+        if (await this.slash(task, text.trim(), message)) return;
+        await this.send(task, text, message); return;
       }
     }
+  }
+  private async send(task: Task, text: string, message: JsonObject): Promise<void> {
+    this.manager.prepareInput(task.id);
+    await this.connect();
+    const selected = array(message.skillPaths).filter((value): value is string => typeof value === 'string');
+    const catalog = text.includes('$') || selected.length ? await this.composerCatalog(task) : { skills: [] };
+    if (selected.some(path => !catalog.skills.some(skill => skill.path === path))) throw new Error('スキル一覧が更新されています。スキルを選び直してください。');
+    const skills = resolveSkillMentions(text, catalog.skills, selected);
+    await this.manager.send(task.id, text, skills.map(skill => ({ type: 'skill', name: skill.name, path: skill.path })), {
+      clientId: string(message.sendId), attachmentIds: array(message.attachmentIds).filter((value): value is string => typeof value === 'string'),
+    });
   }
   private async updateSettings(task: Task, message: JsonObject): Promise<void> {
     const mode = string(message.mode) as ExecutionMode;
@@ -513,12 +516,18 @@ class DeckExtension implements PanelHost {
     const choice = await vscode.window.showQuickPick(task.instructionSources, { title: '適用中の指示ファイル' });
     if (choice) await vscode.window.showTextDocument(vscode.Uri.file(choice));
   }
-  private async slash(task: Task, text: string): Promise<boolean> {
+  private async slash(task: Task, text: string, message: JsonObject): Promise<boolean> {
     const command = parseSlashCommand(text);
     if (!command) return false;
     if (!slashCommands.some(item => item.name === command.name)) throw new Error(`/${command.name} はこの拡張では利用できません。/ でコマンド一覧を確認してください。`);
-    if (command.args && command.name !== 'rename' && command.name !== 'review') throw new Error(`/${command.name} は引数を指定せず実行してください。`);
+    if (command.args && !['rename', 'review', 'plan'].includes(command.name)) throw new Error(`/${command.name} は引数を指定せず実行してください。`);
     switch (command.name) {
+      case 'plan':
+        if (isTaskRunning(task) || task.busy) throw new Error('実行が完了してからプランモードを切り替えてください。');
+        await this.connect(); await this.manager.restore(task.id);
+        this.manager.setCollaborationMode(task.id, command.args || task.settings.collaborationMode !== 'plan' ? 'plan' : 'default');
+        if (command.args) await this.send(task, command.args, message);
+        break;
       case 'new': case 'clear': await this.newTask(task.cwd); break;
       case 'resume': await this.history(); break;
       case 'fork': await this.fork(task); break;

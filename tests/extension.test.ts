@@ -5,6 +5,9 @@ import * as path from 'node:path';
 import { buildSync } from 'esbuild';
 import type * as vscode from 'vscode';
 import type { Task, TaskRecord } from '../src/core/types';
+import type { TaskManager } from '../src/core/taskManager';
+import type { PanelHost } from '../src/ui/panels';
+import { FakeGateway, thread } from './helpers';
 
 const bundle = buildSync({ entryPoints: [path.resolve('src/extension.ts')], bundle: true, write: false,
   platform: 'node', format: 'cjs', external: ['vscode'], logLevel: 'silent' }).outputFiles[0]!.text;
@@ -113,4 +116,80 @@ test('reloading without selecting any task retains open drafts and conversations
     assert.deepEqual(reloaded.rows().map(task => task.id), ['hidden', 'draft']);
     assert.deepEqual(reloaded.records().map(({ id, open }) => ({ id, open })), records.map(({ id, open }) => ({ id, open })));
   } finally { await reloaded.shutdown(); }
+});
+
+function connectedExtension(records: TaskRecord[] = []) {
+  const extension = activate(records);
+  const { host, manager } = extension.serializer as unknown as { host: PanelHost; manager: TaskManager };
+  const gateway = new FakeGateway();
+  const client = manager.gateway;
+  Object.assign(client, {
+    connected: true,
+    startThread: gateway.startThread.bind(gateway), resumeThread: gateway.resumeThread.bind(gateway), readThread: gateway.readThread.bind(gateway),
+    listModels: gateway.listModels.bind(gateway), startTurn: gateway.startTurn.bind(gateway), steerTurn: gateway.steerTurn.bind(gateway),
+    generateTitle: gateway.generateTitle.bind(gateway), renameThread: gateway.renameThread.bind(gateway), readUsage: gateway.readUsage.bind(gateway),
+    listSkills: async () => [{ name: 'sample', path: '/skills/sample/SKILL.md', description: '', scope: 'user' }],
+    readConfig: async () => ({}),
+  });
+  gateway.events.subscribe(event => client.events.emit(event));
+  host.connect = async () => {};
+  return { ...extension, host, manager, gateway };
+}
+
+test('/plan toggles without a turn and inline instructions use the normal send path with images and skills', async () => {
+  const extension = connectedExtension();
+  const { host, manager, gateway } = extension;
+  try {
+    const task = manager.create('/project', { model: 'test-model', effort: 'high', mode: 'auto-review' });
+    const image = { id: 'image', label: 'Image', input: { type: 'image' as const, url: 'data:image/png;base64,YQ==' } };
+    manager.attach(task.id, image);
+    manager.attach(task.id, { ...image, id: 'later' });
+    await host.command(task, { type: 'send', text: '/plan', sendId: 'toggle', attachmentIds: [image.id] });
+    assert.equal(task.settings.collaborationMode, 'plan');
+    assert.equal(task.threadId, undefined, 'a bare toggle must not create an empty conversation');
+    assert.equal(gateway.sent.length, 0);
+    assert.equal(task.attachments.length, 2);
+    await host.command(task, { type: 'send', text: '/plan $sample 画面を設計してください', sendId: 'inline', attachmentIds: [image.id], skillPaths: ['/skills/sample/SKILL.md'] });
+    assert.deepEqual(gateway.sent[0]?.input, [
+      { type: 'text', text: '$sample 画面を設計してください' }, image.input,
+      { type: 'skill', name: 'sample', path: '/skills/sample/SKILL.md' },
+    ]);
+    assert.equal(gateway.sent[0]?.clientId, 'inline');
+    assert.deepEqual(gateway.sent[0]?.settings, { model: 'test-model', effort: 'high', mode: 'auto-review', collaborationMode: 'plan' });
+    assert.deepEqual(task.attachments.map(attachment => attachment.id), ['later']);
+    await assert.rejects(host.command(task, { type: 'send', text: '/plan' }), /実行が完了/);
+    assert.equal(task.settings.collaborationMode, 'plan');
+    gateway.finish(task.threadId!, task.activeTurnId!, 'completed');
+    await host.command(task, { type: 'send', text: '/plan 計画を調整してください', attachmentIds: [] });
+    assert.equal(gateway.sent.at(-1)?.settings.collaborationMode, 'plan', 'inline /plan must stay in plan mode');
+    gateway.finish(task.threadId!, task.activeTurnId!, 'completed');
+    host.models = await gateway.listModels();
+    await host.command(task, { type: 'settings', model: 'test-model', effort: 'high', mode: 'read-only' });
+    await host.command(task, { type: 'cyclePreset' });
+    assert.equal(task.settings.collaborationMode, 'plan', 'settings and presets must preserve the conversation mode');
+    await host.command(task, { type: 'send', text: '/plan' });
+    assert.equal(task.settings.collaborationMode, 'default');
+    await host.command(task, { type: 'send', text: '実装してください', attachmentIds: [] });
+    assert.equal(gateway.sent.at(-1)?.settings.collaborationMode, 'default');
+    assert.equal(gateway.sent.length, 3);
+  } finally { await extension.shutdown(); }
+});
+
+test('/plan restores a saved task before checking for an active turn and rejects changes while sending', async () => {
+  const saved = record('running', true);
+  const extension = connectedExtension([saved]);
+  const { host, manager, gateway } = extension;
+  try {
+    gateway.threads.set(saved.threadId!, { ...thread(saved.threadId), status: 'active', turns: [{ id: 'running-turn', status: 'inProgress', items: [] }] });
+    const task = manager.get(saved.id);
+    assert.equal(task.hydrated, false);
+    await assert.rejects(host.command(task, { type: 'send', text: '/plan change the plan' }), /実行が完了/);
+    assert.equal(task.settings.collaborationMode, undefined);
+    assert.equal(gateway.sent.length, 0);
+    assert.equal(gateway.steered.length, 0);
+    const draft = manager.create('/project');
+    draft.busy = true;
+    await assert.rejects(host.command(draft, { type: 'send', text: '/plan' }), /実行が完了/);
+    assert.equal(draft.settings.collaborationMode, undefined);
+  } finally { await extension.shutdown(); }
 });
