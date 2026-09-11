@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { evaluateUsage } from './usage';
 import { readTitleEffort, resolveRunSettings } from './settings';
+import { isHuggingFaceModel, isHuggingFaceTask } from './huggingFace';
+import { addTaskCost, emptyTaskCost, type TokenPrice } from './cost';
 import { messageQuestions, questionAnswerText } from './questions';
 import { referencedTaskInput } from './taskReferences';
 import { FORK_TITLE, provisionalTitle, titleInput } from './taskTitle';
@@ -9,7 +11,7 @@ import { array, object, string, messageOf, Signal, type Attachment, type Gateway
 export const CONTINUE_MESSAGE = '使用量上限で中断した作業を直前の状態から続行してください。';
 const POLL_MS = 10 * 60 * 1000;
 export interface TaskStore { save(records: TaskRecord[]): Promise<void> }
-export interface ManagerOptions { now?: () => number; schedule?: boolean; titleModel?: (cwd: string) => string; titleEffort?: (cwd: string) => string; referenceTempRoot?: string }
+export interface ManagerOptions { now?: () => number; schedule?: boolean; titleModel?: (cwd: string) => string; titleEffort?: (cwd: string) => string; titlePricing?: (cwd: string) => TokenPrice | undefined; referenceTempRoot?: string }
 
 export class TaskManager {
   readonly changed = new Signal<Task | undefined>();
@@ -58,6 +60,7 @@ export class TaskManager {
   }
   create(cwd: string, settings: RunSettings = { mode: 'default' }): Task {
     const task = this.fromRecord({ id: randomUUID(), title: '新規タスク', cwd, open: true, autoResume: false, claims: [], settings });
+    if (isHuggingFaceTask(task)) task.cost = emptyTaskCost();
     this.tasks.set(task.id, task);
     this.touch(task, true);
     this.armTimer(true);
@@ -82,9 +85,13 @@ export class TaskManager {
     return task;
   }
   async fork(id: string, lastTurnId?: string): Promise<Task> {
-    const threadId = await this.ensureThread(this.get(id));
-    const thread = await this.gateway.forkThread(threadId, { lastTurnId });
+    const source = this.get(id);
+    const threadId = await this.ensureThread(source);
+    const thread = await this.gateway.forkThread(threadId, { lastTurnId, settings: {
+      ...source.settings, model: source.settings.model ?? source.effectiveModel, effort: source.settings.effort ?? source.effectiveEffort,
+    } });
     const task = this.adoptThread({ ...thread, name: undefined, title: FORK_TITLE });
+    if (isHuggingFaceTask(task)) { task.settings.pricing = source.settings.pricing; task.cost = emptyTaskCost(false, thread.turns.map(turn => turn.id)); }
     task.titleSource = 'fork';
     // Persist the fallback so history and reloads also stop using the inherited name.
     try { await this.writeTitle(task, task.title, 'fork'); }
@@ -118,7 +125,7 @@ export class TaskManager {
     const run = (async () => {
       this.hydrations.set(threadId, []);
       try {
-        const thread = await this.gateway.resumeThread(threadId);
+        const thread = await this.gateway.resumeThread(threadId, task.settings);
         this.applyThread(task, thread);
         const queued = this.hydrations.get(threadId) ?? [];
         this.hydrations.delete(threadId);
@@ -150,6 +157,9 @@ export class TaskManager {
     task.turns = thread.turns;
     task.instructionSources = thread.instructionSources ?? task.instructionSources;
     task.effectiveModel = thread.model;
+    task.modelProvider = thread.modelProvider ?? task.modelProvider;
+    if (!task.settings.model && isHuggingFaceModel(thread.model)) task.settings.model = thread.model;
+    if (isHuggingFaceTask(task)) { task.autoResume = false; this.cancel(task); task.cost ??= emptyTaskCost(thread.turns.length > 0, thread.turns.map(turn => turn.id)); }
     task.effectiveEffort = thread.effort;
     task.effectivePermissionMode = thread.permissionMode ?? task.effectivePermissionMode;
     task.hydrated = true;
@@ -184,7 +194,7 @@ export class TaskManager {
   }
   setAutoResume(id: string, enabled: boolean): void {
     const task = this.get(id);
-    task.autoResume = enabled && task.open;
+    task.autoResume = enabled && task.open && !isHuggingFaceTask(task);
     if (!task.autoResume) this.cancel(task);
     else if (task.lastTurn?.error?.kind === 'usageLimitExceeded' && task.lastTurn.status === 'failed' && !task.activeTurnId && !task.busy && task.hydrated) {
       // Explicitly opting in after a stop is a new user decision.
@@ -194,7 +204,15 @@ export class TaskManager {
     this.touch(task, true);
     this.armTimer(true);
   }
-  updateSettings(id: string, settings: RunSettings): void { const task = this.get(id); task.settings = { ...settings }; this.touch(task, true); }
+  updateSettings(id: string, settings: RunSettings): void {
+    const task = this.get(id);
+    if (task.threadId && settings.model && isHuggingFaceModel(settings.model) !== isHuggingFaceTask(task)) {
+      throw new Error('会話の接続先は変更できません。別の接続先を使う場合は新規タスクでプリセットを選択してください。');
+    }
+    task.settings = { ...settings };
+    if (isHuggingFaceTask(task)) { task.autoResume = false; this.cancel(task); task.cost ??= emptyTaskCost(!!task.threadId); }
+    this.touch(task, true);
+  }
   async rename(id: string, name: string): Promise<void> {
     const task = this.get(id);
     name = name.trim();
@@ -235,7 +253,10 @@ export class TaskManager {
       try {
         await this.checkpoint();
         if (controller.signal.aborted || this.disposed) return;
-        const name = await this.gateway.generateTitle({ cwd: task.cwd, model: this.options.titleModel!(task.cwd),
+        const configured = this.options.titleModel!(task.cwd);
+        const model = configured === 'latest' && isHuggingFaceTask(task) ? task.settings.model ?? task.effectiveModel ?? configured : configured;
+        const name = await this.gateway.generateTitle({ cwd: task.cwd, model,
+          ...(isHuggingFaceModel(model) ? { ownerThreadId: task.threadId, pricing: configured === 'latest' ? task.settings.pricing : this.options.titlePricing?.(task.cwd) } : {}),
           effort: readTitleEffort(this.options.titleEffort?.(task.cwd)), input }, controller.signal);
         await this.writeTitle(task, name, 'generated', controller.signal);
       } catch (error) {
@@ -263,7 +284,7 @@ export class TaskManager {
     const run = (async () => {
       if (!task.threadId) {
         if (task.settings.model) {
-          const models = await this.gateway.listModels();
+          const models = isHuggingFaceModel(task.settings.model) ? [] : await this.gateway.listModels();
           task.settings = resolveRunSettings(task.settings, models);
           this.touch(task, true);
         }
@@ -382,7 +403,7 @@ export class TaskManager {
     task.error = turn.error?.message;
     if (turn.status === 'failed' && turn.error?.kind === 'usageLimitExceeded') {
       task.status = 'limited';
-      if (task.open && task.autoResume && task.suppressedTurnId !== turn.id && !task.claims.some(claim => claim.stoppedTurnId === turn.id)) {
+      if (!isHuggingFaceTask(task) && task.open && task.autoResume && task.suppressedTurnId !== turn.id && !task.claims.some(claim => claim.stoppedTurnId === turn.id)) {
         task.waiting ??= { turnId: turn.id, token: randomUUID() };
         task.status = 'waiting';
         this.armTimer(true);
@@ -513,6 +534,9 @@ export class TaskManager {
         this.touch(task, true); break;
       }
       case 'tokens': task.tokenUsage = event.value; break;
+      case 'cost':
+        if (isHuggingFaceTask(task)) { task.cost = addTaskCost(task.cost ?? emptyTaskCost(true), event.sample); this.touch(task, true); }
+        break;
       case 'warning': task.error = event.message; break;
       case 'archived': this.cancelTitle(task.id); this.close(task.id); break;
     }
@@ -605,8 +629,8 @@ export class TaskManager {
     this.timer.unref?.();
   }
   records(): TaskRecord[] {
-    return [...this.tasks.values()].map(task => structuredClone({ id: task.id, threadId: task.threadId, title: task.title, cwd: task.cwd, open: task.open, autoResume: task.autoResume,
-      titleSource: task.titleSource, titleGenerationAttempted: task.titleGenerationAttempted,
+    return [...this.tasks.values()].map(task => structuredClone({ id: task.id, threadId: task.threadId, modelProvider: task.modelProvider, title: task.title, cwd: task.cwd, open: task.open, autoResume: task.autoResume,
+      titleSource: task.titleSource, titleGenerationAttempted: task.titleGenerationAttempted, cost: task.cost,
       waiting: task.waiting, lastTurn: task.lastTurn, unreadTurnId: task.unreadTurnId, resolvedQuestionIds: task.resolvedQuestionIds, claims: task.claims, suppressedTurnId: task.suppressedTurnId, settings: task.settings }));
   }
   checkpoint(): Promise<void> {

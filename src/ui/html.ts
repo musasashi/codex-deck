@@ -22,6 +22,7 @@ export function chatHtml(options: { cspSource: string; script: string; css: stri
           <div class="composer-settings">
             <div class="composer-model">
               <div id="usage-gauges" class="usage-gauges" role="group" aria-label="Codexの残量" hidden></div>
+              <span id="task-cost" class="task-cost" tabindex="0" aria-label="このタスクのHF利用額" hidden></span>
               <label><span class="sr-only">モデル</span><select id="model" aria-label="モデル" title="モデル"></select></label>
             </div>
             <label><span class="sr-only">推論の強さ</span><select id="effort" aria-label="推論の強さ" title="推論の強さ"></select></label>

@@ -8,11 +8,38 @@ import { TaskManager } from '../../src/core/taskManager';
 import { taskReferenceBody } from '../../src/core/taskReferenceText';
 import { FakeGateway, thread } from '../helpers';
 import type { Skill, Task, Usage } from '../../src/core/types';
+import { emptyTaskCost } from '../../src/core/cost';
+import { withHuggingFaceModels } from '../../src/core/huggingFace';
+
+test('HF task cost replaces quota gauges, updates live, and stays visible after disconnecting', async ({ page }, info) => {
+  const value = task();
+  value.settings = { model: 'hf:deepseek-ai/DeepSeek-V4-Flash:deepinfra', effort: 'default', mode: 'workspace-write', pricing: { input: 0.1, output: 0.2 } };
+  value.modelProvider = 'codex_deck_huggingface';
+  value.cost = { ...emptyTaskCost(), usd: 0.1234 };
+  const usage = decodeUsage({ rateLimits: { limitId: 'codex', primary: { usedPercent: 10, windowDurationMins: 300 }, secondary: { usedPercent: 20, windowDurationMins: 10080 } } });
+  await state(page, value, usage);
+  await expect(page.locator('#task-cost')).toHaveText('$0.1234（概算）');
+  await expect(page.locator('#task-cost')).toHaveAttribute('title', /ユーザー設定の単価/);
+  await expect(page.locator('#usage-gauges')).toBeHidden();
+  await expect(page.locator('#auto-resume')).toBeHidden();
+  await expect(page.locator('#model')).toHaveValue(value.settings.model!);
+  await expect(page.locator('#model option[value="catalog-model"]')).toHaveCount(0);
+  value.cost.usd = 0.2345;
+  await state(page, value, usage, false);
+  await expect(page.locator('#task-cost')).toHaveText('$0.2345（概算）');
+  await page.setViewportSize({ width: 380, height: 850 });
+  expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
+  await page.screenshot({ path: info.outputPath('hf-cost.png'), fullPage: true });
+  await state(page, task(), usage);
+  await expect(page.locator('#task-cost')).toBeHidden();
+  await expect(page.getByRole('meter', { name: 'Codex 5時間枠の残量' })).toBeVisible();
+  await expect(page.locator('#auto-resume')).toBeVisible();
+});
 
 const theme = `:root{--vscode-editor-background:#181a1e;--vscode-foreground:#e0e3e9;--vscode-descriptionForeground:#a0a7b3;--vscode-widget-border:#353940;--vscode-input-background:#22252b;--vscode-input-foreground:#e0e3e9;--vscode-input-placeholderForeground:#979faa;--vscode-button-background:#b6d8b1;--vscode-button-foreground:#193019;--vscode-button-hoverBackground:#c9e8c5;--vscode-button-secondaryBackground:#353941;--vscode-button-secondaryForeground:#e0e3e9;--vscode-focusBorder:#8eaf8a;--vscode-font-family:system-ui,sans-serif;--vscode-font-size:13px;--vscode-editor-font-family:monospace;--vscode-editor-font-size:12px;--vscode-textCodeBlock-background:#121417;--vscode-textLink-foreground:#a9c6ea;--vscode-progressBar-background:#b6d8b1;--vscode-editorWarning-foreground:#e2bd79;--vscode-errorForeground:#f5a59e;--vscode-inputValidation-warningBackground:#302b20;--vscode-editorWidget-background:#22252b;--vscode-dropdown-background:#22252b;--vscode-dropdown-foreground:#e0e3e9;}`;
 const models = [{ id: 'catalog-model', label: 'Catalog model', efforts: [{ id: 'new-effort', description: 'from server' }, { id: 'high', description: 'high' }], description: '', defaultEffort: 'new-effort', isDefault: true, inputModalities: ['text', 'image'] }];
 function task(): Task { return { id: 'task-1', threadId: 'thread-1', title: 'App Serverとの通信を実装する', cwd: '/workspace/codex-deck', open: true, autoResume: false, claims: [], settings: { mode: 'default' }, status: 'idle', turns: [], requests: [], attachments: [], busy: false, hydrated: true, instructionSources: [] }; }
-async function state(page: Page, value: Task, usage?: Usage, connected = true, presetCount = 1) { await page.evaluate(data => window.dispatchEvent(new MessageEvent('message', { data })), { type: 'state', task: value, models, usage, connected, presetCount, enterBehavior: 'enter' }); }
+async function state(page: Page, value: Task, usage?: Usage, connected = true, presetCount = 1) { await page.evaluate(data => window.dispatchEvent(new MessageEvent('message', { data })), { type: 'state', task: value, models: withHuggingFaceModels(models, [value.settings.model]), usage, connected, presetCount, enterBehavior: 'enter' }); }
 async function messages(page: Page) { return page.evaluate(() => (window as unknown as { sent: Record<string, unknown>[] }).sent); }
 async function receive(page: Page, data: Record<string, unknown>) { await page.evaluate(data => window.dispatchEvent(new MessageEvent('message', { data })), data); }
 async function sendResult(page: Page, type: 'sent' | 'failure') {

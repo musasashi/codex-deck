@@ -11,7 +11,9 @@ import { linkedThreadId, taskDeepLink } from './core/taskReferences';
 import { IMAGE_FORMAT_ERROR, isImageDataUrl, MAX_ATTACHMENT_BYTES } from './core/attachments';
 import { configPermissionMode, parseSlashCommand, permissionOptions, permissionPresets, resolveSkillMentions, slashCommands } from './core/composer';
 import { workingDiff } from './core/gitDiff';
-import { latestModel, nextPresetIndex, readPresets, readTitleEffort, readTitleModel, resolveRunSettings, validatePreset } from './core/settings';
+import { isHuggingFaceModel, isHuggingFaceTask, withHuggingFaceModels } from './core/huggingFace';
+import { readTokenPrice } from './core/cost';
+import { nextPresetIndex, readPresets, readTitleEffort, readTitleModel, resolveRunSettings, selectedModel, taskPresets, validatePreset } from './core/settings';
 import { array, object, string, messageOf, statusLabel, isTaskRunning, type ComposerCatalog, type ExecutionMode, type JsonObject, type Model, type Task } from './core/types';
 import { TaskPanels, TaskTree, type PanelHost } from './ui/panels';
 import { SettingsPanel } from './ui/settingsPanel';
@@ -46,6 +48,7 @@ class DeckExtension implements PanelHost {
     this.manager = new TaskManager(this.client, { save: async records => { await context.workspaceState.update(STORAGE_KEY, { version: 1, tasks: records }); } }, readTaskRecords(context.workspaceState.get(STORAGE_KEY)), {
       titleModel: cwd => readTitleModel(vscode.workspace.getConfiguration('codexDeck', vscode.Uri.file(cwd)).get('titleModel')),
       titleEffort: cwd => readTitleEffort(vscode.workspace.getConfiguration('codexDeck', vscode.Uri.file(cwd)).get('titleEffort')),
+      titlePricing: cwd => readTokenPrice(vscode.workspace.getConfiguration('codexDeck', vscode.Uri.file(cwd)).get('titlePricing')),
     });
     // Hidden tabs are deserialized only when shown, so keep their saved open state.
     this.panels = new TaskPanels(context.extensionUri, this.manager, this);
@@ -263,15 +266,18 @@ class DeckExtension implements PanelHost {
     if (task.activeTurnId || task.busy) throw new Error('実行が完了してから設定を変更してください。');
     const model = string(message.model);
     const effort = string(message.effort);
-    const selected = model === 'latest' ? latestModel(this.models) : this.models.find(candidate => candidate.id === (model || task.effectiveModel)) ?? (!model ? this.models.find(candidate => candidate.isDefault) : undefined);
+    const selected = selectedModel(this.models, model || task.effectiveModel || 'latest');
     if (model && model !== 'latest' && !selected) throw new Error('モデル一覧を再取得してください。');
     if (effort && effort !== 'default' && (selected || model !== 'latest') && !selected?.efforts.some(candidate => candidate.id === effort)) throw new Error('このモデルで利用できる推論の強さを選択してください。');
-    this.manager.updateSettings(task.id, { model: model || undefined, effort: effort === 'default' ? selected?.defaultEffort || undefined : effort || (model && model !== task.settings.model ? selected?.defaultEffort || undefined : undefined), mode });
+    const pricing = !model || model === task.settings.model ? task.settings.pricing
+      : readPresets(vscode.workspace.getConfiguration('codexDeck', vscode.Uri.file(task.cwd)).get('presets')).find(preset => preset.model === model)?.pricing;
+    this.manager.updateSettings(task.id, { model: model || undefined, effort: effort === 'default' ? selected?.defaultEffort || undefined : effort || (model && model !== task.settings.model ? selected?.defaultEffort || undefined : undefined), mode,
+      ...(pricing && isHuggingFaceModel(model || task.effectiveModel) ? { pricing } : {}) });
     this.presetSelections.delete(task);
   }
   private cyclePreset(task: Task): void {
     if (isTaskRunning(task) || task.busy) throw new Error('実行が完了してから設定を変更してください。');
-    const presets = readPresets(vscode.workspace.getConfiguration('codexDeck', vscode.Uri.file(task.cwd)).get('presets'));
+    const presets = taskPresets(task, readPresets(vscode.workspace.getConfiguration('codexDeck', vscode.Uri.file(task.cwd)).get('presets')));
     if (!presets.length) return;
     const signature = JSON.stringify(presets);
     const previous = this.presetSelections.get(task);
@@ -454,9 +460,11 @@ class DeckExtension implements PanelHost {
   private async pickModel(task: Task): Promise<void> {
     await this.connect();
     await this.refreshCatalog();
-    const choice = await vscode.window.showQuickPick(this.models.map(model => ({ label: model.label, description: model.description, id: model.id })), { title: 'モデル' });
+    const models = withHuggingFaceModels(this.models, [...readPresets(vscode.workspace.getConfiguration('codexDeck', vscode.Uri.file(task.cwd)).get('presets')).map(preset => preset.model), task.settings.model, task.effectiveModel])
+      .filter(model => !task.threadId || isHuggingFaceModel(model.id) === isHuggingFaceTask(task));
+    const choice = await vscode.window.showQuickPick(models.map(model => ({ label: model.label, description: model.description, id: model.id })), { title: 'モデル' });
     if (!choice) return;
-    const model = this.models.find(model => model.id === choice.id)!;
+    const model = selectedModel(models, choice.id)!;
     const effort = model.efforts.length ? await vscode.window.showQuickPick(model.efforts.map(effort => ({ label: effort.id, description: effort.description })), { title: '推論の強さ' }) : undefined;
     if (model.efforts.length && !effort) return;
     await this.updateSettings(task, { ...task.settings, model: choice.id, effort: effort?.label ?? '' });
@@ -464,7 +472,7 @@ class DeckExtension implements PanelHost {
   private async pickEffort(task: Task): Promise<void> {
     await this.connect();
     await this.refreshCatalog();
-    const model = task.settings.model === 'latest' ? latestModel(this.models) : this.models.find(model => model.id === (task.settings.model ?? task.effectiveModel)) ?? this.models.find(model => model.isDefault);
+    const model = selectedModel(this.models, task.settings.model ?? task.effectiveModel ?? 'latest');
     const choice = await vscode.window.showQuickPick((model?.efforts ?? []).map(effort => ({ label: effort.id, description: effort.description })), { title: '推論の強さ' });
     if (choice) await this.updateSettings(task, { ...task.settings, effort: choice.label });
   }

@@ -1,5 +1,7 @@
 import { DEFAULT_PRESET, DEFAULT_TITLE_EFFORT, presetEffortOptions, presetPermissionOptions, latestModel, readPresets, readTitleEffort, readTitleModel, selectedModel, titleEffortOptions } from '../core/settings';
 import { array, object, string, type ExecutionMode, type Model, type SettingsPreset } from '../core/types';
+import { HF_MODEL_PREFIX, isHuggingFaceModel } from '../core/huggingFace';
+import { readTokenPrice } from '../core/cost';
 
 declare function acquireVsCodeApi(): { postMessage(value: unknown): void; setState(value: unknown): void; getState(): unknown };
 const vscode = acquireVsCodeApi();
@@ -7,6 +9,10 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getEl
 const scope = $<HTMLSelectElement>('scope');
 const titleModel = $<HTMLSelectElement>('title-model');
 const titleEffort = $<HTMLSelectElement>('title-effort');
+const titleHfModel = $<HTMLInputElement>('title-hf-model');
+const titleInputPrice = $<HTMLInputElement>('title-input-price');
+const titleOutputPrice = $<HTMLInputElement>('title-output-price');
+let titleModelId = 'latest';
 let models: Model[] = [];
 let presets: SettingsPreset[] = [];
 let requestId = 0;
@@ -21,11 +27,13 @@ function status(message: string, error = false): void {
 function setBusy(value: boolean): void {
   busy = value;
   scope.disabled = busy || !scope.options.length;
-  $<HTMLFieldSetElement>('presets').disabled = busy || !ready || !models.length;
-  $<HTMLFieldSetElement>('task-titles').disabled = busy || !ready || !models.length;
+  $<HTMLFieldSetElement>('presets').disabled = busy || !ready;
+  $<HTMLFieldSetElement>('task-titles').disabled = busy || !ready;
   const valid = presets.length && presets.every(preset => selectedModel(models, preset.model)
-    && presetEffortOptions(selectedModel(models, preset.model)).some(option => option.id === preset.effort)) && selectedModel(models, titleModel.value)
-    && titleEffortOptions(selectedModel(models, titleModel.value)).some(option => option.id === titleEffort.value);
+    && presetEffortOptions(selectedModel(models, preset.model)).some(option => option.id === preset.effort)
+    && (!isHuggingFaceModel(preset.model) || readTokenPrice(preset.pricing))) && (titleModelId === 'latest' || selectedModel(models, titleModelId))
+    && (!isHuggingFaceModel(titleModelId) || readTokenPrice({ input: titleInputPrice.valueAsNumber, output: titleOutputPrice.valueAsNumber }))
+    && titleEffortOptions(selectedModel(models, titleModelId)).some(option => option.id === titleEffort.value);
   $<HTMLButtonElement>('save').disabled = busy || !ready || !dirty || !valid;
   $<HTMLButtonElement>('reload').disabled = busy;
 }
@@ -44,7 +52,7 @@ function compatibleEffort(selected: string, model?: Model): string {
 }
 function modelOptions(): { id: string; label: string }[] {
   const latest = latestModel(models);
-  return [{ id: 'latest', label: latest ? `最新モデル (${latest.label})` : '最新モデル' }, ...models.map(model => ({ id: model.id, label: model.label }))];
+  return [{ id: 'latest', label: latest ? `最新モデル (${latest.label})` : '最新モデル' }, { id: 'huggingface', label: 'Hugging Face（モデルIDを指定）' }, ...models.map(model => ({ id: model.id, label: model.label }))];
 }
 function renderPresets(): void {
   $('preset-list').replaceChildren(...presets.map((preset, index) => {
@@ -54,8 +62,19 @@ function renderPresets(): void {
     card.setAttribute('aria-labelledby', `preset-title-${index}`);
     card.innerHTML = `<div class="preset-header"><div><h2 id="preset-title-${index}">プリセット${index + 1}</h2>${index === 0 ? '<span class="preset-default">新規タスクの初期設定</span>' : ''}</div><div class="preset-actions"><button type="button" class="secondary" data-action="up" aria-label="プリセット${index + 1}を上へ" title="上へ">↑</button><button type="button" class="secondary" data-action="down" aria-label="プリセット${index + 1}を下へ" title="下へ">↓</button><button type="button" class="secondary" data-action="remove" aria-label="プリセット${index + 1}を削除">削除</button></div></div>
       <label for="preset-model-${index}">モデル</label><select id="preset-model-${index}" data-field="model" aria-describedby="preset-model-description-${index}"></select><p id="preset-model-description-${index}" class="hint"></p>
+      <div data-field="hf-field" hidden><label for="preset-hf-model-${index}">HFのモデルID</label><input id="preset-hf-model-${index}" data-field="hf-model" type="text" placeholder="組織/モデル:プロバイダー" autocomplete="off" spellcheck="false">
+        <div class="preset-fields"><div><label for="preset-input-price-${index}">入力単価（USD／100万トークン）</label><input id="preset-input-price-${index}" data-field="input-price" type="number" min="0" step="any"></div><div><label for="preset-output-price-${index}">出力単価（USD／100万トークン）</label><input id="preset-output-price-${index}" data-field="output-price" type="number" min="0" step="any"></div></div>
+      </div>
       <div class="preset-fields"><div><label for="preset-effort-${index}">推論強度</label><select id="preset-effort-${index}" data-field="effort"></select></div><div><label for="preset-mode-${index}">権限</label><select id="preset-mode-${index}" data-field="mode" aria-describedby="preset-permission-description-${index}"></select></div></div><p id="preset-permission-description-${index}" class="hint"></p>`;
     const model = card.querySelector<HTMLSelectElement>('[data-field=model]')!;
+    const hfModel = card.querySelector<HTMLInputElement>('[data-field=hf-model]')!;
+    const hfField = card.querySelector<HTMLElement>('[data-field=hf-field]')!;
+    const inputPrice = card.querySelector<HTMLInputElement>('[data-field=input-price]')!;
+    const outputPrice = card.querySelector<HTMLInputElement>('[data-field=output-price]')!;
+    inputPrice.value = preset.pricing?.input === undefined ? '' : String(preset.pricing.input);
+    outputPrice.value = preset.pricing?.output === undefined ? '' : String(preset.pricing.output);
+    const updatePrice = (): void => { preset.pricing = isHuggingFaceModel(preset.model) ? readTokenPrice({ input: inputPrice.valueAsNumber, output: outputPrice.valueAsNumber }) : undefined; };
+    for (const price of [inputPrice, outputPrice]) price.addEventListener('input', () => { updatePrice(); changed(); });
     const effort = card.querySelector<HTMLSelectElement>('[data-field=effort]')!;
     const permissions = card.querySelector<HTMLSelectElement>('[data-field=mode]')!;
     const describeModel = (): void => {
@@ -66,14 +85,25 @@ function renderPresets(): void {
     const describePermissions = (): void => {
       card.querySelector(`#preset-permission-description-${index}`)!.textContent = presetPermissionOptions.find(option => option.id === preset.mode)?.description ?? '';
     };
-    options(model, modelOptions(), preset.model);
+    options(model, modelOptions(), isHuggingFaceModel(preset.model) ? 'huggingface' : preset.model);
+    hfModel.value = isHuggingFaceModel(preset.model) ? preset.model.slice(HF_MODEL_PREFIX.length) : '';
+    hfField.hidden = model.value !== 'huggingface';
+    for (const field of [hfModel, inputPrice, outputPrice]) field.disabled = hfField.hidden;
     options(effort, presetEffortOptions(selectedModel(models, preset.model)), preset.effort);
     options(permissions, presetPermissionOptions, preset.mode);
     describeModel(); describePermissions();
     model.addEventListener('change', () => {
-      preset.model = model.value;
+      hfField.hidden = model.value !== 'huggingface';
+      for (const field of [hfModel, inputPrice, outputPrice]) field.disabled = hfField.hidden;
+      preset.model = model.value === 'huggingface' ? `${HF_MODEL_PREFIX}${hfModel.value.trim()}` : model.value;
+      updatePrice();
       preset.effort = compatibleEffort(preset.effort, selectedModel(models, preset.model));
       options(effort, presetEffortOptions(selectedModel(models, preset.model)), preset.effort);
+      describeModel(); changed();
+      if (!hfField.hidden) hfModel.focus();
+    });
+    hfModel.addEventListener('input', () => {
+      preset.model = `${HF_MODEL_PREFIX}${hfModel.value.trim()}`;
       describeModel(); changed();
     });
     effort.addEventListener('change', () => { preset.effort = effort.value; changed(); });
@@ -115,20 +145,33 @@ window.addEventListener('message', event => {
   if (message.type !== 'settingsState') return;
   models = array(message.models) as Model[];
   presets = readPresets(message.presets);
-  options(titleModel, modelOptions(), readTitleModel(message.titleModel));
-  options(titleEffort, titleEffortOptions(selectedModel(models, titleModel.value)), readTitleEffort(message.titleEffort));
+  titleModelId = readTitleModel(message.titleModel);
+  options(titleModel, modelOptions(), isHuggingFaceModel(titleModelId) ? 'huggingface' : titleModelId);
+  titleHfModel.value = isHuggingFaceModel(titleModelId) ? titleModelId.slice(HF_MODEL_PREFIX.length) : '';
+  const titlePrice = readTokenPrice(message.titlePricing);
+  titleInputPrice.value = titlePrice ? String(titlePrice.input) : '';
+  titleOutputPrice.value = titlePrice ? String(titlePrice.output) : '';
+  $('title-hf-field').hidden = titleModel.value !== 'huggingface';
+  for (const field of [titleHfModel, titleInputPrice, titleOutputPrice]) field.disabled = titleModel.value !== 'huggingface';
+  options(titleEffort, titleEffortOptions(selectedModel(models, titleModelId)), readTitleEffort(message.titleEffort));
   options(scope, array(message.scopes).map(value => ({ id: string(object(value).id), label: string(object(value).label) })), string(message.scope, 'user'));
   renderPresets();
   ready = true; dirty = false; setBusy(false);
   vscode.setState({ scope: scope.value });
-  status(!models.length ? '利用できるモデルがありません。接続を確認して候補を再読み込みしてください。' : message.saved ? '設定を保存しました。' : '', !models.length);
+  status(message.saved ? '設定を保存しました。' : string(message.modelError) || (!models.length ? 'モデル一覧を取得できません。HFのモデルIDは直接指定できます。' : ''), !message.saved && !!message.modelError);
 });
 scope.addEventListener('change', () => load());
 titleModel.addEventListener('change', () => {
-  const values = titleEffortOptions(selectedModel(models, titleModel.value));
+  titleModelId = titleModel.value === 'huggingface' ? `${HF_MODEL_PREFIX}${titleHfModel.value.trim()}` : titleModel.value;
+  $('title-hf-field').hidden = titleModel.value !== 'huggingface';
+  for (const field of [titleHfModel, titleInputPrice, titleOutputPrice]) field.disabled = titleModel.value !== 'huggingface';
+  const values = titleEffortOptions(selectedModel(models, titleModelId));
   options(titleEffort, values, values.some(option => option.id === titleEffort.value) ? titleEffort.value : DEFAULT_TITLE_EFFORT);
   changed();
+  if (titleModel.value === 'huggingface') titleHfModel.focus();
 });
+titleHfModel.addEventListener('input', () => { titleModelId = `${HF_MODEL_PREFIX}${titleHfModel.value.trim()}`; changed(); });
+for (const price of [titleInputPrice, titleOutputPrice]) price.addEventListener('input', () => changed());
 titleEffort.addEventListener('change', () => changed());
 $('add-preset').addEventListener('click', () => {
   presets.push({ ...DEFAULT_PRESET, effort: compatibleEffort(DEFAULT_PRESET.effort, latestModel(models)) });
@@ -138,7 +181,8 @@ $('settings-form').addEventListener('submit', event => {
   event.preventDefault();
   if ($<HTMLButtonElement>('save').disabled) return;
   setBusy(true); status('保存中…');
-  vscode.postMessage({ type: 'saveSettings', scope: scope.value, presets, titleModel: titleModel.value, titleEffort: titleEffort.value, requestId: ++requestId });
+  vscode.postMessage({ type: 'saveSettings', scope: scope.value, presets, titleModel: titleModelId, titleEffort: titleEffort.value,
+    titlePricing: isHuggingFaceModel(titleModelId) ? readTokenPrice({ input: titleInputPrice.valueAsNumber, output: titleOutputPrice.valueAsNumber }) : undefined, requestId: ++requestId });
 });
 $('reload').addEventListener('click', () => load());
 $('codex-config').addEventListener('click', () => vscode.postMessage({ type: 'openCodexSettings' }));

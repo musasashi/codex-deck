@@ -1,6 +1,7 @@
 import { AppServerClient } from '../src/appServer/client';
 import { StdioConnection } from '../src/appServer/rpc';
 import { object } from '../src/core/types';
+import { HF_PROVIDER } from '../src/core/huggingFace';
 
 async function main(): Promise<void> {
   const client = new AppServerClient();
@@ -13,7 +14,10 @@ async function main(): Promise<void> {
     const historyFinished = performance.now();
     console.log(`履歴${history.threads.length}件の取得: ${Math.round(historyFinished - historyStarted)}ms、接続開始から: ${Math.round(historyFinished - started)}ms。`);
     const models = await client.listModels();
-    await client.readConfig(process.cwd());
+    const config = await client.readConfig(process.cwd());
+    const hf = object(object(object(config.config).model_providers)[HF_PROVIDER]);
+    if (hf.base_url !== 'https://router.huggingface.co/v1' || hf.env_key !== 'HF_TOKEN' || hf.wire_api !== 'responses') throw new Error('HFプロバイダー設定を確認できませんでした。');
+    console.log('HFのResponses API接続設定を確認しました。');
     const account = await client.account();
     console.log(`App Server接続成功: モデル ${models.length} 件、履歴 ${history.threads.length} 件。設定・アカウント取得成功。`);
     const [skills, files] = await Promise.all([client.listSkills(process.cwd()), client.searchFiles(process.cwd(), 'README')]);

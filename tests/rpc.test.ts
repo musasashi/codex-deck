@@ -300,6 +300,7 @@ test('message forks request history through the selected turn while ordinary for
   const server = new JsonRpcPeer(h.output, h.input);
   server.handleRequest = async ({ method, params }) => {
     if (method === 'initialize') return {};
+    if (method === 'thread/read') return { thread: { id: 'source' } };
     assert.equal(method, 'thread/fork');
     assert.equal(object(params).threadId, 'source');
     const lastTurnId = object(params).lastTurnId;

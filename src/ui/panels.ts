@@ -2,7 +2,8 @@ import * as vscode from 'vscode';
 import { randomBytes } from 'node:crypto';
 import { object, string, messageOf, statusLabel, type JsonObject, type Model, type Task, type TaskStatus } from '../core/types';
 import { TaskManager } from '../core/taskManager';
-import { readPresets } from '../core/settings';
+import { readPresets, taskPresets } from '../core/settings';
+import { withHuggingFaceModels } from '../core/huggingFace';
 import { chatHtml } from './html';
 
 function taskIcon(uri: vscode.Uri, status: TaskStatus): { light: vscode.Uri; dark: vscode.Uri } {
@@ -113,8 +114,9 @@ export class TaskPanels implements vscode.WebviewPanelSerializer, vscode.Disposa
     panel.title = task.title;
     panel.iconPath = taskIcon(this.uri, task.status);
     const config = vscode.workspace.getConfiguration('codexDeck', vscode.Uri.file(task.cwd));
-    void panel.webview.postMessage({ type: 'state', task, models: this.host.models, connected: this.manager.gateway.connected,
-      usage: this.manager.usage, presetCount: readPresets(config.get('presets')).length, enterBehavior: config.get<string>('composerEnterBehavior', 'modEnter') });
+    const models = withHuggingFaceModels(this.host.models, [...readPresets(config.get('presets')).map(preset => preset.model), task.settings.model, task.effectiveModel]);
+    void panel.webview.postMessage({ type: 'state', task, models, connected: this.manager.gateway.connected,
+      usage: this.manager.usage, presetCount: taskPresets(task, readPresets(config.get('presets'))).length, enterBehavior: config.get<string>('composerEnterBehavior', 'modEnter') });
   }
   private html(webview: vscode.Webview): string {
     const nonce = randomBytes(18).toString('base64');

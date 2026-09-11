@@ -155,3 +155,4 @@ legend { color: var(--muted); font-size: 11px; }
 @keyframes pulse { 50% { opacity: .35; } }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
 @media (max-width: 450px) { .topbar { padding: 8px 10px; gap: 5px; } .auto-resume { font-size: 10px; } #conversation { padding: 18px 14px; } .composer-area { padding: 8px 12px; } h1 { font-size: 22px; } }
+.task-cost { flex: 0 0 auto; color: var(--vscode-descriptionForeground); font-size: 11px; white-space: nowrap; }

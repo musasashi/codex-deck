@@ -2,10 +2,12 @@ import { resolveRunSettings, resolveTitleEffort, selectedModel } from '../core/s
 import { parseTitle, TITLE_INSTRUCTIONS, TITLE_SCHEMA } from '../core/taskTitle';
 import { array, object, string, type JsonObject, type Model, type TitleRequest } from '../core/types';
 import type { JsonRpcPeer } from './rpc';
+import { HF_MODEL_CONFIG, isHuggingFaceModel, modelRequest } from '../core/huggingFace';
 
 /** Short, isolated inference jobs. Their events never enter the task UI. */
 export class TitleGenerator {
   readonly threadIds = new Set<string>();
+  onTokenUsage?: (request: TitleRequest, sourceId: string, usage: unknown, turnId: string) => void;
   private controllers = new Set<AbortController>();
 
   constructor(private readonly peer: JsonRpcPeer, private readonly models: () => Promise<Model[]>, private readonly timeoutMs = 30_000) {}
@@ -54,7 +56,8 @@ export class TitleGenerator {
     const unsubscribe = this.peer.notifications.subscribe(event => {
       const data = object(event.params);
       if (!threadId || data.threadId !== threadId) return;
-      if (event.method === 'turn/started' || event.method === 'turn/completed') acceptTurn(object(data.turn));
+      if (event.method === 'thread/tokenUsage/updated') this.onTokenUsage?.(request, threadId, data.tokenUsage, string(data.turnId));
+      else if (event.method === 'turn/started' || event.method === 'turn/completed') acceptTurn(object(data.turn));
       else if (event.method === 'item/completed') {
         const item = object(data.item);
         if (item.type === 'agentMessage') messages.set(string(item.id), item);
@@ -67,16 +70,18 @@ export class TitleGenerator {
     const abort = (): void => reject(signal.reason);
     signal.addEventListener('abort', abort, { once: true });
     try {
-      const [models, rawConfig] = await Promise.all([this.models(), this.peer.request('config/read', { cwd: request.cwd, includeLayers: false })]);
+      const [models, rawConfig] = await Promise.all([isHuggingFaceModel(request.model) ? [] : this.models(), this.peer.request('config/read', { cwd: request.cwd, includeLayers: false })]);
       signal.throwIfAborted();
       const effort = resolveTitleEffort(request.effort, selectedModel(models, request.model));
       const settings = resolveRunSettings({ model: request.model, effort, mode: 'read-only' }, models);
       const servers = object(object(rawConfig).config).mcp_servers;
       const result = object(await this.peer.request('thread/start', {
-        cwd: request.cwd, model: settings.model, ephemeral: true, sandbox: 'read-only', approvalPolicy: 'never',
+        cwd: request.cwd, ...modelRequest(settings.model), ephemeral: true, sandbox: 'read-only', approvalPolicy: 'never',
+        ...(isHuggingFaceModel(settings.model) ? { serviceTier: null } : {}),
         baseInstructions: TITLE_INSTRUCTIONS, developerInstructions: '',
         config: {
           model_reasoning_effort: settings.effort, project_doc_max_bytes: 0, web_search: 'disabled',
+          ...(isHuggingFaceModel(settings.model) ? HF_MODEL_CONFIG : {}),
           'features.apps': false, 'features.plugins': false, 'features.hooks': false, 'features.memories': false,
           'features.multi_agent': false, 'features.multi_agent_v2': false, 'features.shell_tool': false, 'features.shell_snapshot': false,
           'tools.view_image': false,

@@ -1,3 +1,5 @@
+import type { CostSample, TaskCost, TokenPrice } from './cost';
+
 export type JsonObject = Record<string, unknown>;
 export const object = (value: unknown): JsonObject =>
   value !== null && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : {};
@@ -36,7 +38,7 @@ export interface Model {
   inputModalities: string[];
 }
 export type ExecutionMode = 'default' | 'read-only' | 'workspace-write' | 'auto-review' | 'danger-full-access';
-export interface RunSettings { model?: string; effort?: string; mode: ExecutionMode }
+export interface RunSettings { model?: string; effort?: string; mode: ExecutionMode; pricing?: TokenPrice }
 export interface SettingsPreset extends RunSettings { model: string; effort: string }
 export interface TurnError { message: string; kind?: string }
 export interface Item { id: string; kind: string; data: JsonObject }
@@ -60,6 +62,7 @@ export interface Thread {
   turns: Turn[];
   updatedAt?: number;
   model?: string;
+  modelProvider?: string;
   effort?: string;
   instructionSources?: string[];
   permissionMode?: ExecutionMode;
@@ -108,15 +111,16 @@ export type ServerEvent =
   | { type: 'skills' }
   | { type: 'warning'; threadId?: string; message: string }
   | { type: 'tokens'; threadId: string; value: unknown }
+  | { type: 'cost'; threadId: string; sample: CostSample }
   | { type: 'archived'; threadId: string };
 
 export interface Gateway {
   readonly connected: boolean;
   readonly events: Signal<ServerEvent>;
   startThread(cwd: string, settings?: RunSettings): Promise<Thread>;
-  resumeThread(threadId: string): Promise<Thread>;
+  resumeThread(threadId: string, settings?: RunSettings): Promise<Thread>;
   readThread(threadId: string): Promise<Thread>;
-  forkThread(threadId: string, options?: { lastTurnId?: string }): Promise<Thread>;
+  forkThread(threadId: string, options?: { lastTurnId?: string; settings?: RunSettings }): Promise<Thread>;
   listModels(): Promise<Model[]>;
   generateTitle(request: TitleRequest, signal: AbortSignal): Promise<string>;
   renameThread(threadId: string, name: string): Promise<void>;
@@ -134,11 +138,13 @@ export const statusLabel: Record<TaskStatus, string> = {
   waiting: '使用量回復待ち', error: 'エラー', disconnected: '未接続',
 };
 export interface Reservation { turnId: string; token: string; blockers?: string[] }
-export interface TitleRequest { cwd: string; model: string; effort: string; input: string }
+export interface TitleRequest { cwd: string; model: string; effort: string; input: string; ownerThreadId?: string; pricing?: TokenPrice }
 export type TitleSource = 'provisional' | 'fork' | 'generated' | 'manual' | 'existing';
 export interface TaskRecord {
   id: string;
   threadId?: string;
+  modelProvider?: string;
+  cost?: TaskCost;
   title: string;
   titleSource?: TitleSource;
   titleGenerationAttempted?: boolean;

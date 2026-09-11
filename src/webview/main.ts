@@ -2,7 +2,9 @@ import { array, object, string, statusLabel, isTaskRunning, type Attachment, typ
 import { escapeHtml, renderAttachments, renderItem, renderTranscript } from './render';
 import { IMAGE_FORMAT_ERROR, IMAGE_TYPES, MAX_ATTACHMENT_BYTES } from '../core/attachments';
 import { parseSlashCommand, permissionOptions } from '../core/composer';
-import { latestModel } from '../core/settings';
+import { latestModel, selectedModel } from '../core/settings';
+import { isHuggingFaceModel, isHuggingFaceTask } from '../core/huggingFace';
+import { costLabel } from '../core/cost';
 import { Composer } from './composer';
 import { UsageGauges } from './usage';
 import { Requests } from './requests';
@@ -140,10 +142,18 @@ function render(): void {
   pendingSends = reconcilePendingSends(pendingSends, task);
   completion.setContext(task, connected, pendingSends.length > 0);
   const busy = !!sending || task.busy;
-  usageGauges.render(connected ? usage : undefined);
+  const huggingFace = isHuggingFaceTask(task);
+  usageGauges.render(connected && !huggingFace ? usage : undefined);
+  const cost = costLabel(task.cost);
+  $('task-cost').hidden = !huggingFace;
+  $('task-cost').textContent = cost.label;
+  $('task-cost').title = cost.detail;
+  $('task-cost').setAttribute('aria-label', `このタスクのHF利用額: ${cost.label}`);
   $('status').textContent = busy ? '送信中' : statusLabel[task.status];
   $('status-dot').className = `dot ${task.status}`;
   $<HTMLInputElement>('auto-resume').checked = task.autoResume;
+  $<HTMLInputElement>('auto-resume').disabled = huggingFace;
+  $<HTMLInputElement>('auto-resume').closest<HTMLElement>('label')!.hidden = huggingFace;
   const notice = $('notice');
   const waiting = task.status === 'waiting';
   notice.textContent = waiting ? `使用量の回復を待っています。${task.recoveryAt ? ` 回復予定: ${new Date(task.recoveryAt).toLocaleString()}` : ''}` : task.error ?? (!connected ? 'App Serverに未接続です。メニューから再接続できます。' : '');
@@ -187,9 +197,9 @@ function render(): void {
   options($<HTMLSelectElement>('model'), [
     ...(task.settings.model === 'latest' ? [{ id: 'latest', label: latest ? `最新モデル (${latest.label})` : '最新モデル' }] : []),
     { id: '', label: task.effectiveModel || 'モデル' },
-    ...models.map(model => ({ id: model.id, label: model.label })),
+    ...models.filter(model => !task!.threadId || isHuggingFaceModel(model.id) === huggingFace).map(model => ({ id: model.id, label: model.label })),
   ], task.settings.model ?? '');
-  const model = task.settings.model === 'latest' ? latest : models.find(model => model.id === (task!.settings.model ?? task!.effectiveModel)) ?? models.find(model => model.isDefault);
+  const model = selectedModel(models, task.settings.model ?? task.effectiveModel ?? 'latest');
   options($<HTMLSelectElement>('effort'), [
     { id: '', label: task.effectiveEffort || '推論の強さ' },
     ...(task.settings.effort === 'default' ? [{ id: 'default', label: model?.defaultEffort || 'モデルの既定値' }] : []),

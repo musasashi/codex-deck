@@ -37,7 +37,7 @@ test('the first preset supplies defaults and uses live dropdowns without saving 
   await expect(page.getByLabel('要約に使うモデル')).toHaveValue('latest');
   await expect(page.getByLabel('要約の推論強度')).toHaveValue('lowest');
   await expect(page.locator('#title-effort option')).toHaveText(['最低 (medium)', 'モデルの既定値', 'medium', 'high']);
-  await expect(page.locator('#preset-model-0 option')).toHaveText(['最新モデル (Recommended model)', 'Recommended model', 'Specialized model']);
+  await expect(page.locator('#preset-model-0 option')).toHaveText(['最新モデル (Recommended model)', 'Hugging Face（モデルIDを指定）', 'Recommended model', 'Specialized model']);
   await expect(page.getByLabel('推論強度', { exact: true })).toHaveValue('high');
   await expect(page.getByLabel('権限')).toHaveValue('auto-review');
   await expect(page.getByRole('button', { name: '保存', exact: true })).toBeDisabled();
@@ -115,7 +115,7 @@ test('reload discovers added models and stale responses do not replace the newes
   const updated = [...models, { ...models[0], id: 'new-model', label: 'New model' }];
   await snapshot(page, { models: updated });
   await receive(page, { type: 'settingsState', requestId: old.requestId, scope: 'user', presets: [initialPreset], models: [] });
-  await expect(page.locator('#preset-model-0 option')).toHaveCount(4);
+  await expect(page.locator('#preset-model-0 option')).toHaveCount(5);
   await expect(page.locator('#preset-model-0 option').last()).toHaveText('New model');
 });
 
@@ -219,4 +219,43 @@ test('unavailable title models and failed scope loads cannot be saved', async ({
   await expect(page.getByLabel('要約に使うモデル')).toBeDisabled();
   await expect(page.getByLabel('要約の推論強度')).toBeDisabled();
   await expect(page.getByRole('button', { name: '保存', exact: true })).toBeDisabled();
+});
+
+test('HF presets accept a model and user-entered prices without an OpenAI catalog', async ({ page }, info) => {
+  await snapshot(page, { models: [] });
+  await page.getByLabel('モデル', { exact: true }).selectOption('huggingface');
+  await page.getByLabel('HFのモデルID', { exact: true }).fill('deepseek-ai/DeepSeek-V4-Flash:deepinfra');
+  await expect(page.getByLabel('推論強度', { exact: true })).toHaveValue('default');
+  await expect(page.getByRole('button', { name: '保存', exact: true })).toBeDisabled();
+  await page.getByLabel('入力単価（USD／100万トークン）', { exact: true }).fill('0.09');
+  await page.getByLabel('出力単価（USD／100万トークン）', { exact: true }).fill('0.18');
+  await page.getByLabel('権限').selectOption('workspace-write');
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  const hfPreset = { model: 'hf:deepseek-ai/DeepSeek-V4-Flash:deepinfra', effort: 'default', mode: 'workspace-write', pricing: { input: 0.09, output: 0.18 } };
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'saveSettings', presets: [hfPreset], titleModel: 'latest' });
+  await snapshot(page, { saved: true, presets: [hfPreset], models: [] });
+  await expect(page.getByLabel('HFのモデルID', { exact: true })).toHaveValue('deepseek-ai/DeepSeek-V4-Flash:deepinfra');
+  await expect(page.getByLabel('入力単価（USD／100万トークン）', { exact: true })).toHaveValue('0.09');
+  await page.setViewportSize({ width: 380, height: 1000 });
+  expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
+  await page.screenshot({ path: info.outputPath('hf-preset.png'), fullPage: true });
+});
+
+test('HF model validation and title prices survive errors and do not interfere with native selections', async ({ page }) => {
+  await snapshot(page);
+  await page.getByLabel('要約に使うモデル').selectOption('huggingface');
+  await page.getByLabel('HFの要約モデルID').fill('invalid');
+  await page.getByLabel('要約の入力単価（USD／100万トークン）').fill('0');
+  await page.getByLabel('要約の出力単価（USD／100万トークン）').fill('0.2');
+  await expect(page.getByRole('button', { name: '保存', exact: true })).toBeDisabled();
+  await page.getByLabel('HFの要約モデルID').fill('org/model:provider');
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  expect((await messages(page)).at(-1)).toMatchObject({ titleModel: 'hf:org/model:provider', titlePricing: { input: 0, output: 0.2 } });
+  await receive(page, { type: 'settingsError', requestId: (await messages(page)).at(-1)!.requestId, message: '保存できませんでした。' });
+  await expect(page.getByLabel('HFの要約モデルID')).toHaveValue('org/model:provider');
+  await page.getByLabel('要約の入力単価（USD／100万トークン）').fill('-1');
+  await expect(page.getByRole('button', { name: '保存', exact: true })).toBeDisabled();
+  await page.getByLabel('要約に使うモデル').selectOption('latest');
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'saveSettings', titleModel: 'latest' });
 });

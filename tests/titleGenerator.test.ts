@@ -52,6 +52,24 @@ test('titles use an ephemeral read-only thread, bounded structured output, and t
   } finally { h.dispose(); }
 });
 
+test('HF titles use the HF provider without a catalog and report usage for their owning task', async () => {
+  const h = harness(1000, []);
+  const hfRequest = { ...request, model: 'hf:org/model:provider', ownerThreadId: 'main-thread', pricing: { input: 1, output: 3 } };
+  const usages: unknown[] = [];
+  h.generator.onTokenUsage = (request, sourceId, usage) => usages.push({ request, sourceId, usage });
+  try {
+    const result = h.generator.generate(hfRequest, new AbortController().signal); await tick();
+    const start = h.calls.find(call => call.method === 'thread/start')!.params;
+    assert.equal(start.model, 'org/model:provider'); assert.equal(start.modelProvider, 'codex_deck_huggingface');
+    assert.equal(object(start.config).model_reasoning_effort, undefined);
+    const tokenUsage = { total: { inputTokens: 100, outputTokens: 20 }, last: { inputTokens: 100, outputTokens: 20 } };
+    h.server.notify('thread/tokenUsage/updated', { threadId: 'title-thread', turnId: 'title-turn', tokenUsage });
+    h.server.notify('turn/completed', { threadId: 'title-thread', turn: { id: 'title-turn', status: 'completed', items: [{ id: 'title', type: 'agentMessage', text: '{"title":"HF title"}' }] } });
+    assert.equal(await result, 'HF title');
+    assert.deepEqual(usages, [{ request: hfRequest, sourceId: 'title-thread', usage: tokenUsage }]);
+  } finally { h.dispose(); }
+});
+
 test('selected title effort and the lowest effort of the latest model reach the title thread', async () => {
   const catalog = [{ ...models[0]!, upgrade: 'latest-title' }, { ...models[0]!, id: 'latest-title', isDefault: false,
     efforts: ['high', 'minimal', 'low'].map(id => ({ id, description: '' })), defaultEffort: 'high' }];

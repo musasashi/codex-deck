@@ -3,6 +3,8 @@ import { randomBytes } from 'node:crypto';
 import { readPresets, readTitleEffort, readTitleModel, selectedModel, validatePresets, validateTitleEffort, validateTitleModel } from '../core/settings';
 import { messageOf, object, string, type Model } from '../core/types';
 import { settingsHtml } from './settingsHtml';
+import { isHuggingFaceModel } from '../core/huggingFace';
+import { readTokenPrice, validateTokenPrice, type TokenPrice } from '../core/cost';
 
 interface SettingsHost {
   loadModels(): Promise<Model[]>;
@@ -47,15 +49,17 @@ export class SettingsPanel implements vscode.Disposable {
         const saving = message.type === 'saveSettings';
         if (saving) this.saving = true;
         try {
-          const models = await this.host.loadModels();
+          let modelError = '';
+          const models = await this.host.loadModels().catch(error => { this.host.report(error); modelError = `モデル一覧: ${messageOf(error)}`; return [] as Model[]; });
           if (saving) {
             const titleModel = validateTitleModel(message.titleModel, models);
-            await this.save(scope, validatePresets(message.presets, models), titleModel, validateTitleEffort(message.titleEffort, selectedModel(models, titleModel)));
+            await this.save(scope, validatePresets(message.presets, models), titleModel, validateTitleEffort(message.titleEffort, selectedModel(models, titleModel)),
+              isHuggingFaceModel(titleModel) ? validateTokenPrice(message.titlePricing) : undefined);
           }
           if (this.panel === panel) void webview.postMessage({ type: 'settingsState', requestId: message.requestId, saved: saving,
             scopes: scopes.map(({ id, label }) => ({ id, label })), scope: scope.id,
             presets: readPresets(this.read(scope, 'presets')), titleModel: readTitleModel(this.read(scope, 'titleModel')),
-            titleEffort: readTitleEffort(this.read(scope, 'titleEffort')), models });
+            titleEffort: readTitleEffort(this.read(scope, 'titleEffort')), titlePricing: readTokenPrice(this.read(scope, 'titlePricing')), models, modelError });
         } finally { if (saving) this.saving = false; }
       } catch (error) {
         this.host.report(error);
@@ -78,11 +82,12 @@ export class SettingsPanel implements vscode.Disposable {
     return (scope.field === 'workspaceFolderValue' ? value?.workspaceFolderValue : undefined)
       ?? (scope.field !== 'globalValue' ? value?.workspaceValue : undefined) ?? value?.globalValue ?? value?.defaultValue;
   }
-  private async save(scope: Scope, presets: ReturnType<typeof validatePresets>, titleModel: string, titleEffort: string): Promise<void> {
+  private async save(scope: Scope, presets: ReturnType<typeof validatePresets>, titleModel: string, titleEffort: string, titlePricing?: TokenPrice): Promise<void> {
     const config = vscode.workspace.getConfiguration('codexDeck', scope.uri);
     await config.update('presets', presets, scope.target);
     await config.update('titleModel', titleModel, scope.target);
     await config.update('titleEffort', titleEffort, scope.target);
+    await config.update('titlePricing', titlePricing, scope.target);
   }
   dispose(): void { this.panel?.dispose(); }
 }

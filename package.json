@@ -301,13 +301,23 @@
                 "type": "string",
                 "minLength": 1,
                 "default": "latest",
-                "markdownDescription": "モデルID。`latest`は推奨モデルを自動選択します。"
+                "markdownDescription": "モデルID。`latest`は推奨モデルを自動選択します。HF経由は`hf:組織/モデル:プロバイダー`（プロバイダーは省略可）を指定します。HF_TOKEN環境変数が必要です。"
               },
               "effort": {
                 "type": "string",
                 "minLength": 1,
                 "default": "high",
                 "markdownDescription": "推論強度。`default`はモデルの既定値を使用します。"
+              },
+              "pricing": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["input", "output"],
+                "description": "HFの入力・出力単価（USD／100万トークン）。タスクの利用額の概算に使用します。",
+                "properties": {
+                  "input": { "type": "number", "minimum": 0, "description": "入力単価（USD／100万トークン）" },
+                  "output": { "type": "number", "minimum": 0, "description": "出力単価（USD／100万トークン）" }
+                }
               },
               "mode": {
                 "type": "string",
@@ -342,7 +352,7 @@
           "default": "latest",
           "minLength": 1,
           "scope": "resource",
-          "markdownDescription": "タスク名の要約に使うモデルID。`latest`は最新の推奨モデルを自動選択します。コマンド「Codex Deck: 設定」の「タスク名」から選択できます。最初の依頼を送信した時点で要約します。分岐先では引き継いだ会話も参考にします。"
+          "markdownDescription": "タスク名の要約に使うモデルID。HF経由は`hf:組織/モデル:プロバイダー`を指定します。`latest`は最新の推奨モデル、HFタスクではそのタスクのHFモデルを使います。コマンド「Codex Deck: 設定」の「タスク名」から選択できます。"
         },
         "codexDeck.titleEffort": {
           "type": "string",
@@ -350,6 +360,17 @@
           "minLength": 1,
           "scope": "resource",
           "markdownDescription": "タスク名の要約に使う推論強度。`lowest`は選択したモデルで利用できる最も低い強度、`default`はモデルの既定値を使います。コマンド「Codex Deck: 設定」の「タスク名」からモデルに対応する強度を選択できます。"
+        },
+        "codexDeck.titlePricing": {
+          "type": "object",
+          "scope": "resource",
+          "additionalProperties": false,
+          "required": ["input", "output"],
+          "description": "要約用HFモデルの単価（USD／100万トークン）。要約モデルがlatestの場合はタスクの単価を使用します。",
+          "properties": {
+            "input": { "type": "number", "minimum": 0 },
+            "output": { "type": "number", "minimum": 0 }
+          }
         },
         "codexDeck.composerEnterBehavior": {
           "type": "string",
