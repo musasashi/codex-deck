@@ -33,6 +33,7 @@ let draftTimer: ReturnType<typeof setTimeout> | undefined;
 let initialFocus = true;
 const prompt = $<HTMLTextAreaElement>('prompt');
 const saved = object(vscode.getState());
+let dismissedNotice = string(saved.dismissedNotice);
 prompt.value = string(saved.draft);
 for (const savedSend of array(saved.pendingSends).map(object)) {
   if (typeof savedSend.id !== 'string' || typeof savedSend.text !== 'string') continue;
@@ -47,7 +48,7 @@ const usageGauges = new UsageGauges($('usage-gauges'));
 const requests = new Requests($('requests'), post);
 
 function saveDraft(): void {
-  if (task) vscode.setState({ taskId: task.id, draft: prompt.value, skillPaths: completion.skillPaths(), pendingSends });
+  if (task) vscode.setState({ taskId: task.id, draft: prompt.value, skillPaths: completion.skillPaths(), pendingSends, dismissedNotice });
 }
 function updateSendButton(): void {
   $<HTMLButtonElement>('send').disabled = !!sending || !!task?.busy || pendingPastes.size > 0;
@@ -156,9 +157,12 @@ function render(): void {
   $<HTMLInputElement>('auto-resume').closest<HTMLElement>('label')!.hidden = huggingFace;
   const notice = $('notice');
   const waiting = task.status === 'waiting';
-  notice.textContent = waiting ? `使用量の回復を待っています。${task.recoveryAt ? ` 回復予定: ${new Date(task.recoveryAt).toLocaleString()}` : ''}` : task.error ?? (!connected ? 'App Serverに未接続です。メニューから再接続できます。' : '');
-  notice.hidden = !notice.textContent;
+  const noticeText = waiting ? `使用量の回復を待っています。${task.recoveryAt ? ` 回復予定: ${new Date(task.recoveryAt).toLocaleString()}` : ''}` : task.error ?? (!connected ? 'App Serverに未接続です。メニューから再接続できます。' : '');
+  if (waiting || dismissedNotice !== JSON.stringify([task.id, noticeText])) dismissedNotice = '';
+  $('notice-text').textContent = noticeText;
+  notice.hidden = !noticeText || !!dismissedNotice;
   notice.className = waiting ? 'waiting-notice' : 'error-notice';
+  $('dismiss-notice').hidden = waiting;
   const conversation = $('conversation');
   const atBottom = conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight < 80;
   const transcript = $('transcript');
@@ -292,6 +296,13 @@ prompt.addEventListener('paste', event => {
   void pasteImages(files);
 });
 $('auto-resume').addEventListener('change', () => post('autoResume', { enabled: $<HTMLInputElement>('auto-resume').checked }));
+$('dismiss-notice').addEventListener('click', () => {
+  if (!task) return;
+  dismissedNotice = JSON.stringify([task.id, $('notice-text').textContent]);
+  $('notice').hidden = true;
+  saveDraft();
+  prompt.focus();
+});
 for (const [id, type] of [['menu', 'menu'], ['attach', 'attach'], ['stop', 'stop']]) $(id!).addEventListener('click', () => post(type!));
 $('cycle-preset').addEventListener('click', () => post('cyclePreset'));
 for (const id of ['model', 'effort', 'mode']) $(id).addEventListener('change', () => post('settings', {
