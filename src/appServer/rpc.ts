@@ -107,13 +107,13 @@ export class StdioConnection {
     if (this.child) throw new Error('App Serverはすでに起動しています。');
     // No shell: executable settings and paths are never evaluated as commands.
     const args = ['app-server', ...HF_CONFIG_ARGS, ...(huggingFaceUrl ? ['-c', `model_providers.${HF_PROVIDER}.base_url=${JSON.stringify(huggingFaceUrl)}`] : [])];
-    const child = spawn(executable, args, { cwd, env, stdio: 'pipe', windowsHide: true });
+    const child = spawn(executable, args, { cwd, env, stdio: 'pipe' });
     this.child = child;
     const peer = new JsonRpcPeer(child.stdout, child.stdin);
     this.peer = peer;
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk: string) => this.log(chunk));
-    child.once('error', error => peer.close(new Error(`Codex CLIを起動できません: ${error.message}。codexDeck.cliPathを確認してください。`)));
+    child.once('error', error => peer.close(new Error(`WSL内のCodex CLIを起動できません: ${error.message}。codexDeck.cliPathにWSL内の実行ファイルを指定してください。`)));
     child.once('exit', (code, signal) => {
       if (this.child === child) this.child = undefined;
       peer.close(new Error(`App Serverが終了しました (${code ?? signal})。`));

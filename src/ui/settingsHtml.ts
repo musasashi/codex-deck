@@ -23,8 +23,8 @@ export function settingsHtml(options: { cspSource: string; script: string; css: 
       </fieldset>
       <div class="actions"><button id="save" type="submit" disabled>保存</button><button id="reload" type="button" class="secondary">候補を再読み込み</button><button id="cancel-check" type="button" class="secondary" hidden>確認を中止</button></div>
       <p id="status" role="status" aria-live="polite">候補を読み込み中…</p>
-      <p class="hint">HFを使うには、VS Codeを実行する環境（WSL・SSHでは接続先）に、Inference Providers権限を持つトークンを環境変数HF_TOKENとして設定してください。</p>
-      <p class="hint">APIキーはVS Codeを実行する環境に設定してください。「利用可否を確認」は短いテストを最大3回送信し、提供元の利用料金の対象になります。応答・ツール往復・利用トークン数を確認します。要約専用モデルではツール往復を省きます。設定の保存では推論APIを呼び出しません。単価は任意で、キャッシュ割引・無料枠は概算費用に反映しません。</p>
+      <p class="hint">HFを使うには、WSL内にInference Providers権限を持つトークンを環境変数HF_TOKENとして設定してください。</p>
+      <p class="hint">APIキーはWSL内の環境変数に設定してください。「利用可否を確認」は短いテストを最大3回送信し、提供元の利用料金の対象になります。応答・ツール往復・利用トークン数を確認します。要約専用モデルではツール往復を省きます。設定の保存では推論APIを呼び出しません。単価は任意で、キャッシュ割引・無料枠は概算費用に反映しません。</p>
     </form>
     <footer><button id="codex-config" type="button" class="link">Codexの設定</button><button id="other-settings" type="button" class="link">その他の拡張機能設定</button></footer></main>
     <script nonce="${options.nonce}" src="${options.script}"></script></body></html>`;

@@ -197,7 +197,7 @@ function render(): void {
   const send = $<HTMLButtonElement>('send');
   updateSendButton();
   send.textContent = running ? '追加入力' : '送信';
-  send.title = `${send.textContent} (${enterBehavior === 'modEnter' ? 'Ctrl+Enter / Cmd+Enter' : 'Enter'})`;
+  send.title = `${send.textContent} (${enterBehavior === 'modEnter' ? 'Ctrl+Enter' : 'Enter'})`;
   const latest = latestModel(models);
   options($<HTMLSelectElement>('model'), [
     ...(task.settings.model === 'latest' ? [{ id: 'latest', label: latest ? `最新モデル (${latest.label})` : '最新モデル' }] : []),

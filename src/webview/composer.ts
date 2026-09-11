@@ -84,7 +84,7 @@ export class Composer {
     } else if (message.type === 'fileSearch' && this.fileRequest !== undefined && message.requestId === this.fileRequest) {
       this.fileRequest = undefined; this.loading = false; this.error = string(message.error);
       this.candidates = (array(message.files) as FileReference[]).map(file => {
-        const path = file.path + (file.kind === 'directory' && !/[\\/]$/.test(file.path) ? '/' : '');
+        const path = file.path + (file.kind === 'directory' && !file.path.endsWith('/') ? '/' : '');
         return { label: path, description: '', value: fileMention(path) };
       });
       this.renderPopup();

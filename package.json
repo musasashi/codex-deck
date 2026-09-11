@@ -2,7 +2,7 @@
   "name": "codex-deck",
   "displayName": "Codex Deck",
   "icon": "media/icon.png",
-  "description": "Codexタスクをエディタタブで並行実行するVS Code拡張機能",
+  "description": "WSL内のCodexタスクをエディタタブで並行実行するVS Code拡張機能",
   "version": "0.1.0",
   "publisher": "codex-deck",
   "private": true,
@@ -274,7 +274,7 @@
           "type": "string",
           "default": "codex",
           "scope": "machine",
-          "description": "公式Codex CLIの実行ファイル。WSL・SSHでは接続先にインストールしてください。"
+          "description": "WSL内の公式Codex CLIの実行ファイル。codexまたはWSL内のパスを指定してください。"
         },
         "codexDeck.presets": {
           "type": "array",
@@ -408,7 +408,7 @@
             "modEnter"
           ],
           "default": "modEnter",
-          "description": "メッセージ送信のキー操作。enterはEnter、modEnterはCtrl+Enter／Cmd+Enterで送信します。Shift+Enterは改行します。"
+          "description": "メッセージ送信のキー操作。enterはEnter、modEnterはCtrl+Enterで送信します。Shift+Enterは改行します。"
         }
       }
     }

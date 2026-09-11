@@ -13,7 +13,7 @@ interface Connection { proxy: ResponsesProxy; config: JsonObject }
 export class ResponsesConnections {
   private connections = new Map<string, Promise<Connection>>();
   private generation = 0;
-  constructor(private readonly environment: (keys: string[]) => Promise<NodeJS.ProcessEnv> = keys => appServerEnvironment(process.env, process.platform, keys)) {}
+  constructor(private readonly environment: (keys: string[]) => Promise<NodeJS.ProcessEnv> = keys => appServerEnvironment(process.env, keys)) {}
 
   private async connection(provider: ResponsesProvider, effort?: string): Promise<Connection> {
     const generation = this.generation;

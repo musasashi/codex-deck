@@ -48,10 +48,8 @@ test('references default to private OS temporary files and can be sent again aft
   assert.equal(dirname(directory), tmpdir());
   assert.match(directory, /codex-deck-reference-/);
   assert.match(await readFile(filename, 'utf8'), /参照元: codex:\/\/threads\/source/);
-  if (process.platform !== 'win32') {
-    assert.equal((await stat(directory)).mode & 0o777, 0o700);
-    assert.equal((await stat(filename)).mode & 0o777, 0o600);
-  }
+  assert.equal((await stat(directory)).mode & 0o777, 0o700);
+  assert.equal((await stat(filename)).mode & 0o777, 0o600);
   assert.equal(input[0]!.text, text);
   assert.ok(input[1]!.text!.startsWith('\n\n<codex_deck_reference>\n'));
   assert.match(input[1]!.text!, /参照会話: codex:\/\/threads\/source/);

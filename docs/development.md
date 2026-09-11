@@ -4,11 +4,13 @@
 
 ## 開発版を起動する
 
-[必要な環境](../README.md#はじめる)を用意し、リポジトリのルートで`npm ci`を実行します。
+[必要な環境](../README.md#はじめる)を用意し、WSL内のターミナルでリポジトリのルートから`npm ci`を実行します。
 
-VS Codeでリポジトリを開き、F5でExtension Development Hostを起動します。起動前に自動でビルドされます。起動したウィンドウで作業フォルダーを開くと、Codex Deckを使用できます。
+VS CodeからWSLに接続してリポジトリを開き、F5でExtension Development Hostを起動します。起動前に自動でビルドされます。起動したウィンドウでWSL内の作業フォルダーを開くと、Codex Deckを使用できます。
 
 ## 検証する
+
+コマンドはWSL内で実行します。
 
 | コマンド | 対象 |
 | --- | --- |
@@ -34,14 +36,14 @@ npm run build
 
 既存のブラウザーを使う場合は`CODEX_DECK_CHROMIUM`に実行ファイルを指定します。UIテストの実行規則は[AGENTS.md](../AGENTS.md#uiテスト)を参照してください。
 
-### LinuxでのExtension Host・履歴テスト
+### WSL内でのExtension Host・履歴テスト
 
 ```sh
 xvfb-run -a npm run test:extension
 xvfb-run -a npm run test:history
 ```
 
-これらのテストは隔離した設定と模擬App Serverを使用します。
+これらのテストはWSL内でLinux版VS Codeを直接起動し、隔離した設定と模擬App Serverを使用します。WSL接続のない開発用Extension Hostは、LinuxカーネルのWSL識別情報で判定します。
 
 ## リリースする
 

@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import { AppServerClient } from './appServer/client';
 import { StdioConnection } from './appServer/rpc';
-import { appServerEnvironment } from './appServer/environment';
+import { appServerEnvironment, requireWslHost } from './appServer/environment';
 import { HuggingFaceProxy } from './appServer/huggingFaceProxy';
 import { ResponsesConnections } from './appServer/responsesConnections';
 import { TaskManager, readTaskRecords } from './core/taskManager';
@@ -27,7 +27,10 @@ const exec = promisify(execFile);
 const STORAGE_KEY = 'codexDeck.tasks';
 let deck: DeckExtension | undefined;
 
-export function activate(context: vscode.ExtensionContext): void { deck = new DeckExtension(context); }
+export function activate(context: vscode.ExtensionContext): void {
+  requireWslHost(vscode.env.remoteName);
+  deck = new DeckExtension(context);
+}
 export async function deactivate(): Promise<void> { await deck?.shutdown(); deck = undefined; }
 
 class DeckExtension implements PanelHost {
@@ -132,7 +135,8 @@ class DeckExtension implements PanelHost {
       this.connection.dispose();
       this.huggingFace.dispose();
       const executable = vscode.workspace.getConfiguration('codexDeck').get<string>('cliPath', 'codex').trim();
-      if (!executable) throw new Error('codexDeck.cliPathに公式Codex CLIの実行ファイルを指定してください。');
+      if (!executable) throw new Error('codexDeck.cliPathにWSL内の公式Codex CLIの実行ファイルを指定してください。');
+      if (/\\|^[a-z]:|\.(?:exe|cmd|bat)$/i.test(executable)) throw new Error('codexDeck.cliPathにWSL内のCodex CLIを指定してください。Windows版の実行ファイルは使用できません。');
       this.invalidateComposerCatalogs();
       const env = await appServerEnvironment();
       if (this.stopping) return;
@@ -570,7 +574,7 @@ class DeckExtension implements PanelHost {
       this.panels.open(linked);
       await this.manager.restore(linked.id); return;
     }
-    if (/^[a-z][a-z\d+.-]*:/i.test(value) && !/^[a-z]:[\\/]/i.test(value)) throw new Error('この種類のリンクは開けません。');
+    if (/^[a-z][a-z\d+.-]*:/i.test(value)) throw new Error('この種類のリンクは開けません。');
     const match = /^(.*?)(?::(\d+)(?::\d+)?|#L(\d+)(?:-L?\d+)?)?$/.exec(value);
     if (!match?.[1]) return;
     const filename = path.isAbsolute(match[1]) ? match[1] : path.resolve(task.cwd, match[1]);

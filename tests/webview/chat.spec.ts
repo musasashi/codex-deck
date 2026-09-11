@@ -156,7 +156,7 @@ test('empty chat shows only registered skills, dynamic settings, auto-resume tog
   const prompt = page.getByLabel('メッセージ', { exact: true });
   const send = page.getByRole('button', { name: '送信', exact: true });
   await send.hover();
-  await expect(send).toHaveAttribute('title', '送信 (Ctrl+Enter / Cmd+Enter)');
+  await expect(send).toHaveAttribute('title', '送信 (Ctrl+Enter)');
   await prompt.fill('通信層を実装してください。');
   await prompt.press('Enter');
   await expect(prompt).toHaveValue('通信層を実装してください。\n');

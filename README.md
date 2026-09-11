@@ -1,6 +1,6 @@
 # Codex Deck
 
-CodexのタスクをVS Codeのエディタタブで並行して扱う拡張機能です。別途インストールした公式Codex CLIを使用します。
+WSL内のCodexのタスクをVS Codeのエディタタブで並行して扱う拡張機能です。拡張機能と公式Codex CLIをWSL側で実行します。Windows版Codexには対応していません。
 
 ## 特徴
 
@@ -13,20 +13,21 @@ CodexのタスクをVS Codeのエディタタブで並行して扱う拡張機�
 
 ## はじめる
 
-必要なものは **VS Code 1.96以降・公式Codex CLI・Node.js 24以降（VSIX作成用）** です。
+必要なものは **WSL・WindowsのVS Code 1.96以降とWSL拡張・WSL内の公式Codex CLI・Node.js 24以降（WSL内でのVSIX作成用）** です。
 
-1. 公式Codex CLIをインストールし、`codex --version`で実行できることを確認します。
-2. このリポジトリのルートでVSIXを作成します。
+1. VS CodeからWSLに接続して、作業フォルダーを開きます。
+2. WSL内に公式Codex CLIをインストールし、WSLのターミナルで`codex --version`を確認します。
+3. WSL内のターミナルで、このリポジトリのルートからVSIXを作成します。
 
    ```sh
    npm ci
    npm run package
    ```
 
-3. VS Codeの拡張機能ビューで「VSIXからのインストール」を選び、生成された`.vsix`ファイルを読み込みます。
-4. 作業フォルダーを開き、アクティビティバーの「Codex Deck」→「＋」でタスクを作成します。
+4. WSLに接続したVS Codeの拡張機能ビューで「VSIXからのインストール」を選び、生成された`.vsix`ファイルをWSL側にインストールします。
+5. アクティビティバーの「Codex Deck」→「＋」でタスクを作成します。
 
-認証とCodex設定はCLIと共有します。サインインはタスク右上の「•••」→「アカウント」から行えます。
+認証・Codex設定・会話履歴はWSL内のCLIと共有します。サインインはタスク右上の「•••」→「アカウント」から行えます。
 
 ## 対応範囲
 

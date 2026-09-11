@@ -20,7 +20,6 @@ export async function workingDiff(cwd: string): Promise<string> {
     : await git(['diff', ...flags, '--cached', '--']) + await git(['diff', ...flags, '--']);
   const untracked = (await git(['ls-files', '--others', '--exclude-standard', '-z'])).split('\0').filter(Boolean);
   for (const file of untracked) {
-    // Git recognizes /dev/null on all supported platforms, including Git for Windows.
     diff += await git(['diff', '--no-index', ...flags, '--', '/dev/null', file], true);
     if (Buffer.byteLength(diff) > maxBuffer) throw new Error('差分が大きすぎます。VS Codeのソース管理でファイルごとに確認してください。');
   }

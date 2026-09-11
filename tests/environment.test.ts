@@ -3,10 +3,28 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { appServerEnvironment } from '../src/appServer/environment';
+import { appServerEnvironment, requireWslHost } from '../src/appServer/environment';
 import { StdioConnection } from '../src/appServer/rpc';
 
-const unix = { skip: process.platform === 'win32' };
+test('WSL connections and local WSL development hosts are supported', () => {
+  assert.doesNotThrow(() => requireWslHost('wsl', 'linux', 'custom-kernel'));
+  assert.doesNotThrow(() => requireWslHost(undefined, 'linux', '4.4.0-19041-Microsoft'));
+  assert.doesNotThrow(() => requireWslHost(undefined, 'linux', '6.6.87.2-microsoft-standard-WSL2'));
+});
+
+test('unsupported hosts receive WSL setup guidance, including local Windows hosts in a WSL window', () => {
+  for (const [remoteName, platform, kernelRelease] of [
+    [undefined, 'win32', '10.0.26100'],
+    ['wsl', 'win32', '10.0.26100'],
+    [undefined, 'darwin', '24.0.0'],
+    [undefined, 'linux', '6.8.0-generic'],
+    ['ssh-remote', 'linux', '6.8.0-generic'],
+    ['ssh-remote', 'linux', '6.6.87.2-microsoft-standard-WSL2'],
+    ['dev-container', 'linux', '6.6.87.2-microsoft-standard-WSL2'],
+  ] as const) {
+    assert.throws(() => requireWslHost(remoteName, platform, kernelRelease), /WSL接続で開き/);
+  }
+});
 
 async function fixture(t: TestContext, script: string) {
   const directory = await mkdtemp(path.join(tmpdir(), 'codex-deck-env-'));
@@ -16,15 +34,14 @@ async function fixture(t: TestContext, script: string) {
   return { directory, executable, env: { ...process.env, HF_TOKEN: undefined, SHELL: executable } };
 }
 
-test('inherited credentials take precedence and Windows does not launch a shell', async () => {
+test('inherited credentials take precedence without launching a shell', async () => {
   const base = { HF_TOKEN: 'hf_inherited', SHELL: '/does/not/exist', PATH: '/original/path' };
-  const env = await appServerEnvironment(base, 'linux');
+  const env = await appServerEnvironment(base);
   assert.deepEqual(env, base);
   assert.notEqual(env, base, 'each connection receives its own environment');
-  assert.deepEqual(await appServerEnvironment({ SHELL: '/does/not/exist' }, 'win32'), { SHELL: '/does/not/exist' });
 });
 
-test('a non-login interactive bash loads guarded .bashrc credentials and only imports HF_TOKEN', unix, async t => {
+test('a non-login interactive bash loads guarded .bashrc credentials and only imports HF_TOKEN', async t => {
   const f = await fixture(t, String.raw`
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
@@ -46,7 +63,7 @@ export PATH='/shell/modified/path'
   assert.equal((await appServerEnvironment(base)).HF_TOKEN, 'hf_updated', 'read again on the next connection');
 });
 
-test('shell resolution runs at home and ignores unframed startup output', unix, async t => {
+test('shell resolution runs at home and ignores unframed startup output', async t => {
   const f = await fixture(t, `
 if (process.cwd() !== ${JSON.stringify(homedir())}) process.exit(1);
 process.stdout.write('\\0CODEX_DECK_HF_TOKEN\\0hf_at_home\\0');
@@ -58,7 +75,7 @@ process.stdout.write('HF_TOKEN=hf_not_a_shell_result\\n');
   assert.deepEqual(await appServerEnvironment(f.env), f.env);
 });
 
-test('failed, missing and stalled shells preserve the original environment without exposing their output', unix, async t => {
+test('failed, missing and stalled shells preserve the original environment without exposing their output', async t => {
   const f = await fixture(t, String.raw`
 process.stdout.write('\0CODEX_DECK_HF_TOKEN\0hf_failed\0');
 process.stderr.write('private shell diagnostic');

@@ -38,7 +38,7 @@ function panel(): vscode.WebviewPanel {
   } as unknown as vscode.WebviewPanel;
 }
 
-function activate(records: TaskRecord[]) {
+function activate(records: TaskRecord[], options: { remoteName?: string; isTrusted?: boolean; cliPath?: string } = { remoteName: 'wsl' }) {
   let stored: unknown = { version: 1, tasks: structuredClone(records) };
   let serializer!: vscode.WebviewPanelSerializer;
   let createdPanels = 0;
@@ -46,6 +46,7 @@ function activate(records: TaskRecord[]) {
   const commands = new Map<string, (arg?: unknown) => unknown>();
   const api = {
     EventEmitter: Emitter,
+    env: { remoteName: options.remoteName },
     Uri: { file: (value: string) => new URL(`file://${value}`),
       joinPath: (uri: URL, ...parts: string[]) => new URL(`${uri}/${parts.join('/')}`) },
     window: {
@@ -57,9 +58,9 @@ function activate(records: TaskRecord[]) {
       createWebviewPanel() { createdPanels++; return panel(); },
     },
     workspace: {
-      isTrusted: false, // Restoration must populate the tree even when connecting is unavailable.
+      isTrusted: options.isTrusted ?? false, // Restoration must populate the tree even when connecting is unavailable.
       onDidChangeConfiguration: disposable, onDidCloseTextDocument: disposable, registerTextDocumentContentProvider: disposable,
-      getConfiguration: () => ({ get: (_key: string, fallback: unknown) => fallback }),
+      getConfiguration: () => ({ get: (key: string, fallback: unknown) => key === 'cliPath' ? options.cliPath ?? fallback : fallback }),
     },
     commands: { registerCommand(id: string, action: (arg?: unknown) => unknown) { commands.set(id, action); return disposable(); } },
   };
@@ -81,6 +82,21 @@ function activate(records: TaskRecord[]) {
     },
   };
 }
+
+test('unsupported remote hosts cannot activate the extension', () => {
+  assert.throws(() => activate([], { remoteName: 'ssh-remote' }), /WSL接続で開き/);
+  assert.throws(() => activate([], { remoteName: 'dev-container' }), /WSL接続で開き/);
+});
+
+test('Windows CLI paths are rejected before connecting from WSL', async () => {
+  for (const cliPath of ['codex.exe', 'codex.cmd', 'codex.bat', ' C:\\tools\\codex.exe ', 'C:/tools/codex', '/mnt/c/tools/CODEX.EXE', '\\\\server\\share\\codex']) {
+    const extension = activate([], { remoteName: 'wsl', isTrusted: true, cliPath });
+    try {
+      const { host } = extension.serializer as unknown as { host: PanelHost };
+      await assert.rejects(host.connect(), /WSL内のCodex CLI.*Windows版/);
+    } finally { await extension.shutdown(); }
+  }
+});
 
 test('activation lists all saved open tasks before any editor tab is deserialized', async () => {
   const extension = activate([record('first', true), record('closed', false), record('second', true), record('draft', true, true)]);
