@@ -44,6 +44,7 @@ function renderCheck(button: HTMLButtonElement, message: HTMLElement, model: str
   const result = checks.get(huggingFaceCheckKey(model, purpose)) ?? (purpose === 'title' ? checks.get(huggingFaceCheckKey(model, 'task')) : undefined);
   button.disabled = busy || !ready || !selectedModel(models, model);
   button.textContent = result ? '再確認' : '利用可否を確認';
+  button.classList.toggle('accent', !result);
   message.textContent = result?.message ?? '未確認：保存前にResponses APIでの動作を確認します。';
   message.className = result?.status === 'failed' ? 'hint error' : 'hint';
 }

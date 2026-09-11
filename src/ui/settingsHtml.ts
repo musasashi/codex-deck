@@ -5,7 +5,7 @@ export function settingsHtml(options: { cspSource: string; script: string; css: 
       <fieldset id="presets" disabled><legend>プリセット</legend>
         <p class="hint">タスクの切り替えボタンで、上から順に循環します。プリセットは1件以上必要です。</p>
         <div id="preset-list"></div>
-        <button id="add-preset" type="button" class="secondary">プリセットを追加</button>
+        <button id="add-preset" type="button" class="accent">プリセットを追加</button>
       </fieldset>
       <fieldset id="task-titles" disabled><legend>タスク名</legend>
         <label for="title-model">要約に使うモデル</label><select id="title-model" aria-describedby="title-model-description"></select>

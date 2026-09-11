@@ -23,6 +23,10 @@ legend { padding: 0 12px 0 0; font-size: 16px; font-weight: 600; }
 button { padding: 7px 16px; border: 1px solid transparent; border-radius: 3px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); font: inherit; cursor: pointer; }
 button:hover { background: var(--vscode-button-hoverBackground); }
 button.secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+button.accent { background: var(--vscode-button-background, #0e639c); color: var(--vscode-button-foreground, #fff); border-color: var(--vscode-button-border, var(--vscode-button-background, #0e639c)); box-shadow: inset 0 1px 0 #fff2, 0 1px 2px #0002; }
+button.accent:hover:not(:disabled) { background: var(--vscode-button-hoverBackground, #1177bb); border-color: var(--vscode-button-border, var(--vscode-button-hoverBackground, #1177bb)); }
+button.accent:active:not(:disabled) { box-shadow: inset 0 1px 2px #0003; }
+button.accent:disabled { box-shadow: none; }
 button:disabled, select:disabled { opacity: .6; cursor: default; }
 #status { min-height: 20px; line-height: 1.6; overflow-wrap: anywhere; }
 .error { color: var(--vscode-errorForeground); }
