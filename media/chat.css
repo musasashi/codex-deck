@@ -43,6 +43,8 @@ h1 { font-size: 26px; font-weight: 550; line-height: 1.4; margin: 14px 0 12px; l
 .message-action[data-copied] .copied-icon { display: block; }
 @media (hover: none) { .message-footer { opacity: 1; pointer-events: auto; } }
 .user-text { white-space: pre-wrap; }
+.user-quote { margin: 0 0 10px; padding-left: 12px; border-left: 3px solid var(--vscode-textBlockQuote-border, var(--muted)); color: var(--muted); white-space: pre-wrap; }
+.user-text + .user-quote { margin-top: 14px; }
 .user-image { display: inline-block; max-width: min(100%, 240px); max-height: 180px; object-fit: contain; border: 1px solid var(--border); border-radius: 6px; margin: 6px 6px 0 0; vertical-align: top; }
 .message-label { font-size: 10px; font-weight: 650; letter-spacing: .15em; color: var(--muted); margin-bottom: 6px; }
 .automatic { display: block; color: var(--muted); font-size: 11px; margin-bottom: 7px; }

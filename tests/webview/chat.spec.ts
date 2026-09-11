@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { chatHtml } from '../../src/ui/html';
 import { decodeUsage } from '../../src/appServer/client';
 import { TaskManager } from '../../src/core/taskManager';
+import { questionAnswerText } from '../../src/core/questions';
 import { taskReferenceBody } from '../../src/core/taskReferenceText';
 import { FakeGateway, thread } from '../helpers';
 import type { Skill, Task, Usage } from '../../src/core/types';
@@ -1144,9 +1145,20 @@ test('async message questions show selectable cards after completion and submit 
   await receive(page, { type: 'failure', requestId: 'message:question' });
   await expect(send).toBeEnabled();
   await expect(page.getByRole('radio', { name: 'B', exact: true })).toBeChecked();
+  await send.click();
+  const text = questionAnswerText(value.requests[0]!, { answers: { '0': ['B'] } });
   value.requests = []; value.status = 'running'; value.activeTurnId = 'next';
+  value.turns = [{ id: 'next', status: 'inProgress', items: [{ id: 'answer', kind: 'userMessage', data: { content: [{ type: 'text', text }] } }] }];
   await state(page, value);
   await expect(page.locator('#requests')).toBeHidden();
+  const answer = page.locator('.message.user');
+  await expect(answer.locator('blockquote')).toHaveText('AかBどちらにしますか？');
+  await expect(answer.locator('blockquote')).toHaveCSS('border-left-style', 'solid');
+  await expect(answer.locator('.user-text')).toHaveText('B');
+  await page.screenshot({ path: info.outputPath('question-answer.png') });
+  await page.reload(); await state(page, value);
+  await expect(answer.locator('blockquote')).toHaveText('AかBどちらにしますか？');
+  await expect(answer.locator('.user-text')).toHaveText('B');
 });
 
 test('multiple questions require answers and freely switch between options and text', async ({ page }) => {
