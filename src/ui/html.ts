@@ -1,12 +1,8 @@
 export function chatHtml(options: { cspSource: string; script: string; css: string; nonce: string }): string {
   const { cspSource, script, css, nonce } = options;
   const autoResumeDescription = [
-    'ONにした会話が使用量上限で停止すると、すべての上限の回復を確認後に「作業を続けてください。」を自動送信します。',
-    'VS Codeの起動とApp Serverへの接続が必要です。VS Codeを閉じている間や未接続の間は自動継続しません。',
-    '通常の完了・手動停止・使用量上限以外のエラーでは自動継続しません。承認や質問は回答を待ちます。',
-    'チェックをOFFにする、手動で停止する、手動でメッセージを送信する操作で待機予約を解除します。手動停止ではチェックもOFFになります。',
-    'タスクのタブを閉じると、待機予約を解除してチェックもOFFになります。タブを開き直してもOFFのままです。',
-    'VS Code再起動時にタブが復元された場合は、使用量と実行状態を再確認して再開を判断します。',
+    '使用量の上限で作業が停止した場合、利用枠の回復を確認してから自動で作業を再開します。',
+    '待機中は、VS Codeを起動し、接続した状態にしておいてください。',
   ].join('\n');
     return `<!doctype html><html lang="ja"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource}; img-src ${cspSource} data:; script-src 'nonce-${nonce}';"><link href="${css}" rel="stylesheet"><title>Codex Deck</title></head><body>
       <header class="topbar"><div class="connection"><span id="status-dot" class="dot"></span><span id="status">接続中</span></div><label class="auto-resume" title="${autoResumeDescription}"><input id="auto-resume" type="checkbox">使用量回復後に自動継続</label><button id="menu" class="icon-button" aria-label="コマンドメニュー" title="コマンドメニュー">•••</button></header>
