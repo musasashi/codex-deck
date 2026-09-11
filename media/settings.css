@@ -31,6 +31,10 @@ button:disabled, select:disabled { opacity: .6; cursor: default; }
 #status { min-height: 20px; line-height: 1.6; overflow-wrap: anywhere; }
 .error { color: var(--vscode-errorForeground); }
 .hf-check { margin-top: 14px; }
+.provider-card { margin: 16px 0; padding: 16px; border: 1px solid var(--vscode-widget-border, #7774); border-radius: 6px; }
+.provider-model { margin: 16px 0; padding: 0 0 16px; border-top: 1px solid var(--vscode-widget-border, #7774); }
+.capability { display: inline-flex; align-items: center; gap: 8px; margin: 12px 16px 12px 0; font-weight: normal; }
+.capability input { width: auto; min-height: 0; }
 footer { display: flex; flex-wrap: wrap; gap: 20px; border-top: 1px solid var(--vscode-widget-border); margin-top: 24px; padding-top: 18px; }
 button.link { background: transparent; color: var(--vscode-textLink-foreground); padding: 0; text-align: left; }
 @media (max-width: 420px) { main { margin: 24px auto; padding: 0 16px; } .preset-fields { grid-template-columns: minmax(0, 1fr); gap: 0; } }

@@ -1,24 +1,30 @@
 import { execFile } from 'node:child_process';
 import { homedir, userInfo } from 'node:os';
+import { ENV_NAME } from '../core/providers';
 
 /** Remote extension hosts do not necessarily inherit variables from interactive shell startup files. */
-export async function appServerEnvironment(base: NodeJS.ProcessEnv = process.env, platform = process.platform): Promise<NodeJS.ProcessEnv> {
+export async function appServerEnvironment(base: NodeJS.ProcessEnv = process.env, platform = process.platform, keys = ['HF_TOKEN']): Promise<NodeJS.ProcessEnv> {
   const env = { ...base };
-  if (env.HF_TOKEN || platform === 'win32') return env;
+  if (keys.some(key => !ENV_NAME.test(key))) throw new Error('APIキーの環境変数名が不正です。');
+  const missing = [...new Set(keys)].filter(key => !env[key]);
+  if (!missing.length || platform === 'win32') return env;
   try {
     const shell = env.SHELL || userInfo().shell || '/bin/sh';
-    // Read only this credential, from the user's home directory. Never log shell output:
+    // Read only configured credentials, from the user's home directory. Never log shell output:
     // startup files may print secrets, including on stderr or when the shell fails.
     const stdout = await new Promise<string>((resolve, reject) => {
-      const child = execFile(shell, ['-i', '-c', 'printf \'\\0CODEX_DECK_HF_TOKEN\\0%s\\0\' "$HF_TOKEN"'],
+      const command = `printf '${missing.map(key => `\\0CODEX_DECK_${key}\\0%s\\0`).join('')}' ${missing.map(key => `"$${key}"`).join(' ')}`;
+      const child = execFile(shell, ['-i', '-c', command],
         { cwd: homedir(), env, encoding: 'utf8', timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024, windowsHide: true },
         (error, stdout) => error ? reject(error) : resolve(stdout));
       child.stdin?.end();
     });
-    const marker = '\0CODEX_DECK_HF_TOKEN\0';
-    const start = stdout.lastIndexOf(marker);
-    const end = stdout.indexOf('\0', start + marker.length);
-    if (start >= 0 && end > start + marker.length) env.HF_TOKEN = stdout.slice(start + marker.length, end);
+    for (const key of missing) {
+      const marker = `\0CODEX_DECK_${key}\0`;
+      const start = stdout.lastIndexOf(marker);
+      const end = stdout.indexOf('\0', start + marker.length);
+      if (start >= 0 && end > start + marker.length) env[key] = stdout.slice(start + marker.length, end);
+    }
   } catch { /* An unavailable or slow shell must not prevent OpenAI tasks from connecting. */ }
   return env;
 }

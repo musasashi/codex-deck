@@ -30,47 +30,47 @@ function harness(check: (model: string, purpose: HuggingFaceCheckPurpose, signal
   const module = { exports: {} as typeof import('../src/ui/settingsPanel') };
   new Function('require', 'module', 'exports', bundle)((id: string) => id === 'vscode' ? api : nodeRequire(id), module, module.exports);
   const panel = new module.exports.SettingsPanel(new URL('file:///extension') as unknown as vscode.Uri,
-    { loadModels: async () => [], checkHuggingFace: check, openCodexSettings: async () => {}, report() {} });
+    { loadModels: async () => [], checkProvider: (model, purpose, _providers, signal) => check(model, purpose, signal), providersChanged() {}, openCodexSettings: async () => {}, report() {} });
   panel.open();
   return { receive: (message: unknown) => receive(message), updates, sent, close: () => close() };
 }
 const passed = async (model: string, purpose: HuggingFaceCheckPurpose): Promise<HuggingFaceCheck> => ({ model, purpose, status: 'passed', message: '利用可' });
 
-test('failed HF validation blocks every settings write even when the webview claims a passed check', async () => {
-  const h = harness(async (model, purpose) => ({ model, purpose, status: 'failed', message: 'ツール結果を処理できません' }));
-  await h.receive({ ...save, checks: [{ model: hf.model, status: 'passed' }] });
-  assert.deepEqual(h.updates, []);
-  assert.match(String(h.sent.at(-1)!.message), /保存していません/);
-  assert.equal(object(h.sent.find(message => message.type === 'hfCheckState')!.result).status, 'failed');
+test('HF settings can be saved without credentials, prices or paid compatibility checks', async () => {
+  const h = harness(async () => { throw new Error('Saving must never run inference'); });
+  await h.receive({ ...save, presets: [{ ...hf, pricing: undefined }] });
+  assert.equal(h.updates.length, 4);
+  assert.equal(h.sent.at(-1)!.saved, true);
 });
 
-test('successful manual checks are reused for duplicate presets and titles on save', async () => {
+test('manual checks remain independent from saving duplicate presets and titles', async () => {
   let calls = 0;
   const h = harness(async (model, purpose) => { calls++; return passed(model, purpose); });
-  await h.receive({ type: 'checkHfModel', scope: 'user', model: hf.model, purpose: 'task', requestId: 1 });
+  await h.receive({ type: 'checkProviderModel', scope: 'user', model: hf.model, purpose: 'task', requestId: 1 });
   assert.equal(calls, 1); assert.deepEqual(h.updates, []);
   await h.receive({ ...save, presets: [hf, { ...hf, mode: 'workspace-write' }], titleModel: hf.model, titlePricing: hf.pricing, requestId: 2 });
   assert.equal(calls, 1); assert.equal(h.updates.length, 4);
   assert.equal(h.sent.at(-1)!.saved, true);
-  await h.receive({ type: 'checkHfModel', scope: 'user', model: hf.model, purpose: 'task', requestId: 3 });
+  await h.receive({ type: 'checkProviderModel', scope: 'user', model: hf.model, purpose: 'task', requestId: 3 });
   assert.equal(calls, 2, 'explicit rechecks must not use the cache');
 });
 
-test('all different HF models must pass before any setting is written', async () => {
-  const h = harness(async (model, purpose) => model === hf.model ? passed(model, purpose) : { model, purpose, status: 'failed', message: '利用量が未取得' });
-  await h.receive({ ...save, presets: [hf, { ...hf, model: 'hf:fixture/other' }] });
+test('invalid provider configuration is rejected before any setting is written', async () => {
+  const h = harness(passed);
+  await h.receive({ ...save, providers: [{ id: 'bad.id', name: 'invalid', baseUrl: 'https://example.test', models: [{ id: 'model' }] }] });
   assert.deepEqual(h.updates, []);
+  assert.match(String(h.sent.at(-1)!.message), /接続先ID/);
 });
 
-test('HF checks can be cancelled during save and closing settings also aborts them', async () => {
+test('manual API checks can be cancelled and closing settings also aborts them', async () => {
   for (const close of [false, true]) {
     let started!: () => void;
     const ready = new Promise<void>(resolve => { started = resolve; });
     const h = harness(async (model, purpose, signal) => new Promise(resolve => {
       signal.addEventListener('abort', () => resolve({ model, purpose, status: 'failed', message: '中止' }), { once: true }); started();
     }));
-    const work = h.receive(save); await ready;
-    if (close) h.close(); else await h.receive({ type: 'cancelHfCheck', requestId: 1 });
+    const work = h.receive({ type: 'checkProviderModel', scope: 'user', model: hf.model, requestId: 1 }); await ready;
+    if (close) h.close(); else await h.receive({ type: 'cancelProviderCheck', requestId: 1 });
     await work; assert.deepEqual(h.updates, []);
   }
 });

@@ -4,7 +4,8 @@ import { questionAnswers } from '../core/questions';
 import { JsonRpcPeer, requestKey, RpcError, type ServerRequest } from './rpc';
 import { TitleGenerator } from './titleGenerator';
 import type { TitleRequest } from '../core/types';
-import { displayModel, HF_MODEL_CONFIG, isHuggingFaceModel, isHuggingFaceProvider, modelRequest } from '../core/huggingFace';
+import { HF_MODEL_CONFIG, isHuggingFaceModel, isHuggingFaceProvider } from '../core/huggingFace';
+import { canonicalProvider, displayModel, externalModelConfig, isExternalModel, isExternalProvider, modelProvider, modelRequest, parseResponsesModel, providerId, providerModels, responsesModelId, type ResponsesProvider } from '../core/providers';
 import { costSample, type TokenPrice } from '../core/cost';
 
 function requiredString(value: unknown, field: string): string {
@@ -81,15 +82,36 @@ export class AppServerClient implements Gateway {
   private parentThreads = new Map<string, string>();
   private threadProviders = new Map<string, string>();
   private threadPricing = new Map<string, TokenPrice | undefined>();
+  private threadSettings = new Map<string, string>();
   private modelList?: Promise<Model[]>;
   private titles?: TitleGenerator;
+
+  constructor(private readonly providers: () => ResponsesProvider[] = () => [],
+    private readonly connectionConfig: (model: string, effort?: string) => Promise<JsonObject> = async () => ({})) {}
+
+  private async runConfig(model?: string, effort?: string, provider?: string): Promise<JsonObject> {
+    if ((!model || model === 'latest') && isExternalProvider(provider)) {
+      if (isHuggingFaceProvider(provider)) return { serviceTier: null, config: HF_MODEL_CONFIG };
+      const entry = this.providers().find(p => providerId(p.id) === provider);
+      if (!entry?.models[0]) throw new Error('この会話のResponses API接続先を設定してください。');
+      return { serviceTier: null, config: { web_search: 'disabled', model_supports_reasoning_summaries: false, model_reasoning_summary: 'none',
+        ...await this.connectionConfig(responsesModelId(entry.id, entry.models[0].id), effort) } };
+    }
+    if (!model || !isExternalModel(model)) return effort ? { config: { model_reasoning_effort: effort } } : {};
+    return { serviceTier: null, config: { ...externalModelConfig(model, this.providers(), effort),
+      ...(!isHuggingFaceModel(model) ? await this.connectionConfig(model, effort) : {}) } };
+  }
+  private assertProvider(provider: string | undefined, model?: string): void {
+    if (provider && model && model !== 'latest' && canonicalProvider(provider) !== modelProvider(model))
+      throw new Error('会話の接続先は変更できません。別の接続先を使う場合は新規タスクでプリセットを選択してください。');
+  }
 
   async connect(peer: JsonRpcPeer): Promise<void> {
     this.detach();
     this.peer = peer;
-    this.titles = new TitleGenerator(peer, () => this.listModels());
+    this.titles = new TitleGenerator(peer, () => this.listModels(), 30_000, this.providers, this.connectionConfig);
     this.titles.onTokenUsage = (request, sourceId, usage, turnId) => {
-      if (request.ownerThreadId && isHuggingFaceModel(request.model)) this.emitCost(request.ownerThreadId, sourceId, usage, request.pricing, turnId);
+      if (request.ownerThreadId && isExternalModel(request.model)) this.emitCost(request.ownerThreadId, sourceId, usage, request.pricing, turnId);
     };
     peer.handleRequest = request => this.handleRequest(request);
     this.subscriptions.push(peer.notifications.subscribe(event => {
@@ -118,6 +140,7 @@ export class AppServerClient implements Gateway {
     this.parentThreads.clear();
     this.threadProviders.clear();
     this.threadPricing.clear();
+    this.threadSettings.clear();
     this.modelList = undefined;
     this.peer = undefined;
     this.connected = false;
@@ -127,18 +150,19 @@ export class AppServerClient implements Gateway {
     return object(await this.peer.request(method, params));
   }
   async startThread(cwd: string, settings: RunSettings = { mode: 'default' }): Promise<Thread> {
-    const hf = isHuggingFaceModel(settings.model);
+    const external = isExternalModel(settings.model);
     // New threads have no stored history until the first user message.
     const thread = await this.threadResult(await this.call('thread/start', {
       ...(cwd ? { cwd } : {}), ...modelRequest(settings.model),
-      ...(hf ? { serviceTier: null, config: HF_MODEL_CONFIG } : settings.effort ? { config: { model_reasoning_effort: settings.effort } } : {}),
+      ...await this.runConfig(settings.model, settings.effort),
       ...(settings.mode !== 'default' ? {
         sandbox: settings.mode === 'auto-review' ? 'workspace-write' : settings.mode,
         approvalPolicy: settings.mode === 'danger-full-access' ? 'never' : 'on-request',
         approvalsReviewer: settings.mode === 'auto-review' ? 'auto_review' : 'user',
       } : {}),
     }), false);
-    if (hf) this.threadPricing.set(thread.id, settings.pricing);
+    if (external) this.threadPricing.set(thread.id, settings.pricing);
+    this.threadSettings.set(thread.id, JSON.stringify([settings.model, settings.effort]));
     return thread;
   }
   private async storedProvider(threadId: string): Promise<string | undefined> {
@@ -152,15 +176,15 @@ export class AppServerClient implements Gateway {
   async resumeThread(threadId: string, settings?: RunSettings): Promise<Thread> {
     const provider = await this.storedProvider(threadId);
     const model = modelRequest(settings?.model);
-    if (settings?.model && settings.model !== 'latest' && provider && isHuggingFaceModel(settings.model) !== isHuggingFaceProvider(provider)) {
-      throw new Error('会話の接続先は変更できません。別の接続先を使う場合は新規タスクでプリセットを選択してください。');
-    }
-    if (isHuggingFaceProvider(provider) || isHuggingFaceModel(settings?.model)) this.threadPricing.set(threadId, settings?.pricing);
-    return this.threadResult(await this.call('thread/resume', { threadId,
+    this.assertProvider(provider, settings?.model);
+    if (isExternalProvider(provider) || isExternalModel(settings?.model)) this.threadPricing.set(threadId, settings?.pricing);
+    const thread = await this.threadResult(await this.call('thread/resume', { threadId,
       ...(provider ? { modelProvider: provider } : model.modelProvider ? { modelProvider: model.modelProvider } : {}),
       ...(model.model && model.model !== 'latest' ? { model: model.model } : {}),
-      ...(isHuggingFaceProvider(provider) || isHuggingFaceModel(settings?.model) ? { serviceTier: null, config: HF_MODEL_CONFIG } : {}),
+      ...await this.runConfig(settings?.model, settings?.effort, provider),
     }));
+    this.threadSettings.set(threadId, JSON.stringify([settings?.model, settings?.effort]));
+    return thread;
   }
   async readThread(threadId: string): Promise<Thread> { return this.threadResult(await this.call('thread/read', { threadId, includeTurns: true })); }
   private async threadResult(result: JsonObject, loadHistory = true): Promise<Thread> {
@@ -186,9 +210,10 @@ export class AppServerClient implements Gateway {
   async forkThread(threadId: string, options: { cwd?: string; lastTurnId?: string; settings?: RunSettings } = {}): Promise<Thread> {
     const provider = await this.storedProvider(threadId);
     const model = modelRequest(options.settings?.model);
+    this.assertProvider(provider, options.settings?.model);
     return this.threadResult(await this.call('thread/fork', { threadId, ...(provider ? { modelProvider: provider } : {}),
       ...(model.model && model.model !== 'latest' ? { model: model.model } : {}),
-      ...(isHuggingFaceProvider(provider) ? { serviceTier: null, config: HF_MODEL_CONFIG } : options.settings?.effort ? { config: { model_reasoning_effort: options.settings.effort } } : {}),
+      ...await this.runConfig(options.settings?.model, options.settings?.effort, provider),
       ...(options.cwd ? { cwd: options.cwd } : {}), ...(options.lastTurnId ? { lastTurnId: options.lastTurnId } : {}) }));
   }
   async renameThread(threadId: string, name: string): Promise<void> { await this.call('thread/name/set', { threadId, name }); }
@@ -206,17 +231,18 @@ export class AppServerClient implements Gateway {
   }
   async startTurn(threadId: string, input: Input[], settings: RunSettings, clientId: string): Promise<Turn> {
     const provider = this.threadProviders.get(threadId);
-    if (settings.model && provider && isHuggingFaceModel(settings.model) !== isHuggingFaceProvider(provider)) {
-      throw new Error('会話の接続先は変更できません。別の接続先を使う場合は新規タスクでプリセットを選択してください。');
-    }
+    this.assertProvider(provider, settings.model);
+    if (parseResponsesModel(settings.model) && this.threadSettings.get(threadId) !== JSON.stringify([settings.model, settings.effort]))
+      await this.resumeThread(threadId, settings);
     const { model } = modelRequest(settings.model);
-    if (isHuggingFaceProvider(provider) || isHuggingFaceModel(settings.model)) this.threadPricing.set(threadId, settings.pricing);
+    if (isExternalProvider(provider) || isExternalModel(settings.model)) this.threadPricing.set(threadId, settings.pricing);
     const sandbox = settings.mode === 'default' ? undefined : settings.mode === 'read-only' ? { type: 'readOnly', networkAccess: false }
       : settings.mode === 'workspace-write' || settings.mode === 'auto-review' ? { type: 'workspaceWrite', writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false }
       : { type: 'dangerFullAccess' };
     const result = await this.call('turn/start', {
       threadId, input: this.encodeInput(input), clientUserMessageId: clientId,
-      ...(model ? { model } : {}), ...(settings.effort && !isHuggingFaceProvider(provider) && !isHuggingFaceModel(settings.model) ? { effort: settings.effort } : {}),
+      ...(model ? { model } : {}), ...(parseResponsesModel(settings.model) ? { effort: settings.effort ?? null }
+        : settings.effort && !isHuggingFaceProvider(provider) && !isHuggingFaceModel(settings.model) ? { effort: settings.effort } : {}),
       ...(sandbox ? { sandboxPolicy: sandbox, approvalPolicy: settings.mode === 'danger-full-access' ? 'never' : 'on-request', approvalsReviewer: settings.mode === 'auto-review' ? 'auto_review' : 'user' } : {}),
     });
     return decodeTurn(result.turn);
@@ -231,9 +257,11 @@ export class AppServerClient implements Gateway {
     try {
       const models = await listing;
       // A refresh or account change may supersede an in-flight catalog read.
-      return this.modelList === listing ? models : this.listModels();
+      return this.modelList === listing ? [...models, ...providerModels(this.providers())] : this.listModels();
     } catch (error) {
       if (this.modelList === listing) this.modelList = undefined;
+      const custom = providerModels(this.providers());
+      if (custom.length) return custom;
       throw error;
     }
   }
@@ -370,7 +398,7 @@ export class AppServerClient implements Gateway {
       case 'account/login/completed': this.modelList = undefined; this.events.emit({ type: 'account', success: data.success === true, error: typeof data.error === 'string' ? data.error : undefined }); break;
       case 'thread/tokenUsage/updated':
         this.events.emit({ type: 'tokens', threadId, value: data.tokenUsage });
-        if (this.threadPricing.has(threadId) || isHuggingFaceProvider(this.threadProviders.get(threadId))) {
+        if (this.threadPricing.has(threadId) || isExternalProvider(this.threadProviders.get(threadId))) {
           this.emitCost(threadId, threadId, data.tokenUsage, this.threadPricing.get(threadId), turnId);
         }
         break;

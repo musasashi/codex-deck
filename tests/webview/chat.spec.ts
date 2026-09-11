@@ -10,6 +10,36 @@ import { FakeGateway, thread } from '../helpers';
 import type { Skill, Task, Usage } from '../../src/core/types';
 import { emptyTaskCost } from '../../src/core/cost';
 import { withHuggingFaceModels } from '../../src/core/huggingFace';
+import { providerModels, validateProviders } from '../../src/core/providers';
+
+test('Responses tasks only offer their own provider and declared efforts, including the provider default', async ({ page }) => {
+  const catalog = providerModels(validateProviders([
+    { id: 'one', name: 'First API', baseUrl: 'http://localhost/v1', models: [{ id: 'model', reasoningEfforts: ['low', 'high'] }, { id: 'plain' }] },
+    { id: 'two', name: 'Other API', baseUrl: 'http://localhost/v1', models: [{ id: 'model' }] },
+  ]));
+  const value = task();
+  value.settings = { model: 'responses:one:model', effort: 'high', mode: 'read-only' };
+  value.modelProvider = 'codex_deck_responses_one';
+  value.cost = emptyTaskCost();
+  await receive(page, { type: 'state', task: value, models: [...models, ...catalog], connected: true });
+  await expect(page.locator('#model option')).toHaveCount(3);
+  await expect(page.locator('#model option[value="responses:one:plain"]')).toHaveCount(1);
+  await expect(page.locator('#model option[value="responses:two:model"]')).toHaveCount(0);
+  await expect(page.locator('#model option[value="catalog-model"]')).toHaveCount(0);
+  await expect(page.locator('#effort option')).toHaveText(['モデルの既定値', 'low', 'high']);
+  await page.locator('#effort').selectOption('default');
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'settings', model: 'responses:one:model', effort: 'default' });
+  await expect(page.locator('#task-cost')).toBeVisible();
+  await expect(page.locator('#task-cost')).toHaveAttribute('aria-label', /外部API利用額/);
+  await expect(page.locator('#usage-gauges')).toBeHidden();
+  await expect(page.locator('#auto-resume')).toBeHidden();
+  value.settings = { model: 'responses:one:plain', mode: 'read-only' };
+  value.effectiveEffort = 'high';
+  await receive(page, { type: 'state', task: value, models: catalog, connected: true });
+  await expect(page.locator('#effort')).toHaveValue('default');
+  await expect(page.locator('#effort')).toBeDisabled();
+  await expect(page.locator('#effort option')).toHaveText(['モデルの既定値']);
+});
 
 test('HF task cost replaces quota gauges, updates live, and stays visible after disconnecting', async ({ page }, info) => {
   const value = task();

@@ -36,6 +36,7 @@ export interface Model {
   isDefault: boolean;
   upgrade?: string;
   inputModalities: string[];
+  structuredOutput?: boolean;
 }
 export type ExecutionMode = 'default' | 'read-only' | 'workspace-write' | 'auto-review' | 'danger-full-access';
 export interface RunSettings { model?: string; effort?: string; mode: ExecutionMode; pricing?: TokenPrice }

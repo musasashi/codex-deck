@@ -3,13 +3,14 @@ import { randomBytes } from 'node:crypto';
 import { readPresets, readTitleEffort, readTitleModel, selectedModel, validatePresets, validateTitleEffort, validateTitleModel } from '../core/settings';
 import { messageOf, object, string, type Model } from '../core/types';
 import { settingsHtml } from './settingsHtml';
-import { isHuggingFaceModel } from '../core/huggingFace';
+import { isExternalModel, parseResponsesModel, providerModels, readProviders, validateProviders, type ResponsesProvider } from '../core/providers';
 import { readTokenPrice, validateTokenPrice, type TokenPrice } from '../core/cost';
-import { huggingFaceCheckKey, type HuggingFaceCheck, type HuggingFaceCheckPurpose } from '../core/huggingFaceCheck';
+import type { ProviderCheck, ProviderCheckPurpose } from '../core/providerCheck';
 
 interface SettingsHost {
   loadModels(): Promise<Model[]>;
-  checkHuggingFace(model: string, purpose: HuggingFaceCheckPurpose, signal: AbortSignal, progress: (check: HuggingFaceCheck) => void): Promise<HuggingFaceCheck>;
+  checkProvider(model: string, purpose: ProviderCheckPurpose, providers: ResponsesProvider[], signal: AbortSignal, progress: (check: ProviderCheck) => void): Promise<ProviderCheck>;
+  providersChanged(): void;
   openCodexSettings(): Promise<void>;
   report(error: unknown): void;
 }
@@ -25,7 +26,6 @@ export class SettingsPanel implements vscode.Disposable {
   private panel?: vscode.WebviewPanel;
   private saving = false;
   private operation?: { controller: AbortController; requestId: unknown };
-  private checks = new Map<string, { result: HuggingFaceCheck; time: number }>();
   constructor(private readonly uri: vscode.Uri, private readonly host: SettingsHost) {}
 
   open(): void {
@@ -43,68 +43,55 @@ export class SettingsPanel implements vscode.Disposable {
     const receive = webview.onDidReceiveMessage(async value => {
       const message = object(value);
       try {
-        if (message.type === 'cancelHfCheck') { const operation = this.operation; if (operation && operation.requestId === message.requestId) operation.controller.abort(); return; }
+        if (message.type === 'cancelProviderCheck') { const operation = this.operation; if (operation && operation.requestId === message.requestId) operation.controller.abort(); return; }
         if (message.type === 'openCodexSettings') { await this.host.openCodexSettings(); return; }
         if (message.type === 'openOtherSettings') { await vscode.commands.executeCommand('workbench.action.openSettings', '@ext:codex-deck.codex-deck'); return; }
-        if (message.type !== 'loadSettings' && message.type !== 'saveSettings' && message.type !== 'checkHfModel') return;
+        if (message.type !== 'loadSettings' && message.type !== 'saveSettings' && message.type !== 'checkProviderModel') return;
         if (this.saving) throw new Error('確認・保存中です。完了後に再読み込みしてください。');
         const scopes = this.scopes();
         const scope = scopes.find(scope => scope.id === string(message.scope, 'user'));
         if (!scope) throw new Error('保存先を選び直してください。');
         const saving = message.type === 'saveSettings';
-        const checking = message.type === 'checkHfModel';
+        const checking = message.type === 'checkProviderModel';
         const operation = { controller: new AbortController(), requestId: message.requestId };
         if (saving || checking) { this.saving = true; this.operation = operation; }
-        else this.checks.clear();
         const signal = operation.controller.signal;
-        const check = async (model: string, purpose: HuggingFaceCheckPurpose): Promise<HuggingFaceCheck> => {
-          const key = huggingFaceCheckKey(model, purpose);
-          const cached = this.checks.get(key);
-          const post = (result: HuggingFaceCheck) => { if (this.panel === panel) void webview.postMessage({ type: 'hfCheckState', requestId: message.requestId, result }); };
-          signal.throwIfAborted();
-          const result = !checking && cached && Date.now() - cached.time < 10 * 60_000 ? cached.result
-            : await this.host.checkHuggingFace(model, purpose, signal, post);
-          post(result);
-          if (result.status === 'passed' && !signal.aborted) this.checks.set(key, { result, time: Date.now() });
-          else this.checks.delete(key);
-          return result;
-        };
         try {
+          const storedProviders = readProviders(this.read(scopes[0]!, 'providers'));
+          const providers = saving || checking ? validateProviders(message.providers ?? storedProviders) : storedProviders;
           if (checking) {
-            const result = await check(string(message.model), message.purpose === 'title' ? 'title' : 'task');
-            if (this.panel === panel) void webview.postMessage({ type: 'hfCheckDone', requestId: message.requestId, result });
+            const post = (result: ProviderCheck) => { if (this.panel === panel) void webview.postMessage({ type: 'providerCheckState', requestId: message.requestId, result }); };
+            const result = await this.host.checkProvider(string(message.model), message.purpose === 'title' ? 'title' : 'task', providers, signal, post);
+            if (this.panel === panel) void webview.postMessage({ type: 'providerCheckDone', requestId: message.requestId, result });
             return;
           }
           let modelError = '';
-          const models = await this.host.loadModels().catch(error => { this.host.report(error); modelError = `モデル一覧: ${messageOf(error)}`; return [] as Model[]; });
+          const catalog = await this.host.loadModels().catch(error => { this.host.report(error); modelError = `モデル一覧: ${messageOf(error)}`; return [] as Model[]; });
+          const models = [...catalog.filter(model => !parseResponsesModel(model.id)), ...providerModels(providers)];
           if (saving) {
             const titleModel = validateTitleModel(message.titleModel, models);
             const presets = validatePresets(message.presets, models);
             const titleEffort = validateTitleEffort(message.titleEffort, selectedModel(models, titleModel));
-            const titlePricing = isHuggingFaceModel(titleModel) ? validateTokenPrice(message.titlePricing) : undefined;
-            for (const model of new Set(presets.filter(preset => isHuggingFaceModel(preset.model)).map(preset => preset.model))) {
-              const result = await check(model, 'task');
-              if (result.status !== 'passed') throw new Error(`${model}：${result.message} 設定は保存していません。`);
-            }
-            if (isHuggingFaceModel(titleModel) && !presets.some(preset => preset.model === titleModel)) {
-              const result = await check(titleModel, 'title');
-              if (result.status !== 'passed') throw new Error(`${titleModel}：${result.message} 設定は保存していません。`);
-            }
+            const titlePricing = isExternalModel(titleModel) && message.titlePricing !== undefined ? validateTokenPrice(message.titlePricing) : undefined;
             signal.throwIfAborted();
             if (this.panel === panel) void webview.postMessage({ type: 'settingsSaving', requestId: message.requestId });
             await this.save(scope, presets, titleModel, titleEffort, titlePricing);
+            if (JSON.stringify(providers) !== JSON.stringify(storedProviders)) {
+              await vscode.workspace.getConfiguration('codexDeck').update('providers', providers, vscode.ConfigurationTarget.Global);
+              this.host.providersChanged();
+            }
           }
           if (this.panel === panel) void webview.postMessage({ type: 'settingsState', requestId: message.requestId, saved: saving,
             scopes: scopes.map(({ id, label }) => ({ id, label })), scope: scope.id,
             presets: readPresets(this.read(scope, 'presets')), titleModel: readTitleModel(this.read(scope, 'titleModel')),
-            titleEffort: readTitleEffort(this.read(scope, 'titleEffort')), titlePricing: readTokenPrice(this.read(scope, 'titlePricing')), models, modelError });
+            titleEffort: readTitleEffort(this.read(scope, 'titleEffort')), titlePricing: readTokenPrice(this.read(scope, 'titlePricing')), providers, models, modelError });
         } finally { if (this.operation === operation) { this.saving = false; this.operation = undefined; } }
       } catch (error) {
         this.host.report(error);
         if (this.panel === panel) void webview.postMessage({ type: 'settingsError', requestId: message.requestId, message: messageOf(error) });
       }
     });
-    panel.onDidDispose(() => { receive.dispose(); if (this.panel === panel) { this.panel = undefined; this.operation?.controller.abort(); this.checks.clear(); } });
+    panel.onDidDispose(() => { receive.dispose(); if (this.panel === panel) { this.panel = undefined; this.operation?.controller.abort(); } });
   }
 
   private scopes(): Scope[] {

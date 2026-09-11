@@ -2,8 +2,8 @@ import { array, object, string, statusLabel, isTaskRunning, type Attachment, typ
 import { escapeHtml, renderAttachments, renderItem, renderTranscript } from './render';
 import { IMAGE_FORMAT_ERROR, IMAGE_TYPES, MAX_ATTACHMENT_BYTES } from '../core/attachments';
 import { parseSlashCommand, permissionOptions } from '../core/composer';
-import { latestModel, selectedModel } from '../core/settings';
-import { isHuggingFaceModel, isHuggingFaceTask } from '../core/huggingFace';
+import { latestModel, presetEffortOptions, selectedModel } from '../core/settings';
+import { isExternalTask, sameTaskProvider } from '../core/providers';
 import { costLabel } from '../core/cost';
 import { Composer } from './composer';
 import { UsageGauges } from './usage';
@@ -143,18 +143,18 @@ function render(): void {
   pendingSends = reconcilePendingSends(pendingSends, task);
   completion.setContext(task, connected, pendingSends.length > 0);
   const busy = !!sending || task.busy;
-  const huggingFace = isHuggingFaceTask(task);
-  usageGauges.render(connected && !huggingFace ? usage : undefined);
+  const external = isExternalTask(task);
+  usageGauges.render(connected && !external ? usage : undefined);
   const cost = costLabel(task.cost);
-  $('task-cost').hidden = !huggingFace;
+  $('task-cost').hidden = !external;
   $('task-cost').textContent = cost.label;
   $('task-cost').title = cost.detail;
-  $('task-cost').setAttribute('aria-label', `このタスクのHF利用額: ${cost.label}`);
+  $('task-cost').setAttribute('aria-label', `このタスクの外部API利用額: ${cost.label}`);
   $('status').textContent = busy ? '送信中' : statusLabel[task.status];
   $('status-dot').className = `dot ${task.status}`;
   $<HTMLInputElement>('auto-resume').checked = task.autoResume;
-  $<HTMLInputElement>('auto-resume').disabled = huggingFace;
-  $<HTMLInputElement>('auto-resume').closest<HTMLElement>('label')!.hidden = huggingFace;
+  $<HTMLInputElement>('auto-resume').disabled = external;
+  $<HTMLInputElement>('auto-resume').closest<HTMLElement>('label')!.hidden = external;
   const notice = $('notice');
   const waiting = task.status === 'waiting';
   const noticeText = waiting ? `使用量の回復を待っています。${task.recoveryAt ? ` 回復予定: ${new Date(task.recoveryAt).toLocaleString()}` : ''}` : task.error ?? (!connected ? 'App Serverに未接続です。メニューから再接続できます。' : '');
@@ -201,17 +201,17 @@ function render(): void {
   options($<HTMLSelectElement>('model'), [
     ...(task.settings.model === 'latest' ? [{ id: 'latest', label: latest ? `最新モデル (${latest.label})` : '最新モデル' }] : []),
     { id: '', label: task.effectiveModel || 'モデル' },
-    ...models.filter(model => !task!.threadId || isHuggingFaceModel(model.id) === huggingFace).map(model => ({ id: model.id, label: model.label })),
+    ...models.filter(model => !task!.threadId || sameTaskProvider(task!, model.id)).map(model => ({ id: model.id, label: model.label })),
   ], task.settings.model ?? '');
   const model = selectedModel(models, task.settings.model ?? task.effectiveModel ?? 'latest');
-  options($<HTMLSelectElement>('effort'), huggingFace ? [{ id: 'default', label: 'モデルの既定値' }] : [
+  options($<HTMLSelectElement>('effort'), external ? presetEffortOptions(model) : [
     { id: '', label: task.effectiveEffort || '推論の強さ' },
     ...(task.settings.effort === 'default' ? [{ id: 'default', label: model?.defaultEffort || 'モデルの既定値' }] : []),
     ...(model?.efforts ?? []).map(effort => ({ id: effort.id, label: effort.id })),
-  ], huggingFace ? 'default' : task.settings.effort ?? '');
+  ], external ? task.settings.effort ?? 'default' : task.settings.effort ?? '');
   renderPermissions();
   for (const id of ['model', 'effort', 'mode']) $<HTMLSelectElement>(id).disabled = running || busy;
-  if (huggingFace) $<HTMLSelectElement>('effort').disabled = true;
+  if (external && !model?.efforts.length) $<HTMLSelectElement>('effort').disabled = true;
   const cyclePreset = $<HTMLButtonElement>('cycle-preset');
   cyclePreset.disabled = running || busy || !presetCount || !models.length;
   cyclePreset.title = !presetCount ? '設定からプリセットを追加してください' : !models.length ? 'モデル一覧を読み込み中…' : '次のプリセットに切り替え';

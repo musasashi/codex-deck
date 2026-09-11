@@ -7,13 +7,15 @@ import { AppServerClient } from './appServer/client';
 import { StdioConnection } from './appServer/rpc';
 import { appServerEnvironment } from './appServer/environment';
 import { HuggingFaceProxy } from './appServer/huggingFaceProxy';
+import { ResponsesConnections } from './appServer/responsesConnections';
 import { TaskManager, readTaskRecords } from './core/taskManager';
 import { messageMarkdown, taskMarkdown } from './core/taskCopy';
 import { linkedThreadId, taskDeepLink } from './core/taskReferences';
 import { IMAGE_FORMAT_ERROR, isImageDataUrl, MAX_ATTACHMENT_BYTES } from './core/attachments';
 import { configPermissionMode, parseSlashCommand, permissionOptions, permissionPresets, resolveSkillMentions, slashCommands } from './core/composer';
 import { workingDiff } from './core/gitDiff';
-import { isHuggingFaceModel, isHuggingFaceTask, withHuggingFaceModels } from './core/huggingFace';
+import { isHuggingFaceModel, withHuggingFaceModels } from './core/huggingFace';
+import { isExternalModel, parseResponsesModel, providerModels, readProviders, sameTaskProvider, type ResponsesProvider } from './core/providers';
 import { readTokenPrice } from './core/cost';
 import { nextPresetIndex, readPresets, readTitleEffort, readTitleModel, resolveRunSettings, selectedModel, taskPresets, validatePreset } from './core/settings';
 import { array, object, string, messageOf, statusLabel, isTaskRunning, type ComposerCatalog, type ExecutionMode, type JsonObject, type Model, type Task } from './core/types';
@@ -29,7 +31,7 @@ export function activate(context: vscode.ExtensionContext): void { deck = new De
 export async function deactivate(): Promise<void> { await deck?.shutdown(); deck = undefined; }
 
 class DeckExtension implements PanelHost {
-  readonly client = new AppServerClient();
+  readonly client = new AppServerClient(() => this.providers(), (model, effort) => this.responses.config(model, this.providers(), effort));
   readonly manager: TaskManager;
   readonly panels: TaskPanels;
   private readonly settingsPanel: SettingsPanel;
@@ -38,6 +40,7 @@ class DeckExtension implements PanelHost {
   private output = vscode.window.createOutputChannel('Codex Deck');
   private connection = new StdioConnection(text => this.output.append(text));
   private huggingFace = new HuggingFaceProxy();
+  private responses = new ResponsesConnections();
   private connecting?: Promise<void>;
   private catalogSequence = 0;
   private composerCatalogs = new Map<string, ComposerCatalog>();
@@ -65,7 +68,15 @@ class DeckExtension implements PanelHost {
         }
         return models;
       },
-      checkHuggingFace: async (model, purpose, signal, progress) => { await this.connect(); signal.throwIfAborted(); return this.huggingFace.check(model, purpose, signal, progress); },
+      checkProvider: async (model, purpose, providers, signal, progress) => {
+        if (!vscode.workspace.isTrusted) throw new Error('ワークスペースを信頼してからAPIに接続してください。');
+        if (!isHuggingFaceModel(model)) return this.responses.check(model, providers, purpose, signal, progress);
+        await this.connect(); signal.throwIfAborted(); return this.huggingFace.check(model, purpose, signal, progress);
+      },
+      providersChanged: () => {
+        this.models = [...this.models.filter(model => !parseResponsesModel(model.id)), ...providerModels(this.providers())];
+        this.manager.changed.emit(undefined);
+      },
       openCodexSettings: () => this.codexSettings(), report: error => this.report(error),
     });
     const tree = new TaskTree(context.extensionUri, this.manager);
@@ -112,6 +123,7 @@ class DeckExtension implements PanelHost {
   report(error: unknown): void {
     this.output.appendLine(messageOf(error));
   }
+  private providers(): ResponsesProvider[] { return readProviders(vscode.workspace.getConfiguration('codexDeck').get('providers', [])); }
   async connect(): Promise<void> {
     if (this.client.connected) return;
     if (this.connecting) return this.connecting;
@@ -282,7 +294,7 @@ class DeckExtension implements PanelHost {
     const pricing = !model || model === task.settings.model ? task.settings.pricing
       : readPresets(vscode.workspace.getConfiguration('codexDeck', vscode.Uri.file(task.cwd)).get('presets')).find(preset => preset.model === model)?.pricing;
     this.manager.updateSettings(task.id, { model: model || undefined, effort: effort === 'default' ? selected?.defaultEffort || undefined : effort || (model && model !== task.settings.model ? selected?.defaultEffort || undefined : undefined), mode,
-      ...(pricing && isHuggingFaceModel(model || task.effectiveModel) ? { pricing } : {}) });
+      ...(pricing && isExternalModel(model || task.effectiveModel) ? { pricing } : {}) });
     this.presetSelections.delete(task);
   }
   private cyclePreset(task: Task): void {
@@ -471,7 +483,7 @@ class DeckExtension implements PanelHost {
     await this.connect();
     await this.refreshCatalog();
     const models = withHuggingFaceModels(this.models, [...readPresets(vscode.workspace.getConfiguration('codexDeck', vscode.Uri.file(task.cwd)).get('presets')).map(preset => preset.model), task.settings.model, task.effectiveModel])
-      .filter(model => !task.threadId || isHuggingFaceModel(model.id) === isHuggingFaceTask(task));
+      .filter(model => !task.threadId || sameTaskProvider(task, model.id));
     const choice = await vscode.window.showQuickPick(models.map(model => ({ label: model.label, description: model.description, id: model.id })), { title: 'モデル' });
     if (!choice) return;
     const model = selectedModel(models, choice.id)!;
@@ -570,6 +582,6 @@ class DeckExtension implements PanelHost {
     this.panels.dispose();
     this.manager.dispose();
     await this.manager.checkpoint().catch(error => this.output.appendLine(messageOf(error)));
-    this.connection.dispose(); this.huggingFace.dispose(); this.client.detach();
+    this.connection.dispose(); this.huggingFace.dispose(); this.responses.dispose(); this.client.detach();
   }
 }

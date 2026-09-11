@@ -2,7 +2,9 @@ import { DEFAULT_PRESET, DEFAULT_TITLE_EFFORT, presetEffortOptions, presetPermis
 import { array, object, string, type ExecutionMode, type Model, type SettingsPreset } from '../core/types';
 import { HF_MODEL_PREFIX, isHuggingFaceModel } from '../core/huggingFace';
 import { readTokenPrice } from '../core/cost';
-import { huggingFaceCheckKey, type HuggingFaceCheck, type HuggingFaceCheckPurpose } from '../core/huggingFaceCheck';
+import { providerCheckKey, type ProviderCheck, type ProviderCheckPurpose } from '../core/providerCheck';
+import { isExternalModel, parseResponsesModel, providerModels, readProviders, validateProviders } from '../core/providers';
+import { ProviderEditor } from './providers';
 
 declare function acquireVsCodeApi(): { postMessage(value: unknown): void; setState(value: unknown): void; getState(): unknown };
 const vscode = acquireVsCodeApi();
@@ -20,7 +22,19 @@ let requestId = 0;
 let ready = false;
 let busy = false;
 let dirty = false;
-const checks = new Map<string, HuggingFaceCheck>();
+const checks = new Map<string, ProviderCheck>();
+let nativeModels: Model[] = [];
+const providerEditor = new ProviderEditor($('provider-list'), () => {
+  models = [...nativeModels, ...providerModels(readProviders(providerEditor.value))];
+  checks.clear();
+  renderPresets();
+  options(titleModel, modelOptions(), isHuggingFaceModel(titleModelId) ? 'huggingface' : titleModelId);
+  options(titleEffort, titleEffortOptions(selectedModel(models, titleModelId)), titleEffort.value);
+  changed();
+});
+function price(input: HTMLInputElement, output: HTMLInputElement): { input: number; output: number } | undefined {
+  return input.value === '' && output.value === '' ? undefined : { input: input.valueAsNumber, output: output.valueAsNumber };
+}
 
 function status(message: string, error = false): void {
   $('status').textContent = message;
@@ -31,21 +45,25 @@ function setBusy(value: boolean): void {
   scope.disabled = busy || !scope.options.length;
   $<HTMLFieldSetElement>('presets').disabled = busy || !ready;
   $<HTMLFieldSetElement>('task-titles').disabled = busy || !ready;
+  $<HTMLFieldSetElement>('providers').disabled = busy || !ready;
+  let validProviders = true;
+  try { validateProviders(providerEditor.value); } catch { validProviders = false; }
   const valid = presets.length && presets.every(preset => selectedModel(models, preset.model)
     && presetEffortOptions(selectedModel(models, preset.model)).some(option => option.id === preset.effort)
-    && (!isHuggingFaceModel(preset.model) || readTokenPrice(preset.pricing))) && (titleModelId === 'latest' || selectedModel(models, titleModelId))
-    && (!isHuggingFaceModel(titleModelId) || readTokenPrice({ input: titleInputPrice.valueAsNumber, output: titleOutputPrice.valueAsNumber }))
+    && (!isExternalModel(preset.model) || preset.pricing === undefined || readTokenPrice(preset.pricing))) && (titleModelId === 'latest' || selectedModel(models, titleModelId))
+    && (!isExternalModel(titleModelId) || !price(titleInputPrice, titleOutputPrice) || readTokenPrice(price(titleInputPrice, titleOutputPrice)))
+    && validProviders
     && titleEffortOptions(selectedModel(models, titleModelId)).some(option => option.id === titleEffort.value);
   $<HTMLButtonElement>('save').disabled = busy || !ready || !dirty || !valid;
   $<HTMLButtonElement>('reload').disabled = busy;
   renderChecks();
 }
-function renderCheck(button: HTMLButtonElement, message: HTMLElement, model: string, purpose: HuggingFaceCheckPurpose): void {
-  const result = checks.get(huggingFaceCheckKey(model, purpose)) ?? (purpose === 'title' ? checks.get(huggingFaceCheckKey(model, 'task')) : undefined);
+function renderCheck(button: HTMLButtonElement, message: HTMLElement, model: string, purpose: ProviderCheckPurpose): void {
+  const result = checks.get(providerCheckKey(model, purpose)) ?? (purpose === 'title' ? checks.get(providerCheckKey(model, 'task')) : undefined);
   button.disabled = busy || !ready || !selectedModel(models, model);
   button.textContent = result ? '再確認' : '利用可否を確認';
   button.classList.toggle('accent', !result);
-  message.textContent = result?.message ?? '未確認：保存前にResponses APIでの動作を確認します。';
+  message.textContent = result?.message ?? '未確認：確認は任意です。設定の保存では推論APIを呼び出しません。';
   message.className = result?.status === 'failed' ? 'hint error' : 'hint';
 }
 function renderChecks(): void {
@@ -55,11 +73,12 @@ function renderChecks(): void {
   }
   renderCheck($<HTMLButtonElement>('title-hf-check'), $('title-hf-check-result'), titleModelId, 'title');
 }
-function checkModel(model: string, purpose: HuggingFaceCheckPurpose): void {
-  setBusy(true); status('HFモデルの利用可否を確認中…');
+function checkModel(model: string, purpose: ProviderCheckPurpose): void {
+  try { validateProviders(providerEditor.value); } catch (error) { status(error instanceof Error ? error.message : String(error), true); return; }
+  setBusy(true); status('APIモデルの利用可否を確認中…');
   $('cancel-check').hidden = false;
   $<HTMLButtonElement>('cancel-check').disabled = false;
-  vscode.postMessage({ type: 'checkHfModel', scope: scope.value, model, purpose, requestId: ++requestId });
+  vscode.postMessage({ type: 'checkProviderModel', scope: scope.value, model, purpose, providers: providerEditor.value, requestId: ++requestId });
 }
 function options(select: HTMLSelectElement, values: { id: string; label: string }[], selected: string): void {
   select.replaceChildren(...values.map(value => new Option(value.label, value.id)));
@@ -86,7 +105,7 @@ function renderPresets(): void {
     card.setAttribute('aria-labelledby', `preset-title-${index}`);
     card.innerHTML = `<div class="preset-header"><div><h2 id="preset-title-${index}">プリセット${index + 1}</h2>${index === 0 ? '<span class="preset-default">新規タスクの初期設定</span>' : ''}</div><div class="preset-actions"><button type="button" class="secondary" data-action="up" aria-label="プリセット${index + 1}を上へ" title="上へ">↑</button><button type="button" class="secondary" data-action="down" aria-label="プリセット${index + 1}を下へ" title="下へ">↓</button><button type="button" class="secondary" data-action="remove" aria-label="プリセット${index + 1}を削除">削除</button></div></div>
       <label for="preset-model-${index}">モデル</label><select id="preset-model-${index}" data-field="model" aria-describedby="preset-model-description-${index}"></select><p id="preset-model-description-${index}" class="hint"></p>
-      <div data-field="hf-field" hidden><label for="preset-hf-model-${index}">HFのモデルID</label><input id="preset-hf-model-${index}" data-field="hf-model" type="text" placeholder="組織/モデル:プロバイダー" autocomplete="off" spellcheck="false">
+      <div data-field="hf-field" hidden><div data-field="hf-id"><label for="preset-hf-model-${index}">HFのモデルID</label><input id="preset-hf-model-${index}" data-field="hf-model" type="text" placeholder="組織/モデル:プロバイダー" autocomplete="off" spellcheck="false"></div>
         <div class="preset-fields"><div><label for="preset-input-price-${index}">入力単価（USD／100万トークン）</label><input id="preset-input-price-${index}" data-field="input-price" type="number" min="0" step="any"></div><div><label for="preset-output-price-${index}">出力単価（USD／100万トークン）</label><input id="preset-output-price-${index}" data-field="output-price" type="number" min="0" step="any"></div></div>
         <div class="hf-check"><button type="button" class="secondary" data-action="check">利用可否を確認</button><p data-field="hf-check" class="hint" aria-live="polite"></p></div>
       </div>
@@ -98,7 +117,7 @@ function renderPresets(): void {
     const outputPrice = card.querySelector<HTMLInputElement>('[data-field=output-price]')!;
     inputPrice.value = preset.pricing?.input === undefined ? '' : String(preset.pricing.input);
     outputPrice.value = preset.pricing?.output === undefined ? '' : String(preset.pricing.output);
-    const updatePrice = (): void => { preset.pricing = isHuggingFaceModel(preset.model) ? readTokenPrice({ input: inputPrice.valueAsNumber, output: outputPrice.valueAsNumber }) : undefined; };
+    const updatePrice = (): void => { preset.pricing = isExternalModel(preset.model) ? price(inputPrice, outputPrice) : undefined; };
     for (const price of [inputPrice, outputPrice]) price.addEventListener('input', () => { updatePrice(); changed(); });
     const effort = card.querySelector<HTMLSelectElement>('[data-field=effort]')!;
     card.querySelector<HTMLButtonElement>('[data-action=check]')!.addEventListener('click', () => checkModel(preset.model, 'task'));
@@ -113,20 +132,25 @@ function renderPresets(): void {
     };
     options(model, modelOptions(), isHuggingFaceModel(preset.model) ? 'huggingface' : preset.model);
     hfModel.value = isHuggingFaceModel(preset.model) ? preset.model.slice(HF_MODEL_PREFIX.length) : '';
-    hfField.hidden = model.value !== 'huggingface';
-    for (const field of [hfModel, inputPrice, outputPrice]) field.disabled = hfField.hidden;
+    const showExternal = (): void => {
+      hfField.hidden = !isExternalModel(preset.model);
+      card.querySelector<HTMLElement>('[data-field=hf-id]')!.hidden = model.value !== 'huggingface';
+      hfModel.disabled = model.value !== 'huggingface';
+      for (const field of [inputPrice, outputPrice]) field.disabled = hfField.hidden;
+    };
+    showExternal();
     options(effort, presetEffortOptions(selectedModel(models, preset.model)), preset.effort);
     options(permissions, presetPermissionOptions, preset.mode);
     describeModel(); describePermissions();
     model.addEventListener('change', () => {
-      hfField.hidden = model.value !== 'huggingface';
-      for (const field of [hfModel, inputPrice, outputPrice]) field.disabled = hfField.hidden;
       preset.model = model.value === 'huggingface' ? `${HF_MODEL_PREFIX}${hfModel.value.trim()}` : model.value;
+      showExternal();
+      inputPrice.value = ''; outputPrice.value = '';
       updatePrice();
       preset.effort = compatibleEffort(preset.effort, selectedModel(models, preset.model));
       options(effort, presetEffortOptions(selectedModel(models, preset.model)), preset.effort);
       describeModel(); changed();
-      if (!hfField.hidden) hfModel.focus();
+      if (model.value === 'huggingface') hfModel.focus();
     });
     hfModel.addEventListener('input', () => {
       preset.model = `${HF_MODEL_PREFIX}${hfModel.value.trim()}`;
@@ -168,18 +192,20 @@ window.addEventListener('message', event => {
   const message = object(event.data);
   if (message.type === 'reload') { if (!dirty && !busy) load(); return; }
   if (message.requestId !== requestId && message.requestId !== undefined) return;
-  if (message.type === 'hfCheckState' || message.type === 'hfCheckDone') {
-    const result = message.result as HuggingFaceCheck;
-    checks.set(huggingFaceCheckKey(result.model, result.purpose), result);
+  if (message.type === 'providerCheckState' || message.type === 'providerCheckDone') {
+    const result = message.result as ProviderCheck;
+    checks.set(providerCheckKey(result.model, result.purpose), result);
     renderChecks();
-    status(`${result.model.slice(HF_MODEL_PREFIX.length)}：${result.message}`, result.status === 'failed');
-    if (message.type === 'hfCheckDone') { $('cancel-check').hidden = true; setBusy(false); }
+    status(`${selectedModel(models, result.model)?.label ?? result.model}：${result.message}`, result.status === 'failed');
+    if (message.type === 'providerCheckDone') { $('cancel-check').hidden = true; setBusy(false); }
     return;
   }
   if (message.type === 'settingsSaving') { $('cancel-check').hidden = true; status('保存中…'); return; }
   if (message.type === 'settingsError') { $('cancel-check').hidden = true; setBusy(false); status(string(message.message), true); return; }
   if (message.type !== 'settingsState') return;
-  models = array(message.models) as Model[];
+  nativeModels = (array(message.models) as Model[]).filter(model => !parseResponsesModel(model.id));
+  providerEditor.load(readProviders(message.providers));
+  models = [...nativeModels, ...providerModels(providerEditor.value)];
   presets = readPresets(message.presets);
   titleModelId = readTitleModel(message.titleModel);
   options(titleModel, modelOptions(), isHuggingFaceModel(titleModelId) ? 'huggingface' : titleModelId);
@@ -187,21 +213,26 @@ window.addEventListener('message', event => {
   const titlePrice = readTokenPrice(message.titlePricing);
   titleInputPrice.value = titlePrice ? String(titlePrice.input) : '';
   titleOutputPrice.value = titlePrice ? String(titlePrice.output) : '';
-  $('title-hf-field').hidden = titleModel.value !== 'huggingface';
-  for (const field of [titleHfModel, titleInputPrice, titleOutputPrice]) field.disabled = titleModel.value !== 'huggingface';
+  showTitleFields();
   options(titleEffort, titleEffortOptions(selectedModel(models, titleModelId)), readTitleEffort(message.titleEffort));
   options(scope, array(message.scopes).map(value => ({ id: string(object(value).id), label: string(object(value).label) })), string(message.scope, 'user'));
   renderPresets();
   ready = true; dirty = false; setBusy(false);
   $('cancel-check').hidden = true;
   vscode.setState({ scope: scope.value });
-  status(message.saved ? '設定を保存しました。' : string(message.modelError) || (!models.length ? 'モデル一覧を取得できません。HFのモデルIDは直接指定できます。' : ''), !message.saved && !!message.modelError);
+  status(message.saved ? '設定を保存しました。' : string(message.modelError) || (!models.length ? 'モデル一覧を取得できません。HFやResponses APIのモデルは登録できます。' : ''), !message.saved && !!message.modelError);
 });
+function showTitleFields(): void {
+  $('title-hf-field').hidden = !isExternalModel(titleModelId);
+  $('title-hf-id').hidden = titleModel.value !== 'huggingface';
+  titleHfModel.disabled = titleModel.value !== 'huggingface';
+  for (const field of [titleInputPrice, titleOutputPrice]) field.disabled = !isExternalModel(titleModelId);
+}
 scope.addEventListener('change', () => load());
 titleModel.addEventListener('change', () => {
   titleModelId = titleModel.value === 'huggingface' ? `${HF_MODEL_PREFIX}${titleHfModel.value.trim()}` : titleModel.value;
-  $('title-hf-field').hidden = titleModel.value !== 'huggingface';
-  for (const field of [titleHfModel, titleInputPrice, titleOutputPrice]) field.disabled = titleModel.value !== 'huggingface';
+  showTitleFields();
+  titleInputPrice.value = ''; titleOutputPrice.value = '';
   const values = titleEffortOptions(selectedModel(models, titleModelId));
   options(titleEffort, values, values.some(option => option.id === titleEffort.value) ? titleEffort.value : DEFAULT_TITLE_EFFORT);
   changed();
@@ -217,18 +248,17 @@ $('add-preset').addEventListener('click', () => {
 $('settings-form').addEventListener('submit', event => {
   event.preventDefault();
   if ($<HTMLButtonElement>('save').disabled) return;
-  const hasHf = presets.some(preset => isHuggingFaceModel(preset.model)) || isHuggingFaceModel(titleModelId);
-  setBusy(true); status(hasHf ? 'HFモデルを確認して保存します…' : '保存中…');
-  $('cancel-check').hidden = !hasHf;
-  $<HTMLButtonElement>('cancel-check').disabled = false;
+  setBusy(true); status('保存中…');
+  $('cancel-check').hidden = true;
   vscode.postMessage({ type: 'saveSettings', scope: scope.value, presets, titleModel: titleModelId, titleEffort: titleEffort.value,
-    titlePricing: isHuggingFaceModel(titleModelId) ? readTokenPrice({ input: titleInputPrice.valueAsNumber, output: titleOutputPrice.valueAsNumber }) : undefined, requestId: ++requestId });
+    titlePricing: isExternalModel(titleModelId) ? price(titleInputPrice, titleOutputPrice) : undefined, providers: providerEditor.value, requestId: ++requestId });
 });
+$('add-provider').addEventListener('click', () => providerEditor.add());
 $('title-hf-check').addEventListener('click', () => checkModel(titleModelId, 'title'));
 $('cancel-check').addEventListener('click', () => {
   $<HTMLButtonElement>('cancel-check').disabled = true;
   status('確認を中止しています…');
-  vscode.postMessage({ type: 'cancelHfCheck', requestId });
+  vscode.postMessage({ type: 'cancelProviderCheck', requestId });
 });
 $('reload').addEventListener('click', () => load());
 $('codex-config').addEventListener('click', () => vscode.postMessage({ type: 'openCodexSettings' }));

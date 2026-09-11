@@ -24,7 +24,7 @@ export function readTokenPrice(value: unknown): TokenPrice | undefined {
 
 export function validateTokenPrice(value: unknown): TokenPrice {
   const price = readTokenPrice(value);
-  if (!price) throw new Error('HFの入力・出力単価を0以上の数値（USD／100万トークン）で入力してください。');
+  if (!price) throw new Error('入力・出力単価を0以上の数値（USD／100万トークン）で入力してください。');
   return price;
 }
 
@@ -63,7 +63,7 @@ export function costLabel(cost?: TaskCost): { label: string; detail: string } {
   const incomplete = cost.partial || cost.unpricedTokens > 0;
   return {
     label: cost.unpricedTokens > 0 && cost.usd === 0 ? '費用 未計上' : `${amount}（概算${incomplete ? '・一部' : ''}）`,
-    detail: ['このタスクのHF利用額（USD）。HFでのタスク名の要約も含みます。',
+    detail: ['このタスクの外部API利用額（USD）。外部APIでのタスク名の要約も含みます。',
       '使用トークン数とユーザー設定の単価から計算します。無料クレジット・キャッシュ割引は未反映です。',
       cost.unpricedTokens > 0 ? `単価未設定の${cost.unpricedTokens.toLocaleString('ja-JP')}トークンは未計上です。` : '',
       cost.partial ? '計測開始前の利用額は含みません。' : '',

@@ -1,6 +1,7 @@
 import { array, messageOf, object, string, type ExecutionMode, type Model, type RunSettings, type SettingsPreset } from './types';
 import { permissionPresets } from './composer';
-import { huggingFaceModel, isHuggingFaceModel, isHuggingFaceTask } from './huggingFace';
+import { huggingFaceModel, isHuggingFaceModel } from './huggingFace';
+import { isExternalModel, sameTaskProvider } from './providers';
 import type { Task } from './types';
 import { readTokenPrice, validateTokenPrice } from './cost';
 
@@ -57,7 +58,7 @@ export function validatePreset(value: unknown, models: Model[]): SettingsPreset 
   if (!selected) throw new Error('利用できるモデルを選択してください。候補の再読み込みもお試しください。');
   if (!presetEffortOptions(selected).some(option => option.id === effort)) throw new Error('選択したモデルに対応する推論強度を選択してください。');
   if (!presetPermissionOptions.some(option => option.id === mode)) throw new Error('一覧から権限を選択してください。');
-  return { model, effort, mode: mode as ExecutionMode, ...(isHuggingFaceModel(model) ? { pricing: validateTokenPrice(data.pricing) } : {}) };
+  return { model, effort, mode: mode as ExecutionMode, ...(isExternalModel(model) && data.pricing !== undefined ? { pricing: validateTokenPrice(data.pricing) } : {}) };
 }
 
 export function readPresets(value: unknown): SettingsPreset[] {
@@ -65,7 +66,7 @@ export function readPresets(value: unknown): SettingsPreset[] {
     const data = object(value);
     const model = string(data.model), effort = string(data.effort), mode = string(data.mode);
     return model && effort && presetPermissionOptions.some(option => option.id === mode)
-      ? [{ model, effort: isHuggingFaceModel(model) ? 'default' : effort, mode: mode as ExecutionMode, ...(isHuggingFaceModel(model) && readTokenPrice(data.pricing) ? { pricing: readTokenPrice(data.pricing) } : {}) }] : [];
+      ? [{ model, effort: isHuggingFaceModel(model) ? 'default' : effort, mode: mode as ExecutionMode, ...(isExternalModel(model) && readTokenPrice(data.pricing) ? { pricing: readTokenPrice(data.pricing) } : {}) }] : [];
   });
   return presets.length ? presets : [{ ...DEFAULT_PRESET }];
 }
@@ -93,11 +94,11 @@ export function nextPresetIndex(settings: RunSettings, presets: SettingsPreset[]
 }
 
 export function taskPresets(task: Task, presets: SettingsPreset[]): SettingsPreset[] {
-  return task.threadId ? presets.filter(preset => isHuggingFaceModel(preset.model) === isHuggingFaceTask(task)) : presets;
+  return task.threadId ? presets.filter(preset => sameTaskProvider(task, preset.model)) : presets;
 }
 
 export function latestModel(models: Model[]): Model | undefined {
-  models = models.filter(model => !isHuggingFaceModel(model.id));
+  models = models.filter(model => !isExternalModel(model.id));
   let model = models.find(model => model.isDefault) ?? models[0];
   const seen = new Set<string>();
   while (model) {

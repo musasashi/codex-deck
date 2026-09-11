@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { evaluateUsage } from './usage';
 import { readTitleEffort, resolveRunSettings } from './settings';
 import { isHuggingFaceModel, isHuggingFaceTask } from './huggingFace';
+import { isExternalModel, isExternalTask, sameTaskProvider } from './providers';
 import { addTaskCost, emptyTaskCost, type TokenPrice } from './cost';
 import { messageQuestions, questionAnswerText } from './questions';
 import { referencedTaskInput } from './taskReferences';
@@ -60,7 +61,7 @@ export class TaskManager {
   }
   create(cwd: string, settings: RunSettings = { mode: 'default' }): Task {
     const task = this.fromRecord({ id: randomUUID(), title: '新規タスク', cwd, open: true, autoResume: false, claims: [], settings });
-    if (isHuggingFaceTask(task)) task.cost = emptyTaskCost();
+    if (isExternalTask(task)) task.cost = emptyTaskCost();
     this.tasks.set(task.id, task);
     this.touch(task, true);
     this.armTimer(true);
@@ -87,11 +88,15 @@ export class TaskManager {
   async fork(id: string, lastTurnId?: string): Promise<Task> {
     const source = this.get(id);
     const threadId = await this.ensureThread(source);
-    const thread = await this.gateway.forkThread(threadId, { lastTurnId, settings: {
-      ...source.settings, model: source.settings.model ?? source.effectiveModel, effort: source.settings.effort ?? source.effectiveEffort,
-    } });
+    const settings = { ...source.settings, model: source.settings.model ?? source.effectiveModel,
+      effort: isExternalTask(source) ? source.settings.effort : source.settings.effort ?? source.effectiveEffort };
+    const thread = await this.gateway.forkThread(threadId, { lastTurnId, settings });
     const task = this.adoptThread({ ...thread, name: undefined, title: FORK_TITLE });
-    if (isHuggingFaceTask(task)) { task.settings.pricing = source.settings.pricing; task.cost = emptyTaskCost(false, thread.turns.map(turn => turn.id)); }
+    if (isExternalTask(task)) {
+      task.settings = { ...settings };
+      task.effectiveEffort = settings.effort === 'default' ? undefined : settings.effort;
+      task.cost = emptyTaskCost(false, thread.turns.map(turn => turn.id));
+    }
     task.titleSource = 'fork';
     // Persist the fallback so history and reloads also stop using the inherited name.
     try { await this.writeTitle(task, task.title, 'fork'); }
@@ -158,10 +163,10 @@ export class TaskManager {
     task.instructionSources = thread.instructionSources ?? task.instructionSources;
     task.effectiveModel = thread.model;
     task.modelProvider = thread.modelProvider ?? task.modelProvider;
-    if (!task.settings.model && isHuggingFaceModel(thread.model)) task.settings.model = thread.model;
-    if (isHuggingFaceTask(task)) { task.autoResume = false; this.cancel(task); task.cost ??= emptyTaskCost(thread.turns.length > 0, thread.turns.map(turn => turn.id)); }
-    task.effectiveEffort = isHuggingFaceTask(task) ? undefined : thread.effort;
+    if (!task.settings.model && isExternalModel(thread.model)) task.settings.model = thread.model;
+    if (isExternalTask(task)) { task.autoResume = false; this.cancel(task); task.cost ??= emptyTaskCost(thread.turns.length > 0, thread.turns.map(turn => turn.id)); }
     if (isHuggingFaceTask(task)) task.settings.effort = 'default';
+    task.effectiveEffort = isExternalTask(task) ? (task.settings.effort === 'default' ? undefined : task.settings.effort) : thread.effort;
     task.effectivePermissionMode = thread.permissionMode ?? task.effectivePermissionMode;
     task.hydrated = true;
     task.error = undefined;
@@ -195,7 +200,7 @@ export class TaskManager {
   }
   setAutoResume(id: string, enabled: boolean): void {
     const task = this.get(id);
-    task.autoResume = enabled && task.open && !isHuggingFaceTask(task);
+    task.autoResume = enabled && task.open && !isExternalTask(task);
     if (!task.autoResume) this.cancel(task);
     else if (task.lastTurn?.error?.kind === 'usageLimitExceeded' && task.lastTurn.status === 'failed' && !task.activeTurnId && !task.busy && task.hydrated) {
       // Explicitly opting in after a stop is a new user decision.
@@ -207,11 +212,11 @@ export class TaskManager {
   }
   updateSettings(id: string, settings: RunSettings): void {
     const task = this.get(id);
-    if (task.threadId && settings.model && isHuggingFaceModel(settings.model) !== isHuggingFaceTask(task)) {
+    if (task.threadId && settings.model && !sameTaskProvider(task, settings.model)) {
       throw new Error('会話の接続先は変更できません。別の接続先を使う場合は新規タスクでプリセットを選択してください。');
     }
     task.settings = { ...settings };
-    if (isHuggingFaceTask(task)) { task.autoResume = false; this.cancel(task); task.cost ??= emptyTaskCost(!!task.threadId); }
+    if (isExternalTask(task)) { task.autoResume = false; this.cancel(task); task.cost ??= emptyTaskCost(!!task.threadId); }
     this.touch(task, true);
   }
   async rename(id: string, name: string): Promise<void> {
@@ -255,9 +260,9 @@ export class TaskManager {
         await this.checkpoint();
         if (controller.signal.aborted || this.disposed) return;
         const configured = this.options.titleModel!(task.cwd);
-        const model = configured === 'latest' && isHuggingFaceTask(task) ? task.settings.model ?? task.effectiveModel ?? configured : configured;
+        const model = configured === 'latest' && isExternalTask(task) ? task.settings.model ?? task.effectiveModel ?? configured : configured;
         const name = await this.gateway.generateTitle({ cwd: task.cwd, model,
-          ...(isHuggingFaceModel(model) ? { ownerThreadId: task.threadId, pricing: configured === 'latest' ? task.settings.pricing : this.options.titlePricing?.(task.cwd) } : {}),
+          ...(isExternalModel(model) ? { ownerThreadId: task.threadId, pricing: configured === 'latest' ? task.settings.pricing : this.options.titlePricing?.(task.cwd) } : {}),
           effort: readTitleEffort(this.options.titleEffort?.(task.cwd)), input }, controller.signal);
         await this.writeTitle(task, name, 'generated', controller.signal);
       } catch (error) {
@@ -404,7 +409,7 @@ export class TaskManager {
     task.error = turn.error?.message;
     if (turn.status === 'failed' && turn.error?.kind === 'usageLimitExceeded') {
       task.status = 'limited';
-      if (!isHuggingFaceTask(task) && task.open && task.autoResume && task.suppressedTurnId !== turn.id && !task.claims.some(claim => claim.stoppedTurnId === turn.id)) {
+      if (!isExternalTask(task) && task.open && task.autoResume && task.suppressedTurnId !== turn.id && !task.claims.some(claim => claim.stoppedTurnId === turn.id)) {
         task.waiting ??= { turnId: turn.id, token: randomUUID() };
         task.status = 'waiting';
         this.armTimer(true);
@@ -439,7 +444,7 @@ export class TaskManager {
     this.updateLastTurn(task, turn);
     if (turn.status === 'inProgress') {
       task.effectiveModel = task.settings.model ?? task.effectiveModel;
-      task.effectiveEffort = isHuggingFaceTask(task) ? undefined : task.settings.effort ?? task.effectiveEffort;
+      task.effectiveEffort = isExternalTask(task) ? (task.settings.effort === 'default' ? undefined : task.settings.effort) : task.settings.effort ?? task.effectiveEffort;
       if (task.settings.mode !== 'default') task.effectivePermissionMode = task.settings.mode;
       this.cancel(task);
       task.activeTurnId = turn.id;
@@ -536,7 +541,7 @@ export class TaskManager {
       }
       case 'tokens': task.tokenUsage = event.value; break;
       case 'cost':
-        if (isHuggingFaceTask(task)) { task.cost = addTaskCost(task.cost ?? emptyTaskCost(true), event.sample); this.touch(task, true); }
+        if (isExternalTask(task)) { task.cost = addTaskCost(task.cost ?? emptyTaskCost(true), event.sample); this.touch(task, true); }
         break;
       case 'warning': task.error = event.message; break;
       case 'archived': this.cancelTitle(task.id); this.close(task.id); break;

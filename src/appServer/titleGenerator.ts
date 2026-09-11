@@ -2,7 +2,8 @@ import { resolveRunSettings, resolveTitleEffort, selectedModel } from '../core/s
 import { parseTitle, TITLE_INSTRUCTIONS, TITLE_SCHEMA } from '../core/taskTitle';
 import { array, object, string, type JsonObject, type Model, type TitleRequest } from '../core/types';
 import type { JsonRpcPeer } from './rpc';
-import { HF_MODEL_CONFIG, isHuggingFaceModel, modelRequest } from '../core/huggingFace';
+import { isHuggingFaceModel } from '../core/huggingFace';
+import { externalModelConfig, isExternalModel, modelRequest, type ResponsesProvider } from '../core/providers';
 
 /** Short, isolated inference jobs. Their events never enter the task UI. */
 export class TitleGenerator {
@@ -10,7 +11,8 @@ export class TitleGenerator {
   onTokenUsage?: (request: TitleRequest, sourceId: string, usage: unknown, turnId: string) => void;
   private controllers = new Set<AbortController>();
 
-  constructor(private readonly peer: JsonRpcPeer, private readonly models: () => Promise<Model[]>, private readonly timeoutMs = 30_000) {}
+  constructor(private readonly peer: JsonRpcPeer, private readonly models: () => Promise<Model[]>, private readonly timeoutMs = 30_000,
+    private readonly providers: () => ResponsesProvider[] = () => [], private readonly connectionConfig: (model: string, effort?: string) => Promise<JsonObject> = async () => ({})) {}
 
   async generate(request: TitleRequest, signal: AbortSignal): Promise<string> {
     signal.throwIfAborted();
@@ -74,14 +76,18 @@ export class TitleGenerator {
       signal.throwIfAborted();
       const effort = resolveTitleEffort(request.effort, selectedModel(models, request.model));
       const settings = resolveRunSettings({ model: request.model, effort, mode: 'read-only' }, models);
+      const external = isExternalModel(settings.model);
+      const structured = !external || selectedModel(models, settings.model!)?.structuredOutput === true;
+      const connection = external && !isHuggingFaceModel(settings.model) ? await this.connectionConfig(settings.model!, settings.effort) : {};
+      signal.throwIfAborted();
       const servers = object(object(rawConfig).config).mcp_servers;
       const result = object(await this.peer.request('thread/start', {
         cwd: request.cwd, ...modelRequest(settings.model), ephemeral: true, sandbox: 'read-only', approvalPolicy: 'never',
-        ...(isHuggingFaceModel(settings.model) ? { serviceTier: null } : {}),
-        baseInstructions: TITLE_INSTRUCTIONS + (isHuggingFaceModel(settings.model) ? '\nReturn only a JSON object in the form {"title":"..."}.' : ''), developerInstructions: '',
+        ...(external ? { serviceTier: null } : {}),
+        baseInstructions: TITLE_INSTRUCTIONS + (!structured ? '\nReturn only a JSON object in the form {"title":"..."}.' : ''), developerInstructions: '',
         config: {
           model_reasoning_effort: settings.effort, project_doc_max_bytes: 0, web_search: 'disabled',
-          ...(isHuggingFaceModel(settings.model) ? HF_MODEL_CONFIG : {}),
+          ...(external ? externalModelConfig(settings.model!, this.providers(), settings.effort) : {}), ...connection,
           'features.apps': false, 'features.plugins': false, 'features.hooks': false, 'features.memories': false,
           'features.multi_agent': false, 'features.multi_agent_v2': false, 'features.shell_tool': false, 'features.shell_snapshot': false,
           'tools.view_image': false,
@@ -94,7 +100,7 @@ export class TitleGenerator {
       signal.throwIfAborted();
       const started = object(await this.peer.request('turn/start', {
         threadId, input: [{ type: 'text', text: request.input, text_elements: [] }],
-        ...(isHuggingFaceModel(settings.model) ? {} : { outputSchema: TITLE_SCHEMA }),
+        ...(structured ? { outputSchema: TITLE_SCHEMA } : {}),
       }));
       acceptTurn(object(started.turn));
       signal.throwIfAborted();
