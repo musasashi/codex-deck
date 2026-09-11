@@ -18,6 +18,7 @@ VS Codeでリポジトリを開き、F5でExtension Development Hostを起動し
 | `npm run test:extension` | Extension Hostでの拡張機能 |
 | `npm run test:history` | 履歴の操作 |
 | `npm run test:smoke` | インストール済みCLIとの接続とデータ取得。推論は実行しない |
+| `npm run test:hf` | インストール済みCLIとローカルの模擬HFサーバーで、ツール往復・推論履歴・要約を検証。HFへの外部リクエストは送信しない |
 
 ### 画面テスト
 

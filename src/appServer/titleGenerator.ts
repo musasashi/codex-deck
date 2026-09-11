@@ -78,7 +78,7 @@ export class TitleGenerator {
       const result = object(await this.peer.request('thread/start', {
         cwd: request.cwd, ...modelRequest(settings.model), ephemeral: true, sandbox: 'read-only', approvalPolicy: 'never',
         ...(isHuggingFaceModel(settings.model) ? { serviceTier: null } : {}),
-        baseInstructions: TITLE_INSTRUCTIONS, developerInstructions: '',
+        baseInstructions: TITLE_INSTRUCTIONS + (isHuggingFaceModel(settings.model) ? '\nReturn only a JSON object in the form {"title":"..."}.' : ''), developerInstructions: '',
         config: {
           model_reasoning_effort: settings.effort, project_doc_max_bytes: 0, web_search: 'disabled',
           ...(isHuggingFaceModel(settings.model) ? HF_MODEL_CONFIG : {}),
@@ -93,7 +93,8 @@ export class TitleGenerator {
       this.threadIds.add(threadId);
       signal.throwIfAborted();
       const started = object(await this.peer.request('turn/start', {
-        threadId, input: [{ type: 'text', text: request.input, text_elements: [] }], outputSchema: TITLE_SCHEMA,
+        threadId, input: [{ type: 'text', text: request.input, text_elements: [] }],
+        ...(isHuggingFaceModel(settings.model) ? {} : { outputSchema: TITLE_SCHEMA }),
       }));
       acceptTurn(object(started.turn));
       signal.throwIfAborted();

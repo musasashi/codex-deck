@@ -47,7 +47,7 @@
 
 HFタスクでは、入力欄下部にそのタスクの**累計費用（USD・概算）**を表示します。設定した単価と使用トークン数から計算し、HFでのタスク名要約も含めます。単価は自動取得しません。累計は再起動後も保持し、分岐先は分岐後の利用分を計測します。プリセットを切り替えて単価を変更しても、過去の計上額は変わりません。単価未設定・計測開始前の利用がある場合は、その旨を表示します。無料クレジット・キャッシュ割引は未反映です。
 
-接続には[HFのResponses API](https://huggingface.co/docs/inference-providers/en/guides/responses-api)を使用します。料金はHF側に請求されます。HFタスクにはOpenAIの残量ゲージと自動継続予約を表示しません。トークンは設定JSONに保存せず、Codexのユーザー設定も変更しません。
+接続には[HFのChat Completion API](https://huggingface.co/docs/inference-providers/en/tasks/chat-completion)を使用します。ツール呼び出しと推論履歴を引き継ぎ、推論強度にはHFモデルの既定値を使います。料金はHF側に請求されます。HFタスクにはOpenAIの残量ゲージと自動継続予約を表示しません。トークンは設定JSONに保存せず、Codexのユーザー設定も変更しません。
 
 ### 権限
 

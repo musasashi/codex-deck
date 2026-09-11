@@ -62,6 +62,8 @@ test('HF titles use the HF provider without a catalog and report usage for their
     const start = h.calls.find(call => call.method === 'thread/start')!.params;
     assert.equal(start.model, 'org/model:provider'); assert.equal(start.modelProvider, 'codex_deck_huggingface');
     assert.equal(object(start.config).model_reasoning_effort, undefined);
+    assert.match(String(start.baseInstructions), /JSON object/);
+    assert.equal(h.calls.find(call => call.method === 'turn/start')!.params.outputSchema, undefined);
     const tokenUsage = { total: { inputTokens: 100, outputTokens: 20 }, last: { inputTokens: 100, outputTokens: 20 } };
     h.server.notify('thread/tokenUsage/updated', { threadId: 'title-thread', turnId: 'title-turn', tokenUsage });
     h.server.notify('turn/completed', { threadId: 'title-thread', turn: { id: 'title-turn', status: 'completed', items: [{ id: 'title', type: 'agentMessage', text: '{"title":"HF title"}' }] } });

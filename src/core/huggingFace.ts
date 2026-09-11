@@ -1,6 +1,7 @@
 import type { Model, Task } from './types';
 
 export const HF_PROVIDER = 'codex_deck_huggingface';
+export const HF_API_URL = 'https://router.huggingface.co/v1';
 export const HF_MODEL_PREFIX = 'hf:';
 export const HF_MODEL_CONFIG = { model_supports_reasoning_summaries: false, model_reasoning_summary: 'none', web_search: 'disabled' } as const;
 
@@ -45,7 +46,7 @@ export function isHuggingFaceTask(task: Pick<Task, 'settings' | 'effectiveModel'
 // Register a separate provider without changing the user's Codex configuration.
 export const HF_CONFIG_ARGS = [
   '-c', `model_providers.${HF_PROVIDER}.name="Hugging Face"`,
-  '-c', `model_providers.${HF_PROVIDER}.base_url="https://router.huggingface.co/v1"`,
+  '-c', `model_providers.${HF_PROVIDER}.base_url="${HF_API_URL}"`,
   '-c', `model_providers.${HF_PROVIDER}.env_key="HF_TOKEN"`,
   '-c', `model_providers.${HF_PROVIDER}.wire_api="responses"`,
 ];

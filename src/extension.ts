@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import { AppServerClient } from './appServer/client';
 import { StdioConnection } from './appServer/rpc';
 import { appServerEnvironment } from './appServer/environment';
+import { HuggingFaceProxy } from './appServer/huggingFaceProxy';
 import { TaskManager, readTaskRecords } from './core/taskManager';
 import { messageMarkdown, taskMarkdown } from './core/taskCopy';
 import { linkedThreadId, taskDeepLink } from './core/taskReferences';
@@ -36,6 +37,7 @@ class DeckExtension implements PanelHost {
   accountLabel = '未接続';
   private output = vscode.window.createOutputChannel('Codex Deck');
   private connection = new StdioConnection(text => this.output.append(text));
+  private huggingFace = new HuggingFaceProxy();
   private connecting?: Promise<void>;
   private catalogSequence = 0;
   private composerCatalogs = new Map<string, ComposerCatalog>();
@@ -115,12 +117,16 @@ class DeckExtension implements PanelHost {
     const work = (async () => {
       if (!vscode.workspace.isTrusted) throw new Error('ワークスペースを信頼してからCodexを起動してください。');
       this.connection.dispose();
+      this.huggingFace.dispose();
       const executable = vscode.workspace.getConfiguration('codexDeck').get<string>('cliPath', 'codex').trim();
       if (!executable) throw new Error('codexDeck.cliPathに公式Codex CLIの実行ファイルを指定してください。');
       this.invalidateComposerCatalogs();
       const env = await appServerEnvironment();
       if (this.stopping) return;
-      await this.client.connect(this.connection.start(executable, this.workspaceCwd() || undefined, env));
+      const hfUrl = env.HF_TOKEN ? await this.huggingFace.start(env.HF_TOKEN) : undefined;
+      if (this.stopping) { this.huggingFace.dispose(); return; }
+      try { await this.client.connect(this.connection.start(executable, this.workspaceCwd() || undefined, env, hfUrl)); }
+      catch (error) { this.huggingFace.dispose(); throw error; }
       void this.refreshCatalog().catch(error => this.report(error));
       for (const task of this.manager.openTasks) {
         if (task.threadId) void this.manager.restore(task.id).catch(error => this.report(error));
@@ -563,6 +569,6 @@ class DeckExtension implements PanelHost {
     this.panels.dispose();
     this.manager.dispose();
     await this.manager.checkpoint().catch(error => this.output.appendLine(messageOf(error)));
-    this.connection.dispose(); this.client.detach();
+    this.connection.dispose(); this.huggingFace.dispose(); this.client.detach();
   }
 }

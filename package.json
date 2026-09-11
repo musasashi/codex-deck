@@ -390,6 +390,7 @@
     "check": "tsc --noEmit",
     "test": "node --import tsx --test --test-isolation=none tests/*.test.ts",
     "test:smoke": "node --import tsx scripts/smoke.ts",
+    "test:hf": "node --import tsx scripts/testHuggingFace.ts",
     "vscode:prepublish": "npm run check && npm run build",
     "package": "vsce package --allow-missing-repository --no-dependencies --no-rewrite-relative-links --skip-license",
     "test:ui": "npm run build && playwright test",

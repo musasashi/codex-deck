@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import type { Readable, Writable } from 'node:stream';
 import { object, string, Signal, messageOf } from '../core/types';
-import { HF_CONFIG_ARGS } from '../core/huggingFace';
+import { HF_CONFIG_ARGS, HF_PROVIDER } from '../core/huggingFace';
 
 export class RpcError extends Error {
   constructor(public readonly code: number, message: string, public readonly data?: unknown) { super(message); }
@@ -103,10 +103,11 @@ export class StdioConnection {
   private child?: ChildProcessWithoutNullStreams;
   private peer?: JsonRpcPeer;
   constructor(private readonly log: (text: string) => void) {}
-  start(executable: string, cwd?: string, env?: NodeJS.ProcessEnv): JsonRpcPeer {
+  start(executable: string, cwd?: string, env?: NodeJS.ProcessEnv, huggingFaceUrl?: string): JsonRpcPeer {
     if (this.child) throw new Error('App Serverはすでに起動しています。');
     // No shell: executable settings and paths are never evaluated as commands.
-    const child = spawn(executable, ['app-server', ...HF_CONFIG_ARGS], { cwd, env, stdio: 'pipe', windowsHide: true });
+    const args = ['app-server', ...HF_CONFIG_ARGS, ...(huggingFaceUrl ? ['-c', `model_providers.${HF_PROVIDER}.base_url=${JSON.stringify(huggingFaceUrl)}`] : [])];
+    const child = spawn(executable, args, { cwd, env, stdio: 'pipe', windowsHide: true });
     this.child = child;
     const peer = new JsonRpcPeer(child.stdout, child.stdin);
     this.peer = peer;
