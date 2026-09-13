@@ -23,6 +23,10 @@ let presetCount = 0;
 let transcriptHtml = '';
 let copiedMessage: string | undefined;
 let copyTimer: ReturnType<typeof setTimeout> | undefined;
+let codeCopySequence = 0;
+const pendingCodeCopies = new Map<number, HTMLButtonElement>();
+let copiedCodeButton: HTMLButtonElement | undefined;
+let codeCopyTimer: ReturnType<typeof setTimeout> | undefined;
 let attachmentsHtml = '';
 let enterBehavior = 'modEnter';
 let sending: Submission | undefined;
@@ -138,6 +142,25 @@ function renderCopyFeedback(): void {
     button.setAttribute('aria-label', button.title);
   }
 }
+function showCodeCopyFeedback(button: HTMLButtonElement): void {
+  if (copiedCodeButton && copiedCodeButton !== button) {
+    copiedCodeButton.removeAttribute('data-copied');
+    copiedCodeButton.title = 'コードをコピー';
+    copiedCodeButton.setAttribute('aria-label', copiedCodeButton.title);
+  }
+  copiedCodeButton = button;
+  button.setAttribute('data-copied', '');
+  button.title = 'コピーしました';
+  button.setAttribute('aria-label', button.title);
+  clearTimeout(codeCopyTimer);
+  codeCopyTimer = setTimeout(() => {
+    if (copiedCodeButton !== button) return;
+    button.removeAttribute('data-copied');
+    button.title = 'コードをコピー';
+    button.setAttribute('aria-label', button.title);
+    copiedCodeButton = undefined;
+  }, 1600);
+}
 function renderPendingSend(submission: PendingSend): string {
   if (!task) return '';
   const { id, state } = submission;
@@ -247,6 +270,10 @@ window.addEventListener('message', event => {
     clearTimeout(copyTimer);
     renderCopyFeedback();
     copyTimer = setTimeout(() => { copiedMessage = undefined; renderCopyFeedback(); }, 1600);
+  } else if (message.type === 'codeCopied' && typeof message.requestId === 'number') {
+    const button = pendingCodeCopies.get(message.requestId);
+    pendingCodeCopies.delete(message.requestId);
+    if (button?.isConnected) showCodeCopyFeedback(button);
   } else if (message.type === 'sent' && sending && sending.id === message.sendId) {
     if (!sending.optimistic) completion.sent(message.text);
     const pendingSend = pendingSends.find(submission => submission.id === message.sendId);
@@ -323,7 +350,7 @@ for (const id of ['model', 'effort', 'mode']) $(id).addEventListener('change', (
   model: $<HTMLSelectElement>('model').value, effort: id === 'model' ? '' : $<HTMLSelectElement>('effort').value, mode: $<HTMLSelectElement>('mode').value,
 }));
 document.addEventListener('click', event => {
-  const target = (event.target as Element).closest<HTMLElement>('[data-link], [data-remove], [data-retry-send], [data-message-action]');
+  const target = (event.target as Element).closest<HTMLElement>('[data-link], [data-remove], [data-retry-send], [data-message-action], [data-code-action]');
   if (!target) return;
   if (target.dataset.retrySend) {
     const pendingSend = pendingSends.find(submission => submission.id === target.dataset.retrySend);
@@ -333,6 +360,13 @@ document.addEventListener('click', event => {
   }
   else if (target.dataset.link) { event.preventDefault(); post('openLink', { url: target.dataset.link }); }
   else if (target.dataset.remove) { post('removeAttachment', { id: target.dataset.remove }); prompt.focus(); }
+  else if (target.dataset.codeAction === 'copy') {
+    const code = target.closest('.code-block')?.querySelector('code');
+    if (!code) return;
+    const requestId = ++codeCopySequence;
+    pendingCodeCopies.set(requestId, target as HTMLButtonElement);
+    post('copyCode', { requestId, text: code.textContent ?? '' });
+  }
   else if (target.dataset.messageAction) {
     const turnId = target.closest<HTMLElement>('.turn')?.dataset.turn;
     const itemId = target.closest<HTMLElement>('.message')?.dataset.messageId;

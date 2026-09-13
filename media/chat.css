@@ -39,8 +39,8 @@ h1 { font-size: 26px; font-weight: 550; line-height: 1.4; margin: 14px 0 12px; l
 .message-action:hover:not(:disabled) { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground, #80808022); }
 .message-action:disabled { background: transparent; }
 .message-action svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.2; stroke-linecap: round; stroke-linejoin: round; }
-.copied-icon, .message-action[data-copied] .copy-icon { display: none; }
-.message-action[data-copied] .copied-icon { display: block; }
+.copied-icon, .message-action[data-copied] .copy-icon, .code-copy[data-copied] .copy-icon { display: none; }
+.message-action[data-copied] .copied-icon, .code-copy[data-copied] .copied-icon { display: block; }
 @media (hover: none) { .message-footer { opacity: 1; pointer-events: auto; } }
 .user-text { white-space: pre-wrap; }
 .user-quote { margin: 0 0 10px; padding-left: 12px; border-left: 3px solid var(--vscode-textBlockQuote-border, var(--muted)); color: var(--muted); white-space: pre-wrap; }
@@ -53,6 +53,13 @@ h1 { font-size: 26px; font-weight: 550; line-height: 1.4; margin: 14px 0 12px; l
 .markdown h2 { font-size: 18px; }
 .markdown h3 { font-size: 15px; }
 .markdown pre, details pre { background: var(--vscode-textCodeBlock-background); padding: 12px; border: 1px solid var(--border); border-radius: 5px; overflow: auto; }
+.code-block { position: relative; }
+.code-block pre { padding-right: 42px; }
+.code-copy { position: absolute; top: 7px; right: 7px; display: grid; place-items: center; width: 27px; height: 27px; padding: 6px; border: 1px solid var(--border); border-radius: 5px; color: var(--muted); background: var(--vscode-editorWidget-background, var(--vscode-textCodeBlock-background)); opacity: 0; pointer-events: none; }
+.code-copy:hover { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground, var(--vscode-editorWidget-background, #80808022)); }
+.code-copy svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.2; stroke-linecap: round; stroke-linejoin: round; }
+.code-block:hover .code-copy, .code-block:focus-within .code-copy { opacity: 1; pointer-events: auto; }
+@media (hover: none) { .code-copy { opacity: 1; pointer-events: auto; } }
 code, pre { font-family: var(--vscode-editor-font-family, monospace); font-size: var(--vscode-editor-font-size, 12px); }
 .markdown :not(pre) > code { background: var(--vscode-textCodeBlock-background); padding: 1px 4px; border-radius: 3px; }
 .markdown table { border-collapse: collapse; display: block; overflow: auto; }

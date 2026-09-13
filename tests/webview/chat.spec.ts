@@ -1051,6 +1051,34 @@ test('read acknowledgements require the completed unread turn to be rendered', a
   expect((await messages(page)).filter(message => message.type === 'read')).toHaveLength(1);
 });
 
+test('code block copy buttons appear on hover or focus and copy only their code', async ({ page }) => {
+  const value = task();
+  const codeText = 'const value = "<tag>";\n  run(value);';
+  value.turns = [{ id: 'code', status: 'completed', items: [
+    { id: 'reply', kind: 'agentMessage', data: { text: `回答です。\n\n\`\`\`ts\n${codeText}\n\`\`\`\n\n完了しました。` } },
+  ] }];
+  await state(page, value);
+  const block = page.locator('.code-block');
+  const button = block.locator('.code-copy');
+  await expect(button).toHaveAccessibleName('コードをコピー');
+  await expect(block.locator('code')).toHaveText(codeText);
+  await page.mouse.move(1, 1);
+  await expect(button).toHaveCSS('opacity', '0');
+  await block.locator('pre').hover();
+  await expect(button).toHaveCSS('opacity', '1');
+  await button.click();
+  const request = (await messages(page)).at(-1)!;
+  expect(request).toEqual({ type: 'copyCode', requestId: 1, text: codeText });
+  await receive(page, { type: 'codeCopied', requestId: request.requestId });
+  await expect(button).toHaveAccessibleName('コピーしました');
+  await expect(button.locator('.copied-icon')).toBeVisible();
+  await page.locator('#prompt').hover();
+  await page.locator('#prompt').focus();
+  await expect(button).toHaveCSS('opacity', '0');
+  await button.focus();
+  await expect(button).toHaveCSS('opacity', '1');
+});
+
 test('message hover actions match their role, stay below the text, and address the selected message', async ({ page }, info) => {
   const value = task();
   value.turns = [{ id: 'earlier', status: 'completed', startedAt: Date.UTC(2026, 8, 9, 4, 29), completedAt: Date.UTC(2026, 8, 9, 4, 30), items: [

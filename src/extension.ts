@@ -229,6 +229,9 @@ class DeckExtension implements PanelHost {
   }
   async command(task: Task, message: JsonObject): Promise<JsonObject | void> {
     switch (message.type) {
+      case 'copyCode':
+        await vscode.env.clipboard.writeText(string(message.text));
+        return { type: 'codeCopied', requestId: message.requestId };
       case 'copyMessage': case 'forkMessage': {
         const turn = task.turns.find(turn => turn.id === string(message.turnId));
         const item = turn?.items.find(item => item.id === string(message.itemId));

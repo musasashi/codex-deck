@@ -13,7 +13,10 @@ test('model text cannot inject executable HTML or navigate using command links',
 });
 
 test('tool output, automatic labels and native code fences render without raw HTML', () => {
-  assert.match(renderMarkdown('```ts\nconst value = 1;\n```'), /<pre><code class="language-ts">/);
+  const code = renderMarkdown('```ts\nconst value = "<unsafe>";\n```');
+  assert.match(code, /<div class="code-block"><pre><code class="language-ts">const value = &quot;&lt;unsafe&gt;&quot;;<\/code><\/pre>/);
+  assert.match(code, /class="code-copy" data-code-action="copy" aria-label="コードをコピー"/);
+  assert.ok(!code.includes('<unsafe>'));
   assert.ok(renderItem({ id: 'i', kind: 'userMessage', data: { content: [{ type: 'text', text: '<script>bad()</script>' }] } }, true).includes('自動送信'));
   assert.ok(!renderItem({ id: 'i', kind: 'commandExecution', data: { command: '<script>', aggregatedOutput: '<script>' } }, false).includes('<script>'));
   const html = renderItem({ id: 'answer', kind: 'userMessage', data: { content: [{ type: 'text', text: '> <script>質問</script>\n> 2行目\n> \n> 補足\n\n**回答**\n\n> 次の質問\n\n```text\n> 回答内のコード\n```' }] } }, false);

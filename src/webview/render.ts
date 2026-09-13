@@ -4,11 +4,16 @@ import { isImageDataUrl } from '../core/attachments';
 import { taskReferenceBody } from '../core/taskReferenceText';
 
 export const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);
+const copyIcon = '<svg viewBox="0 0 16 16" aria-hidden="true"><g class="copy-icon"><rect x="2" y="5" width="9" height="9" rx="2"/><path d="M5 5V4a2 2 0 0 1 2-2h5a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-1"/></g><path class="copied-icon" d="m3 8 3 3 7-7"/></svg>';
 const markdown = new Marked({ breaks: true, gfm: true });
 markdown.use({ renderer: {
   html({ text }) { return escapeHtml(text); },
   link({ href, tokens }) { return `<button class="inline-link" data-link="${escapeHtml(href)}">${this.parser.parseInline(tokens)}</button>`; },
   image({ href, text }) { return `<button class="inline-link" data-link="${escapeHtml(href)}">画像: ${escapeHtml(text || '開く')}</button>`; },
+  code({ text, lang }) {
+    const language = (lang ?? '').match(/^\S+/)?.[0];
+    return `<div class="code-block"><pre><code${language ? ` class="language-${escapeHtml(language)}"` : ''}>${escapeHtml(text)}</code></pre><button type="button" class="code-copy" data-code-action="copy" aria-label="コードをコピー" title="コードをコピー">${copyIcon}</button></div>`;
+  },
 } });
 export function renderMarkdown(text: string): string { return markdown.parse(text, { async: false }); }
 function renderUserText(text: string): string {
@@ -44,7 +49,7 @@ function message(item: Item, content: string, options?: MessageOptions, referenc
   if (options) {
     const date = options.timestamp === undefined ? undefined : new Date(options.timestamp);
     const time = date && Number.isFinite(date.getTime()) ? `<time datetime="${date.toISOString()}" title="${escapeHtml(date.toLocaleString('ja-JP'))}">${messageTime.format(date)} (${messageWeekday.format(date)})</time>` : '';
-    const copy = '<button type="button" class="message-action" data-message-action="copy" aria-label="メッセージをコピー" title="メッセージをコピー"><svg viewBox="0 0 16 16" aria-hidden="true"><g class="copy-icon"><rect x="2" y="5" width="9" height="9" rx="2"/><path d="M5 5V4a2 2 0 0 1 2-2h5a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-1"/></g><path class="copied-icon" d="m3 8 3 3 7-7"/></svg></button>';
+    const copy = `<button type="button" class="message-action" data-message-action="copy" aria-label="メッセージをコピー" title="メッセージをコピー">${copyIcon}</button>`;
     const fork = user ? '' : `<button type="button" class="message-action" data-message-action="fork" aria-label="新しいチャットに分岐" title="新しいチャットに分岐"${options.canFork ? '' : ' disabled'}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 8h3c3 0 3-4.5 6-4.5h2m-3-2.5 3 2.5-3 2.5M5 8c3 0 3 4.5 6 4.5h2m-3-2.5 3 2.5-3 2.5"/></svg></button>`;
     const actions = `<div class="message-actions">${copy}${fork}</div>`;
     footer = `<div class="message-footer">${user ? time + actions : actions + time}</div>`;

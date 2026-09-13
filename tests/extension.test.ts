@@ -45,6 +45,7 @@ function panel() {
 
 function activate(records: TaskRecord[], options: { remoteName?: string; isTrusted?: boolean; cliPath?: string } = { remoteName: 'wsl' }) {
   let stored: unknown = { version: 1, tasks: structuredClone(records) };
+  let clipboardText = '';
   let serializer!: vscode.WebviewPanelSerializer;
   let createdPanels = 0;
   const openedPanels: ReturnType<typeof panel>[] = [];
@@ -53,7 +54,10 @@ function activate(records: TaskRecord[], options: { remoteName?: string; isTrust
   const api = {
     EventEmitter: Emitter,
     ViewColumn: { Active: -1 },
-    env: { remoteName: options.remoteName },
+    env: { remoteName: options.remoteName, clipboard: {
+      async writeText(value: string) { clipboardText = value; },
+      async readText() { return clipboardText; },
+    } },
     Uri: { file: (value: string) => new URL(`file://${value}`),
       joinPath: (uri: URL, ...parts: string[]) => new URL(`${uri}/${parts.join('/')}`) },
     window: {
@@ -85,7 +89,7 @@ function activate(records: TaskRecord[], options: { remoteName?: string; isTrust
   return {
     rows: () => trees.get('codexDeck.tasks')!.getChildren(), serializer, commands, api, openedPanels,
     createdPanels: () => createdPanels,
-    records: () => (stored as { tasks: TaskRecord[] }).tasks,
+    records: () => (stored as { tasks: TaskRecord[] }).tasks, clipboard: () => clipboardText,
     async shutdown() {
       try { await module.exports.deactivate(); }
       finally { for (const subscription of context.subscriptions.reverse()) subscription.dispose(); }
@@ -96,6 +100,26 @@ function activate(records: TaskRecord[], options: { remoteName?: string; isTrust
 test('unsupported remote hosts cannot activate the extension', () => {
   assert.throws(() => activate([], { remoteName: 'ssh-remote' }), /WSL接続で開き/);
   assert.throws(() => activate([], { remoteName: 'dev-container' }), /WSL接続で開き/);
+});
+
+test('task editor title provides a new task button', () => {
+  const manifest = nodeRequire('./package.json');
+  assert.deepEqual(manifest.contributes.menus['editor/title'], [{
+    command: 'codexDeck.newTask',
+    when: 'activeWebviewPanelId == codexDeck.task',
+    group: 'navigation@1',
+  }]);
+});
+
+test('code block copy requests write the exact code and acknowledge their request', async () => {
+  const extension = activate([]);
+  const { host, manager } = extension.serializer as unknown as { host: PanelHost; manager: TaskManager };
+  try {
+    const task = manager.create('/project');
+    const text = 'const value = "<tag>";\n  run(value);';
+    assert.deepEqual(await host.command(task, { type: 'copyCode', requestId: 7, text }), { type: 'codeCopied', requestId: 7 });
+    assert.equal(extension.clipboard(), text);
+  } finally { await extension.shutdown(); }
 });
 
 test('selection mentions replace the old command and use the source chat instead of another active task', async () => {
