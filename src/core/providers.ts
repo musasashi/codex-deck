@@ -41,6 +41,9 @@ export function validateProviders(value: unknown): ResponsesProvider[] {
     try { url = new URL(p.baseUrl); } catch { throw new Error(`${p.name}: Base URLを入力してください。`); }
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash)
       throw new Error(`${p.name}: Base URLは認証情報・クエリー・フラグメントを含まないHTTP(S) URLにしてください。`);
+    const loopback = url.hostname === 'localhost' || url.hostname === '[::1]' || /^127(?:\.\d{1,3}){3}$/.test(url.hostname);
+    if (url.protocol === 'http:' && !loopback)
+      throw new Error(`${p.name}: 外部APIのBase URLはHTTPSにしてください。HTTPはループバック接続（localhost・127.0.0.0/8・[::1]）のみ使用できます。`);
     p.baseUrl = url.toString().replace(/\/+$/, '');
     if (p.apiKeyEnv && !ENV_NAME.test(p.apiKeyEnv)) throw new Error(`${p.name}: APIキーの環境変数名を確認してください。`);
     if (!p.models.length) throw new Error(`${p.name}: モデルを1件以上登録してください。`);

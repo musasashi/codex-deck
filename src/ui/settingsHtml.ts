@@ -3,7 +3,7 @@ export function settingsHtml(options: { cspSource: string; script: string; css: 
     <main><header><h1>Codex Deck 設定</h1><p>タスクのプリセットと、タスク名の要約に使うモデル・推論強度を設定します。先頭のプリセットが新規タスクの初期設定になります。</p></header>
     <form id="settings-form"><label for="scope">保存先</label><select id="scope" disabled></select>
       <fieldset id="providers" disabled><legend>Responses API接続先</legend>
-        <p class="hint">接続先はユーザー設定に保存します。Base URLには「/responses」の前までを入力してください。登録したモデルはプリセットとタスク名の候補に追加されます。対応機能はモデルの仕様に合わせて選択してください。</p>
+        <p class="hint">接続先はユーザー設定に保存します。Base URLには「/responses」の前までを入力してください。HTTPS必須で、HTTPはループバック接続（localhost・127.0.0.0/8・[::1]）のみ使用できます。登録したモデルはプリセットとタスク名の候補に追加されます。対応機能はモデルの仕様に合わせて選択してください。</p>
         <div id="provider-list"></div><button id="add-provider" type="button" class="secondary">接続先を追加</button>
       </fieldset>
       <fieldset id="presets" disabled><legend>プリセット</legend>

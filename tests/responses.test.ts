@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { ResponsesConnections } from '../src/appServer/responsesConnections';
 import { responsesRequest } from '../src/appServer/responsesWire';
-import { providerId, validateProviders } from '../src/core/providers';
+import { providerId, readProviders, validateProviders } from '../src/core/providers';
 import { array, object, string, type JsonObject } from '../src/core/types';
 import { hfEchoCall, hfMessage, hfReasoning, sendHfResponse } from './fixtures/hfResponses';
 
@@ -18,6 +18,21 @@ test('the standard adapter retains reasoning history and gates optional capabili
   assert.throws(() => responsesRequest(image, { images: false }), /画像入力/);
   assert.deepEqual(responsesRequest(image, { images: true }).body, image);
   assert.throws(() => responsesRequest({ text: { format: { type: 'json_schema' } } }, { structuredOutput: false }), /構造化出力/);
+});
+
+test('direct HTTP settings are rejected before credentials are read or API requests are sent', async t => {
+  let environmentReads = 0;
+  const connections = new ResponsesConnections(async () => { environmentReads++; return { CUSTOM_KEY: 'http_block_test' }; });
+  const fetch = t.mock.method(globalThis, 'fetch', async () => { throw new Error('Unexpected API request'); });
+  t.after(() => connections.dispose());
+  for (const apiKeyEnv of ['', 'CUSTOM_KEY']) {
+    const providers = readProviders([{ id: 'unsafe', name: 'Unsafe API', baseUrl: 'http://api.example/v1', apiKeyEnv, models: [{ id: 'model' }] }]);
+    await assert.rejects(connections.config('responses:unsafe:model', providers), /HTTPS/);
+    for (const purpose of ['task', 'title'] as const)
+      await assert.rejects(connections.check('responses:unsafe:model', providers, purpose, new AbortController().signal, () => {}), /HTTPS/);
+  }
+  assert.equal(environmentReads, 0);
+  assert.equal(fetch.mock.callCount(), 0);
 });
 
 test('provider adapters separate credentials, allow local no-auth APIs, retain error statuses and reject unknown models', async t => {
