@@ -193,7 +193,6 @@
       "editor/title": [
         {
           "command": "codexDeck.newTask",
-          "when": "activeWebviewPanelId == codexDeck.task",
           "group": "navigation@1"
         }
       ],

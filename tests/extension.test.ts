@@ -102,11 +102,10 @@ test('unsupported remote hosts cannot activate the extension', () => {
   assert.throws(() => activate([], { remoteName: 'dev-container' }), /WSL接続で開き/);
 });
 
-test('task editor title provides a new task button', () => {
+test('every editor title provides a new task button', () => {
   const manifest = nodeRequire('./package.json');
   assert.deepEqual(manifest.contributes.menus['editor/title'], [{
     command: 'codexDeck.newTask',
-    when: 'activeWebviewPanelId == codexDeck.task',
     group: 'navigation@1',
   }]);
 });
