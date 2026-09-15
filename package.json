@@ -36,7 +36,10 @@
         "command": "codexDeck.newTask",
         "title": "新規タスク",
         "category": "Codex Deck",
-        "icon": "$(add)"
+        "icon": {
+          "light": "media/new-task-light.svg",
+          "dark": "media/new-task-dark.svg"
+        }
       },
       {
         "command": "codexDeck.history",
