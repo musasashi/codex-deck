@@ -115,6 +115,7 @@ class DeckExtension implements PanelHost {
       copyTaskMarkdown: async arg => this.copyTaskMarkdown(await this.task(arg)),
       mentionSelection: arg => this.mentionSelection(arg), addFile: arg => this.addFile(arg instanceof vscode.Uri ? arg : undefined),
       signIn: () => this.signIn(), signOut: () => this.signOut(), settings: () => this.settings(),
+      cyclePreset: async arg => this.cyclePreset(await this.task(arg)),
       mcp: () => this.mcp(), skills: async () => this.skills(await this.task()), review: async () => this.review(await this.task()),
       showDiff: async () => this.showDiff(await this.task()), worktree: () => this.worktree(),
       reconnect: async () => { if (!this.client.connected) { this.connection.dispose(); await this.connect(); } else await this.refreshCatalog(); },

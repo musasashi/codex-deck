@@ -117,6 +117,11 @@
         "icon": "$(settings-gear)"
       },
       {
+        "command": "codexDeck.cyclePreset",
+        "title": "次のプリセットに切り替え",
+        "category": "Codex Deck"
+      },
+      {
         "command": "codexDeck.mcp",
         "title": "MCPサーバー",
         "category": "Codex Deck"
@@ -281,6 +286,11 @@
       {
         "command": "codexDeck.newTask",
         "key": "ctrl+shift+o"
+      },
+      {
+        "command": "codexDeck.cyclePreset",
+        "key": "ctrl+tab",
+        "when": "activeWebviewPanelId == codexDeck.task"
       }
     ],
     "configuration": {
