@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import { buildSync } from 'esbuild';
@@ -102,11 +103,13 @@ test('unsupported remote hosts cannot activate the extension', () => {
   assert.throws(() => activate([], { remoteName: 'dev-container' }), /WSL接続で開き/);
 });
 
-test('task editor title provides a new task button', () => {
+test('every editor title provides a new task button', () => {
   const manifest = nodeRequire('./package.json');
+  const icon = { light: 'media/new-task-light.svg', dark: 'media/new-task-dark.svg' };
+  assert.deepEqual(manifest.contributes.commands.find((command: { command: string }) => command.command === 'codexDeck.newTask').icon, icon);
+  assert.ok(Object.values(icon).every(file => existsSync(path.resolve(file))));
   assert.deepEqual(manifest.contributes.menus['editor/title'], [{
     command: 'codexDeck.newTask',
-    when: 'activeWebviewPanelId == codexDeck.task',
     group: 'navigation@1',
   }]);
 });
