@@ -43,7 +43,7 @@ function panel() {
   return Object.assign(webviewPanel, { messages, receive: (value: unknown) => receive(value) });
 }
 
-function activate(records: TaskRecord[], options: { remoteName?: string; isTrusted?: boolean; cliPath?: string } = { remoteName: 'wsl' }) {
+function activate(records: TaskRecord[], options: { remoteName?: string; isTrusted?: boolean; cliPath?: string; presets?: unknown } = { remoteName: 'wsl' }) {
   let stored: unknown = { version: 1, tasks: structuredClone(records) };
   let clipboardText = '';
   let serializer!: vscode.WebviewPanelSerializer;
@@ -74,7 +74,7 @@ function activate(records: TaskRecord[], options: { remoteName?: string; isTrust
       isTrusted: options.isTrusted ?? false, // Restoration must populate the tree even when connecting is unavailable.
       workspaceFolders: [{ uri: { fsPath: '/project' } }],
       onDidChangeConfiguration: disposable, onDidCloseTextDocument: disposable, registerTextDocumentContentProvider: disposable,
-      getConfiguration: () => ({ get: (key: string, fallback: unknown) => key === 'cliPath' ? options.cliPath ?? fallback : fallback }),
+      getConfiguration: () => ({ get: (key: string, fallback: unknown) => key === 'cliPath' ? options.cliPath ?? fallback : key === 'presets' ? options.presets ?? fallback : fallback }),
     },
     commands: { registerCommand(id: string, action: (arg?: unknown) => unknown) { commands.set(id, action); return disposable(); } },
   };
@@ -109,6 +109,29 @@ test('task editor title provides a new task button', () => {
     when: 'activeWebviewPanelId == codexDeck.task',
     group: 'navigation@1',
   }]);
+});
+
+test('preset cycling is a customizable command bound to Ctrl+Tab in task editors', async () => {
+  const presets = [
+    { model: 'test-model', effort: 'high', mode: 'auto-review' },
+    { model: 'test-model', effort: 'test-effort', mode: 'workspace-write' },
+  ];
+  const extension = activate([record('draft', true, true)], { remoteName: 'wsl', presets });
+  const { host, manager } = extension.serializer as unknown as { host: PanelHost; manager: TaskManager };
+  try {
+    const manifest = nodeRequire('./package.json');
+    assert.equal(manifest.contributes.commands.find((command: { command: string }) => command.command === 'codexDeck.cyclePreset').title, '次のプリセットに切り替え');
+    assert.deepEqual(manifest.contributes.keybindings.find((binding: { command: string }) => binding.command === 'codexDeck.cyclePreset'), {
+      command: 'codexDeck.cyclePreset', key: 'ctrl+tab', when: 'activeWebviewPanelId == codexDeck.task',
+    });
+
+    host.models = [{ id: 'test-model', label: 'Test', description: '', defaultEffort: 'test-effort', efforts: [{ id: 'high', description: '' }, { id: 'test-effort', description: '' }], isDefault: true, inputModalities: ['text'] }];
+    await extension.serializer.deserializeWebviewPanel(panel(), { taskId: 'draft' });
+    await extension.commands.get('codexDeck.cyclePreset')!();
+    assert.deepEqual(manager.get('draft').settings, presets[0]);
+    await extension.commands.get('codexDeck.cyclePreset')!();
+    assert.deepEqual(manager.get('draft').settings, presets[1]);
+  } finally { await extension.shutdown(); }
 });
 
 test('code block copy requests write the exact code and acknowledge their request', async () => {
