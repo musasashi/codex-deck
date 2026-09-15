@@ -62,6 +62,19 @@ test('invalid provider configuration is rejected before any setting is written',
   assert.match(String(h.sent.at(-1)!.message), /接続先ID/);
 });
 
+test('external HTTP providers cannot be saved or checked through settings messages', async () => {
+  let checks = 0;
+  const h = harness(async (model, purpose) => { checks++; return passed(model, purpose); });
+  for (const type of ['saveSettings', 'checkProviderModel']) {
+    await h.receive({ ...save, type, model: 'responses:api:model',
+      providers: [{ id: 'api', name: 'API', baseUrl: 'http://api.example/v1', models: [{ id: 'model' }] }] });
+    assert.equal(h.sent.at(-1)!.type, 'settingsError');
+    assert.match(String(h.sent.at(-1)!.message), /HTTPS/);
+  }
+  assert.deepEqual(h.updates, []);
+  assert.equal(checks, 0);
+});
+
 test('manual API checks can be cancelled and closing settings also aborts them', async () => {
   for (const close of [false, true]) {
     let started!: () => void;

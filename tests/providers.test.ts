@@ -45,6 +45,23 @@ test('invalid endpoints, credentials, duplicated identities and malformed models
   assert.throws(() => modelRequest('responses:bad'), /モデルID/);
 });
 
+test('HTTPS endpoints and HTTP loopback endpoints remain available', () => {
+  for (const baseUrl of ['https://api.example/v1', 'https://192.168.1.10/v1',
+    'http://localhost:11434/v1', 'http://LOCALHOST/v1', 'http://127.0.0.1/v1', 'http://127.255.255.254/v1',
+    'http://[::1]:11434/v1', 'http://[0:0:0:0:0:0:0:1]/v1', 'http://127.1/v1', 'http://2130706433/v1']) {
+    assert.doesNotThrow(() => validateProviders([{ ...providers[0]!, baseUrl }]), baseUrl);
+  }
+});
+
+test('HTTP endpoints outside loopback are rejected, including private networks and deceptive hostnames', () => {
+  for (const baseUrl of ['http://api.example/v1', 'http://192.168.1.10/v1', 'http://10.0.0.1/v1', 'http://172.16.0.1/v1',
+    'http://0.0.0.0/v1', 'http://[::]/v1', 'http://[2001:db8::1]/v1', 'http://[::ffff:192.0.2.1]/v1',
+    'http://localhost.example/v1', 'http://127.0.0.1.example/v1', 'http://api.example/localhost/v1',
+    'http://0xc0000201/v1', 'http://3221225985/v1']) {
+    assert.throws(() => validateProviders([{ ...providers[0]!, baseUrl }]), /HTTPS/, baseUrl);
+  }
+});
+
 test('custom tasks route, restore and fork independently and cannot switch to another provider with the same model ID', async () => {
   const input = new PassThrough(), output = new PassThrough();
   const peer = new JsonRpcPeer(input, output, 1000), server = new JsonRpcPeer(output, input, 1000);

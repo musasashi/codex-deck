@@ -334,6 +334,26 @@ test('registering a Responses API provider exposes model capabilities, saves off
   await page.screenshot({ path: info.outputPath('responses-provider.png'), fullPage: true });
 });
 
+test('external HTTP providers cannot be saved or checked until their URL is secure or loopback', async ({ page }) => {
+  const providers = [{ id: 'api', name: 'API', baseUrl: 'https://api.example/v1', models: [{ id: 'model' }] }];
+  await snapshot(page, { providers, presets: [{ model: 'responses:api:model', effort: 'default', mode: 'read-only' }] });
+  const save = page.getByRole('button', { name: '保存', exact: true });
+  const url = page.getByLabel('Base URL', { exact: true });
+  for (const baseUrl of ['http://api.example/v1', 'http://192.168.1.10/v1', 'http://localhost.example/v1']) {
+    await url.fill(baseUrl);
+    await expect(save).toBeDisabled();
+    await page.locator('.preset-card').first().getByRole('button', { name: '利用可否を確認' }).click();
+    await expect(page.getByRole('status')).toContainText('HTTPS');
+  }
+  expect((await messages(page)).some(message => ['saveSettings', 'checkProviderModel'].includes(String(message.type)))).toBe(false);
+  for (const baseUrl of ['https://api.example/v1', 'http://localhost:11434/v1', 'http://127.0.0.1:11434/v1', 'http://[::1]:11434/v1']) {
+    await url.fill(baseUrl);
+    await expect(save).toBeEnabled();
+  }
+  await save.click();
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'saveSettings', providers: [{ baseUrl: 'http://[::1]:11434/v1' }] });
+});
+
 test('provider changes invalidate old checks and missing models cannot be saved', async ({ page }) => {
   const providers = [{ id: 'api', name: 'API', baseUrl: 'https://api.example/v1', apiKeyEnv: 'API_KEY', models: [{ id: 'model' }] }];
   const preset = { model: 'responses:api:model', effort: 'default', mode: 'read-only' };
