@@ -307,21 +307,21 @@ test('tab menu commands act on the clicked task even when an identically named t
     assert.equal(extension.clipboard(), 'codex://threads/target');
     await commands.get('codexDeck.copyTaskMarkdown')!(resource);
     assert.match(extension.clipboard(), /対象の会話/);
-    await commands.get('codexDeck.renameTask')!(resource);
+    await commands.get('codexDeck.editor.renameTask')!(resource);
     assert.equal(target.title, '名前を変更したタスク');
     assert.equal(first.title, '同じ名前');
-    await commands.get('codexDeck.forkTask')!(resource);
+    await commands.get('codexDeck.editor.forkTask')!(resource);
     const fork = [...manager.tasks.values()].find(task => task.threadId?.startsWith('fork-'))!;
     assert.deepEqual(fork.turns, target.turns);
     assert.equal(extension.openedPanels[0]!.viewType, `codexDeck.task.${fork.id}`);
     assert.ok(extension.serializers.has(extension.openedPanels[0]!.viewType));
-    await commands.get('codexDeck.archiveTask')!(resource);
+    await commands.get('codexDeck.editor.archiveTask')!(resource);
     assert.deepEqual(archived, ['target']);
     assert.equal(target.open, false);
     assert.equal(first.open, true);
 
     for (const invalid of [editorResource('missing'), { scheme: 'webview-panel', path: 'webview-panel/webview-codexDeck.settings-00000000-0000-4000-8000-000000000000' }]) {
-      await commands.get('codexDeck.archiveTask')!(invalid);
+      await commands.get('codexDeck.editor.archiveTask')!(invalid);
       assert.deepEqual(archived, ['target'], 'an unknown tab must never fall back to the active task');
     }
   } finally { await extension.shutdown(); }
@@ -338,7 +338,7 @@ test('saved task tabs register their serializers at startup and can be archived 
     assert.ok(extension.serializers.has('codexDeck.task.first'));
     assert.ok(extension.serializers.has('codexDeck.task.hidden'));
     await extension.serializer.deserializeWebviewPanel(panel(), { taskId: 'first' });
-    await extension.commands.get('codexDeck.archiveTask')!(editorResource('hidden'));
+    await extension.commands.get('codexDeck.editor.archiveTask')!(editorResource('hidden'));
     assert.deepEqual(closed, [hiddenTab]);
     assert.equal(manager.get('hidden').open, false);
     assert.equal(manager.get('first').open, true);

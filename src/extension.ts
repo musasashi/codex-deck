@@ -123,6 +123,7 @@ class DeckExtension implements PanelHost {
       reconnect: async () => { if (!this.client.connected) { this.connection.dispose(); await this.connect(); } else await this.refreshCatalog(); },
       menu: async () => this.menu(await this.task()),
     };
+    for (const name of ['archiveTask', 'forkTask', 'renameTask']) commands[`editor.${name}`] = commands[name]!;
     for (const [name, action] of Object.entries(commands)) context.subscriptions.push(vscode.commands.registerCommand(`codexDeck.${name}`, async (arg?: unknown) => {
       try { return await action(arg); } catch (error) { this.report(error); }
     }));

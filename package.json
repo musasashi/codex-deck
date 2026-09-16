@@ -92,6 +92,18 @@
         "category": "Codex Deck"
       },
       {
+        "command": "codexDeck.editor.archiveTask",
+        "title": "Codex Deck: アーカイブ"
+      },
+      {
+        "command": "codexDeck.editor.forkTask",
+        "title": "Codex Deck: 会話を分岐"
+      },
+      {
+        "command": "codexDeck.editor.renameTask",
+        "title": "Codex Deck: 名前を変更"
+      },
+      {
         "command": "codexDeck.mentionSelection",
         "title": "Codex-Deckで言及",
         "category": "Codex Deck"
@@ -196,6 +208,10 @@
       {
         "id": "codexDeck.copyTask",
         "label": "コピー"
+      },
+      {
+        "id": "codexDeck.editor.copyTask",
+        "label": "Codex Deck: コピー"
       }
     ],
     "menus": {
@@ -207,21 +223,38 @@
       ],
       "editor/title/context": [
         {
-          "submenu": "codexDeck.copyTask",
+          "submenu": "codexDeck.editor.copyTask",
           "when": "resourceScheme == webview-panel && resourceFilename =~ /^webview-codexDeck\\.task\\./",
-          "group": "1_copy"
+          "group": "z_codexDeck@1"
         },
         {
-          "command": "codexDeck.renameTask",
-          "when": "resourceScheme == webview-panel && resourceFilename =~ /^webview-codexDeck\\.task\\./"
+          "command": "codexDeck.editor.archiveTask",
+          "when": "resourceScheme == webview-panel && resourceFilename =~ /^webview-codexDeck\\.task\\./",
+          "group": "z_codexDeck@2"
         },
         {
-          "command": "codexDeck.forkTask",
-          "when": "resourceScheme == webview-panel && resourceFilename =~ /^webview-codexDeck\\.task\\./"
+          "command": "codexDeck.editor.forkTask",
+          "when": "resourceScheme == webview-panel && resourceFilename =~ /^webview-codexDeck\\.task\\./",
+          "group": "z_codexDeck@3"
         },
         {
-          "command": "codexDeck.archiveTask",
-          "when": "resourceScheme == webview-panel && resourceFilename =~ /^webview-codexDeck\\.task\\./"
+          "command": "codexDeck.editor.renameTask",
+          "when": "resourceScheme == webview-panel && resourceFilename =~ /^webview-codexDeck\\.task\\./",
+          "group": "z_codexDeck@4"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "codexDeck.editor.archiveTask",
+          "when": "false"
+        },
+        {
+          "command": "codexDeck.editor.forkTask",
+          "when": "false"
+        },
+        {
+          "command": "codexDeck.editor.renameTask",
+          "when": "false"
         }
       ],
       "view/title": [
@@ -271,6 +304,16 @@
         }
       ],
       "codexDeck.copyTask": [
+        {
+          "command": "codexDeck.copyTaskDeepLink",
+          "group": "copy@1"
+        },
+        {
+          "command": "codexDeck.copyTaskMarkdown",
+          "group": "copy@2"
+        }
+      ],
+      "codexDeck.editor.copyTask": [
         {
           "command": "codexDeck.copyTaskDeepLink",
           "group": "copy@1"
