@@ -5,6 +5,7 @@ import { readTokenPrice } from '../core/cost';
 import { providerCheckKey, type ProviderCheck, type ProviderCheckPurpose } from '../core/providerCheck';
 import { isExternalModel, parseResponsesModel, providerModels, readProviders, validateProviders } from '../core/providers';
 import { ProviderEditor } from './providers';
+import { readQuestionPresets, validateQuestionPresets, type QuestionPreset } from '../core/questionPresets';
 
 declare function acquireVsCodeApi(): { postMessage(value: unknown): void; setState(value: unknown): void; getState(): unknown };
 const vscode = acquireVsCodeApi();
@@ -18,6 +19,7 @@ const titleOutputPrice = $<HTMLInputElement>('title-output-price');
 let titleModelId = 'latest';
 let models: Model[] = [];
 let presets: SettingsPreset[] = [];
+let questionPresets: QuestionPreset[] = [];
 let requestId = 0;
 let ready = false;
 let busy = false;
@@ -44,11 +46,14 @@ function setBusy(value: boolean): void {
   busy = value;
   scope.disabled = busy || !scope.options.length;
   $<HTMLFieldSetElement>('presets').disabled = busy || !ready;
+  $<HTMLFieldSetElement>('question-presets').disabled = busy || !ready;
   $<HTMLFieldSetElement>('task-titles').disabled = busy || !ready;
   $<HTMLFieldSetElement>('providers').disabled = busy || !ready;
   let validProviders = true;
   try { validateProviders(providerEditor.value); } catch { validProviders = false; }
-  const valid = presets.length && presets.every(preset => selectedModel(models, preset.model)
+  let validQuestions = true;
+  try { validateQuestionPresets(questionPresets, models); } catch { validQuestions = false; }
+  const valid = validQuestions && presets.length && presets.every(preset => selectedModel(models, preset.model)
     && presetEffortOptions(selectedModel(models, preset.model)).some(option => option.id === preset.effort)
     && (!isExternalModel(preset.model) || preset.pricing === undefined || readTokenPrice(preset.pricing))) && (titleModelId === 'latest' || selectedModel(models, titleModelId))
     && (!isExternalModel(titleModelId) || !price(titleInputPrice, titleOutputPrice) || readTokenPrice(price(titleInputPrice, titleOutputPrice)))
@@ -70,6 +75,10 @@ function renderChecks(): void {
   for (const [index, preset] of presets.entries()) {
     const card = $('preset-list').children[index];
     if (card) renderCheck(card.querySelector<HTMLButtonElement>('[data-action=check]')!, card.querySelector<HTMLElement>('[data-field=hf-check]')!, preset.model, 'task');
+  }
+  for (const [index, preset] of questionPresets.entries()) {
+    const card = $('question-preset-list').children[index];
+    if (card) renderCheck(card.querySelector<HTMLButtonElement>('[data-action=check]')!, card.querySelector<HTMLElement>('[data-field=hf-check]')!, preset.settings.model, 'task');
   }
   renderCheck($<HTMLButtonElement>('title-hf-check'), $('title-hf-check-result'), titleModelId, 'title');
 }
@@ -97,19 +106,33 @@ function modelOptions(): { id: string; label: string }[] {
   const latest = latestModel(models);
   return [{ id: 'latest', label: latest ? `最新モデル (${latest.label})` : '最新モデル' }, { id: 'huggingface', label: 'Hugging Face（モデルIDを指定）' }, ...models.map(model => ({ id: model.id, label: model.label }))];
 }
-function renderPresets(): void {
-  $('preset-list').replaceChildren(...presets.map((preset, index) => {
+function renderPresets(): void { renderPresetList(false); renderPresetList(true); }
+function renderPresetList(questions: boolean): void {
+  const prefix = questions ? 'question-preset' : 'preset', label = questions ? '質問プリセット' : 'プリセット';
+  const rows = questions ? questionPresets : presets;
+  const settings = questions ? questionPresets.map(preset => preset.settings) : presets;
+  $(`${prefix}-list`).replaceChildren(...settings.map((preset, index) => {
     const card = document.createElement('section');
     card.className = 'preset-card';
     card.setAttribute('role', 'group');
-    card.setAttribute('aria-labelledby', `preset-title-${index}`);
-    card.innerHTML = `<div class="preset-header"><div><h2 id="preset-title-${index}">プリセット${index + 1}</h2>${index === 0 ? '<span class="preset-default">新規タスクの初期設定</span>' : ''}</div><div class="preset-actions"><button type="button" class="secondary" data-action="up" aria-label="プリセット${index + 1}を上へ" title="上へ">↑</button><button type="button" class="secondary" data-action="down" aria-label="プリセット${index + 1}を下へ" title="下へ">↓</button><button type="button" class="secondary" data-action="remove" aria-label="プリセット${index + 1}を削除">削除</button></div></div>
-      <label for="preset-model-${index}">モデル</label><select id="preset-model-${index}" data-field="model" aria-describedby="preset-model-description-${index}"></select><p id="preset-model-description-${index}" class="hint"></p>
-      <div data-field="hf-field" hidden><div data-field="hf-id"><label for="preset-hf-model-${index}">HFのモデルID</label><input id="preset-hf-model-${index}" data-field="hf-model" type="text" placeholder="組織/モデル:プロバイダー" autocomplete="off" spellcheck="false"></div>
-        <div class="preset-fields"><div><label for="preset-input-price-${index}">入力単価（USD／100万トークン）</label><input id="preset-input-price-${index}" data-field="input-price" type="number" min="0" step="any"></div><div><label for="preset-output-price-${index}">出力単価（USD／100万トークン）</label><input id="preset-output-price-${index}" data-field="output-price" type="number" min="0" step="any"></div></div>
+    card.setAttribute('aria-labelledby', `${prefix}-title-${index}`);
+    card.innerHTML = `<div class="preset-header"><div><h2 id="${prefix}-title-${index}">${label}${index + 1}</h2>${!questions && index === 0 ? '<span class="preset-default">新規タスクの初期設定</span>' : ''}</div><div class="preset-actions"><button type="button" class="secondary" data-action="up" aria-label="${label}${index + 1}を上へ" title="上へ">↑</button><button type="button" class="secondary" data-action="down" aria-label="${label}${index + 1}を下へ" title="下へ">↓</button><button type="button" class="secondary" data-action="remove" aria-label="${label}${index + 1}を削除">削除</button></div></div>
+      ${questions ? `<label for="question-name-${index}">表示名</label><input id="question-name-${index}" type="text" placeholder="例: かみ砕いて説明" required>
+      <label for="question-prompt-${index}">質問文</label><textarea id="question-prompt-${index}" rows="3" placeholder="例: 選択した文章を、専門用語を補足しながら具体例付きで説明してください。" required></textarea>` : ''}
+      <label for="${prefix}-model-${index}">モデル</label><select id="${prefix}-model-${index}" data-field="model" aria-describedby="${prefix}-model-description-${index}"></select><p id="${prefix}-model-description-${index}" class="hint"></p>
+      <div data-field="hf-field" hidden><div data-field="hf-id"><label for="${prefix}-hf-model-${index}">HFのモデルID</label><input id="${prefix}-hf-model-${index}" data-field="hf-model" type="text" placeholder="組織/モデル:プロバイダー" autocomplete="off" spellcheck="false"></div>
+        <div class="preset-fields"><div><label for="${prefix}-input-price-${index}">入力単価（USD／100万トークン）</label><input id="${prefix}-input-price-${index}" data-field="input-price" type="number" min="0" step="any"></div><div><label for="${prefix}-output-price-${index}">出力単価（USD／100万トークン）</label><input id="${prefix}-output-price-${index}" data-field="output-price" type="number" min="0" step="any"></div></div>
         <div class="hf-check"><button type="button" class="secondary" data-action="check">利用可否を確認</button><p data-field="hf-check" class="hint" aria-live="polite"></p></div>
       </div>
-      <div class="preset-fields"><div><label for="preset-effort-${index}">推論強度</label><select id="preset-effort-${index}" data-field="effort"></select></div><div><label for="preset-mode-${index}">権限</label><select id="preset-mode-${index}" data-field="mode" aria-describedby="preset-permission-description-${index}"></select></div></div><p id="preset-permission-description-${index}" class="hint"></p>`;
+      <div class="preset-fields"><div><label for="${prefix}-effort-${index}">推論強度</label><select id="${prefix}-effort-${index}" data-field="effort"></select></div><div><label for="${prefix}-mode-${index}">権限</label><select id="${prefix}-mode-${index}" data-field="mode" aria-describedby="${prefix}-permission-description-${index}"></select></div></div><p id="${prefix}-permission-description-${index}" class="hint"></p>`;
+    if (questions) {
+      const question = questionPresets[index]!;
+      const name = card.querySelector<HTMLInputElement>(`#question-name-${index}`)!;
+      const prompt = card.querySelector<HTMLTextAreaElement>(`#question-prompt-${index}`)!;
+      name.value = question.name; prompt.value = question.prompt;
+      name.addEventListener('input', () => { question.name = name.value; changed(); });
+      prompt.addEventListener('input', () => { question.prompt = prompt.value; changed(); });
+    }
     const model = card.querySelector<HTMLSelectElement>('[data-field=model]')!;
     const hfModel = card.querySelector<HTMLInputElement>('[data-field=hf-model]')!;
     const hfField = card.querySelector<HTMLElement>('[data-field=hf-field]')!;
@@ -123,12 +146,12 @@ function renderPresets(): void {
     card.querySelector<HTMLButtonElement>('[data-action=check]')!.addEventListener('click', () => checkModel(preset.model, 'task'));
     const permissions = card.querySelector<HTMLSelectElement>('[data-field=mode]')!;
     const describeModel = (): void => {
-      card.querySelector(`#preset-model-description-${index}`)!.textContent = preset.model === 'latest'
+      card.querySelector(`#${prefix}-model-description-${index}`)!.textContent = preset.model === 'latest'
         ? '利用可能な最新の推奨モデルを自動選択します。'
         : selectedModel(models, preset.model)?.description ?? 'このモデルは現在の候補にありません。別のモデルを選択してください。';
     };
     const describePermissions = (): void => {
-      card.querySelector(`#preset-permission-description-${index}`)!.textContent = presetPermissionOptions.find(option => option.id === preset.mode)?.description ?? '';
+      card.querySelector(`#${prefix}-permission-description-${index}`)!.textContent = presetPermissionOptions.find(option => option.id === preset.mode)?.description ?? '';
     };
     options(model, modelOptions(), isHuggingFaceModel(preset.model) ? 'huggingface' : preset.model);
     hfModel.value = isHuggingFaceModel(preset.model) ? preset.model.slice(HF_MODEL_PREFIX.length) : '';
@@ -160,18 +183,20 @@ function renderPresets(): void {
     permissions.addEventListener('change', () => { preset.mode = permissions.value as ExecutionMode; describePermissions(); changed(); });
     for (const action of ['up', 'down', 'remove'] as const) {
       const button = card.querySelector<HTMLButtonElement>(`[data-action=${action}]`)!;
-      button.disabled = action === 'up' ? index === 0 : action === 'down' ? index === presets.length - 1 : presets.length === 1;
+      button.disabled = action === 'up' ? index === 0 : action === 'down' ? index === rows.length - 1 : !questions && rows.length === 1;
       button.addEventListener('click', () => {
         let target = index;
         if (action === 'remove') {
-          if (presets.length === 1) return;
-          presets.splice(index, 1); target = Math.min(index, presets.length - 1);
+          if (!questions && rows.length === 1) return;
+          rows.splice(index, 1); target = Math.min(index, rows.length - 1);
         } else {
           target = index + (action === 'up' ? -1 : 1);
-          if (!presets[target]) return;
-          [presets[index], presets[target]] = [presets[target]!, preset];
+          if (!rows[target]) return;
+          if (questions) [questionPresets[index], questionPresets[target]] = [questionPresets[target]!, questionPresets[index]!];
+          else [presets[index], presets[target]] = [presets[target]!, preset];
         }
-        renderPresets(); changed(); $(`preset-model-${target}`).focus();
+        renderPresets(); changed();
+        (document.getElementById(`${prefix}-model-${target}`) ?? $(`add-${prefix}`)).focus();
       });
     }
     return card;
@@ -207,6 +232,7 @@ window.addEventListener('message', event => {
   providerEditor.load(readProviders(message.providers));
   models = [...nativeModels, ...providerModels(providerEditor.value)];
   presets = readPresets(message.presets);
+  questionPresets = readQuestionPresets(message.questionPresets);
   titleModelId = readTitleModel(message.titleModel);
   options(titleModel, modelOptions(), isHuggingFaceModel(titleModelId) ? 'huggingface' : titleModelId);
   titleHfModel.value = isHuggingFaceModel(titleModelId) ? titleModelId.slice(HF_MODEL_PREFIX.length) : '';
@@ -245,12 +271,16 @@ $('add-preset').addEventListener('click', () => {
   presets.push({ ...DEFAULT_PRESET, effort: compatibleEffort(DEFAULT_PRESET.effort, latestModel(models)) });
   renderPresets(); changed(); $(`preset-model-${presets.length - 1}`).focus();
 });
+$('add-question-preset').addEventListener('click', () => {
+  questionPresets.push({ id: crypto.randomUUID(), name: '', prompt: '', settings: { ...DEFAULT_PRESET, effort: compatibleEffort(DEFAULT_PRESET.effort, latestModel(models)) } });
+  renderPresets(); changed(); $(`question-name-${questionPresets.length - 1}`).focus();
+});
 $('settings-form').addEventListener('submit', event => {
   event.preventDefault();
   if ($<HTMLButtonElement>('save').disabled) return;
   setBusy(true); status('保存中…');
   $('cancel-check').hidden = true;
-  vscode.postMessage({ type: 'saveSettings', scope: scope.value, presets, titleModel: titleModelId, titleEffort: titleEffort.value,
+  vscode.postMessage({ type: 'saveSettings', scope: scope.value, presets, questionPresets, titleModel: titleModelId, titleEffort: titleEffort.value,
     titlePricing: isExternalModel(titleModelId) ? price(titleInputPrice, titleOutputPrice) : undefined, providers: providerEditor.value, requestId: ++requestId });
 });
 $('add-provider').addEventListener('click', () => providerEditor.add());

@@ -5,6 +5,7 @@ import { TaskManager } from '../core/taskManager';
 import { readPresets, taskPresets } from '../core/settings';
 import { withHuggingFaceModels } from '../core/huggingFace';
 import { chatHtml } from './html';
+import { readQuestionPresets } from '../core/questionPresets';
 
 function taskIcon(uri: vscode.Uri, status: TaskStatus): { light: vscode.Uri; dark: vscode.Uri } {
   return {
@@ -90,6 +91,7 @@ export class TaskPanels implements vscode.WebviewPanelSerializer, vscode.Disposa
         task.error = messageOf(error);
         this.update(task.id);
         this.host.report(error);
+        if (message.type === 'selectionAction') void webview.postMessage({ type: 'selectionResult', requestId: message.requestId });
         void webview.postMessage({ type: 'failure', ...(message.type === 'answer' ? { requestId: string(message.requestId) } : {}),
           ...(message.type === 'send' ? { sendId: string(message.sendId) } : {}) });
       }
@@ -131,6 +133,7 @@ export class TaskPanels implements vscode.WebviewPanelSerializer, vscode.Disposa
     const config = vscode.workspace.getConfiguration('codexDeck', vscode.Uri.file(task.cwd));
     const models = withHuggingFaceModels(this.host.models, [...readPresets(config.get('presets')).map(preset => preset.model), task.settings.model, task.effectiveModel]);
     void panel.webview.postMessage({ type: 'state', task, models, connected: this.manager.gateway.connected,
+      questionPresets: readQuestionPresets(config.get('questionPresets')).map(({ id, name }) => ({ id, name })),
       usage: this.manager.usage, presetCount: taskPresets(task, readPresets(config.get('presets'))).length, enterBehavior: config.get<string>('composerEnterBehavior', 'modEnter') });
   }
   private html(webview: vscode.Webview): string {

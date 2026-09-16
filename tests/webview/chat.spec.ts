@@ -75,7 +75,7 @@ test('HF task cost replaces quota gauges, updates live, and stays visible after 
 const theme = `:root{--vscode-editor-background:#181a1e;--vscode-foreground:#e0e3e9;--vscode-descriptionForeground:#a0a7b3;--vscode-widget-border:#353940;--vscode-input-background:#22252b;--vscode-input-foreground:#e0e3e9;--vscode-input-placeholderForeground:#979faa;--vscode-button-background:#b6d8b1;--vscode-button-foreground:#193019;--vscode-button-hoverBackground:#c9e8c5;--vscode-button-secondaryBackground:#353941;--vscode-button-secondaryForeground:#e0e3e9;--vscode-focusBorder:#8eaf8a;--vscode-font-family:system-ui,sans-serif;--vscode-font-size:13px;--vscode-editor-font-family:monospace;--vscode-editor-font-size:12px;--vscode-textCodeBlock-background:#121417;--vscode-textLink-foreground:#a9c6ea;--vscode-progressBar-background:#b6d8b1;--vscode-editorWarning-foreground:#e2bd79;--vscode-errorForeground:#f5a59e;--vscode-inputValidation-warningBackground:#302b20;--vscode-editorWidget-background:#22252b;--vscode-dropdown-background:#22252b;--vscode-dropdown-foreground:#e0e3e9;}`;
 const models = [{ id: 'catalog-model', label: 'Catalog model', efforts: [{ id: 'new-effort', description: 'from server' }, { id: 'high', description: 'high' }], description: '', defaultEffort: 'new-effort', isDefault: true, inputModalities: ['text', 'image'] }];
 function task(): Task { return { id: 'task-1', threadId: 'thread-1', title: 'App Serverとの通信を実装する', cwd: '/workspace/codex-deck', open: true, autoResume: false, claims: [], settings: { mode: 'default' }, status: 'idle', turns: [], requests: [], attachments: [], busy: false, hydrated: true, instructionSources: [] }; }
-async function state(page: Page, value: Task, usage?: Usage, connected = true, presetCount = 1) { await page.evaluate(data => window.dispatchEvent(new MessageEvent('message', { data })), { type: 'state', task: value, models: withHuggingFaceModels(models, [value.settings.model]), usage, connected, presetCount, enterBehavior: 'enter' }); }
+async function state(page: Page, value: Task, usage?: Usage, connected = true, presetCount = 1, questionPresets: { id: string; name: string }[] = []) { await page.evaluate(data => window.dispatchEvent(new MessageEvent('message', { data })), { type: 'state', task: value, models: withHuggingFaceModels(models, [value.settings.model]), usage, connected, presetCount, questionPresets, enterBehavior: 'enter' }); }
 async function messages(page: Page) { return page.evaluate(() => (window as unknown as { sent: Record<string, unknown>[] }).sent); }
 async function receive(page: Page, data: Record<string, unknown>) { await page.evaluate(data => window.dispatchEvent(new MessageEvent('message', { data })), data); }
 async function sendResult(page: Page, type: 'sent' | 'failure') {
@@ -144,28 +144,12 @@ test.beforeEach(async ({ page }) => {
   await expect.poll(async () => (await messages(page)).some(message => message.type === 'ready')).toBe(true);
 });
 
-async function selectionMenuContext(page: Page, selector: string, point?: { x: number; y: number }) {
-  await page.evaluate(() => {
-    // VS Code reads the clicked element's inherited context in the window's
-    // bubbling listener and passes it to the contributed menu command.
-    window.addEventListener('contextmenu', event => {
-      let element = event.target as HTMLElement | null;
-      let context = {};
-      while (element) {
-        element = element.closest<HTMLElement>('[data-vscode-context]');
-        if (!element) break;
-        context = { ...JSON.parse(element.dataset.vscodeContext!), ...context };
-        element = element.parentElement;
-      }
-      document.body.dataset.menuContext = JSON.stringify(context);
-    }, { once: true });
-  });
+async function openSelectionMenu(page: Page, selector: string, point?: { x: number; y: number }) {
   if (point) await page.mouse.click(point.x, point.y, { button: 'right' });
   else await page.locator(selector).click({ button: 'right' });
-  return JSON.parse((await page.locator('body').getAttribute('data-menu-context'))!) as Record<string, unknown>;
 }
 
-test('dragging an answer exposes a native selection mention and appends a quote followed by a comment', async ({ page }, info) => {
+test('dragging an answer exposes a selection menu and appends a quote followed by a comment', async ({ page }, info) => {
   const value = task();
   value.turns = [{ id: 'answer', status: 'completed', items: [{ id: 'reply', kind: 'agentMessage', data: { text: '前の説明。選択した文章です。後の説明。' } }] }];
   await state(page, value);
@@ -185,9 +169,13 @@ test('dragging an answer exposes a native selection mention and appends a quote 
   await page.mouse.move(bounds.right, bounds.y, { steps: 12 });
   await page.mouse.up();
   expect(await page.evaluate(() => window.getSelection()?.toString())).toBe('選択した文章です。');
-  const context = await selectionMenuContext(page, '.assistant .markdown p', { x: (bounds.left + bounds.right) / 2, y: bounds.y });
-  expect(context).toEqual({ codexDeckHasSelection: true, codexDeckTaskId: value.id, codexDeckSelectionText: '選択した文章です。' });
-  await receive(page, { type: 'insertReference', text: selectionReference(context.codexDeckSelectionText as string, `会話「${value.title}」`) });
+  await openSelectionMenu(page, '.assistant .markdown p', { x: (bounds.left + bounds.right) / 2, y: bounds.y });
+  await expect(page.getByRole('menuitem')).toHaveText(['コピー', 'Codex-Deckで言及']);
+  await page.getByRole('menuitem', { name: 'Codex-Deckで言及' }).click();
+  const context = (await messages(page)).findLast(message => message.type === 'selectionAction')!;
+  expect(context).toMatchObject({ action: 'mention', text: '選択した文章です。' });
+  await receive(page, { type: 'selectionResult', requestId: context.requestId });
+  await receive(page, { type: 'insertReference', text: selectionReference(context.text as string, `会話「${value.title}」`) });
   const quoted = `入力中の下書き\n\n> 参照元: 会話「${value.title}」\n>\n> 選択した文章です。\n\n`;
   await expect(prompt).toHaveValue(quoted);
   await expect(prompt).toBeFocused();
@@ -214,28 +202,33 @@ test('selection mentions preserve multiline code during streaming and hide outsi
   value.activeTurnId = 'streaming'; value.status = 'running';
   value.turns = [{ id: 'streaming', status: 'inProgress', items: [{ id: 'reply', kind: 'agentMessage', data: { text: '```ts\nconst x = 1;\n  run(x);\n```' } }] }];
   await state(page, value);
-  expect(await selectionMenuContext(page, '.assistant .markdown code')).toEqual({ codexDeckHasSelection: false });
+  await openSelectionMenu(page, '.assistant .markdown code');
+  await expect(page.getByRole('menu')).toBeHidden();
   await page.locator('.assistant .markdown code').evaluate(element => {
     const text = element.firstChild!;
     window.getSelection()!.setBaseAndExtent(text, text.textContent!.length, text, 0);
   });
-  const context = await selectionMenuContext(page, '.assistant .markdown code');
-  expect(context.codexDeckSelectionText).toBe('const x = 1;\n  run(x);');
+  await openSelectionMenu(page, '.assistant .markdown code');
+  await expect(page.getByRole('menu')).toBeVisible();
+  const context = { text: 'const x = 1;\n  run(x);' };
   value.turns[0]!.items[0]!.data.text += '\n\n追加された説明';
   value.turns[0]!.status = 'completed'; value.activeTurnId = undefined; value.status = 'idle';
   value.unreadTurnId = 'streaming';
   await state(page, value);
-  expect(await page.evaluate(() => window.getSelection()?.toString())).toBe(context.codexDeckSelectionText);
+  expect(await page.evaluate(() => window.getSelection()?.toString())).toBe(context.text);
   await expect(page.locator('.assistant .markdown')).not.toContainText('追加された説明');
   expect((await messages(page)).filter(message => message.type === 'read')).toEqual([]);
-  await receive(page, { type: 'insertReference', text: selectionReference(context.codexDeckSelectionText as string, `会話「${value.title}」`) });
+  await page.getByRole('menuitem', { name: 'Codex-Deckで言及' }).click();
+  await receive(page, { type: 'insertReference', text: selectionReference(context.text as string, `会話「${value.title}」`) });
   await expect(page.locator('.assistant .markdown')).toContainText('追加された説明');
   expect((await messages(page)).filter(message => message.type === 'read')).toEqual([{ type: 'read', turnId: 'streaming' }]);
   await expect(page.locator('#prompt')).toHaveValue(`> 参照元: 会話「${value.title}」\n>\n> const x = 1;\n>   run(x);\n\n`);
   await page.locator('#prompt').selectText();
-  expect(await selectionMenuContext(page, '#prompt')).toEqual({});
+  await openSelectionMenu(page, '#prompt');
+  await expect(page.getByRole('menu')).toBeHidden();
   await page.evaluate(() => window.getSelection()?.removeAllRanges());
-  expect(await selectionMenuContext(page, '.assistant .markdown code')).toEqual({ codexDeckHasSelection: false });
+  await openSelectionMenu(page, '.assistant .markdown code');
+  await expect(page.getByRole('menu')).toBeHidden();
 });
 
 test('editor references can be added repeatedly while preserving an existing draft and exact selected text', async ({ page }) => {
@@ -1496,4 +1489,81 @@ test('MCP requests can be declined without filling required fields; split views 
   expect((await messages(page)).at(-1)).toMatchObject({ type: 'answer', answer: { choice: 1 } });
   expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
   await page.screenshot({ path: info.outputPath('split-view.png') });
+});
+
+test('selection menu lists questions in order, preserves the selected text, and dispatches only once', async ({ page }, info) => {
+  await page.setViewportSize({ width: 340, height: 500 });
+  const value = task();
+  value.turns = [{ id: 'answer', status: 'completed', items: [{ id: 'reply', kind: 'agentMessage', data: { text: '選択する説明です。' } }] }];
+  const questions = [{ id: 'example', name: '具体例で' }, { id: 'simple', name: 'かみ砕いて' }];
+  await state(page, value, undefined, true, 1, questions);
+  await page.locator('#prompt').fill('元の下書き');
+  await page.locator('.assistant .markdown p').selectText();
+  await openSelectionMenu(page, '.assistant .markdown p');
+  await expect(page.getByRole('menuitem')).toHaveText(['コピー', 'Codex-Deckで言及', '具体例で', 'かみ砕いて']);
+  await expect(page.getByRole('menuitem', { name: '質問プリセットを設定' })).toHaveCount(0);
+  // Selection may disappear while the menu has keyboard focus; actions still use the snapshot.
+  await page.evaluate(() => window.getSelection()?.removeAllRanges());
+  await page.getByRole('menuitem', { name: '具体例で' }).evaluate(element => { (element as HTMLButtonElement).click(); (element as HTMLButtonElement).click(); });
+  const actions = (await messages(page)).filter(message => message.type === 'selectionAction');
+  expect(actions).toHaveLength(1);
+  expect(actions[0]).toMatchObject({ action: 'question', questionPresetId: 'example', text: '選択する説明です。' });
+  await expect(page.locator('#prompt')).toHaveValue('元の下書き');
+  expect((await messages(page)).some(message => message.type === 'send')).toBe(false);
+  await receive(page, { type: 'selectionResult', requestId: actions[0]!.requestId });
+  await state(page, value, undefined, true, 1, [...questions].reverse());
+  await page.locator('.assistant .markdown p').selectText();
+  await page.locator('.assistant .markdown p').dispatchEvent('contextmenu', { clientX: 339, clientY: 499 });
+  await expect(page.getByRole('menuitem')).toHaveText(['コピー', 'Codex-Deckで言及', 'かみ砕いて', '具体例で']);
+  const box = await page.getByRole('menu').boundingBox();
+  expect(box!.x).toBeGreaterThanOrEqual(0); expect(box!.y).toBeGreaterThanOrEqual(0);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(340); expect(box!.y + box!.height).toBeLessThanOrEqual(500);
+  await page.screenshot({ path: info.outputPath('question-selection-menu.png'), fullPage: true });
+  await page.keyboard.press('Escape'); await expect(page.getByRole('menu')).toBeHidden();
+  await page.locator('.assistant .markdown p').selectText();
+  await page.locator('#conversation').focus();
+  await page.keyboard.press('Shift+F10'); await expect(page.getByRole('menu')).toBeVisible();
+  await page.keyboard.press('End');
+  await expect(page.getByRole('menuitem', { name: '具体例で' })).toBeFocused();
+  await page.keyboard.press('ArrowUp');
+  await expect(page.getByRole('menuitem', { name: 'かみ砕いて' })).toBeFocused();
+  await page.keyboard.press('Enter');
+  expect((await messages(page)).filter(message => message.type === 'selectionAction').at(-1)).toMatchObject({ action: 'question', questionPresetId: 'simple' });
+});
+
+test('selection copy preserves code and a failed action allows another attempt', async ({ page }) => {
+  const value = task();
+  value.turns = [{ id: 'answer', status: 'completed', items: [{ id: 'reply', kind: 'agentMessage', data: { text: '```ts\n  const x = 1;\n\n  run(x);\n```' } }] }];
+  await state(page, value);
+  const code = page.locator('.assistant .markdown code');
+  await code.selectText(); await openSelectionMenu(page, '.assistant .markdown code');
+  await page.getByRole('menuitem', { name: 'コピー', exact: true }).click();
+  const request = (await messages(page)).findLast(message => message.type === 'selectionAction')!;
+  expect(request).toMatchObject({ action: 'copy', text: '  const x = 1;\n\n  run(x);' });
+  value.error = '処理に失敗しました';
+  await state(page, value); await receive(page, { type: 'selectionResult', requestId: request.requestId });
+  await code.selectText(); await openSelectionMenu(page, '.assistant .markdown code');
+  await expect(page.getByRole('menuitem', { name: 'コピー', exact: true })).toBeEnabled();
+  await page.locator('#prompt').click(); await expect(page.getByRole('menu')).toBeHidden();
+});
+
+for (const outcome of ['sent', 'failure', 'unknown'] as const) test(`an initial question sends once and preserves the existing ${outcome} recovery behavior`, async ({ page }) => {
+  const value = task(); value.threadId = undefined;
+  await state(page, value);
+  const initial = { type: 'initialQuestion', sendId: `initial-${outcome}`, text: '質問: 解説してください\n\n> 参照元: 会話「元の会話」\n>\n> 選択文\n\n元の会話: codex://threads/source' };
+  await receive(page, initial); await receive(page, initial);
+  expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(1);
+  expect((await messages(page)).findLast(message => message.type === 'send')).toMatchObject({ sendId: initial.sendId, text: initial.text, attachmentIds: [], skillPaths: [] });
+  await expect(page.locator('.pending-send .user-quote')).toContainText('選択文');
+  if (outcome !== 'unknown') await receive(page, { type: outcome, sendId: initial.sendId, text: initial.text });
+  await page.reload(); await state(page, value); await receive(page, initial);
+  expect((await messages(page)).filter(message => message.type === 'send')).toEqual([]);
+  if (outcome === 'failure') {
+    await expect(page.locator('#prompt')).toHaveValue(initial.text);
+    await page.locator('#prompt').press('Enter');
+    expect((await messages(page)).findLast(message => message.type === 'send')).toMatchObject({ text: initial.text });
+  } else {
+    await expect(page.locator('#prompt')).toHaveValue('');
+    await expect(page.locator('.pending-send')).toHaveCount(1);
+  }
 });

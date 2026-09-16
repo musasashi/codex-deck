@@ -267,13 +267,6 @@
           "group": "codexDeck"
         }
       ],
-      "webview/context": [
-        {
-          "command": "codexDeck.mentionSelection",
-          "when": "webviewId == codexDeck.task && codexDeckHasSelection",
-          "group": "codexDeck"
-        }
-      ],
       "explorer/context": [
         {
           "command": "codexDeck.addFile",
@@ -502,6 +495,108 @@
           ],
           "default": "modEnter",
           "description": "メッセージ送信のキー操作。enterはEnter、modEnterはCtrl+Enterで送信します。Shift+Enterは改行します。"
+        },
+        "codexDeck.questionPresets": {
+          "type": "array",
+          "default": [],
+          "scope": "resource",
+          "description": "選択した文章について新規タスクで質問するプリセット。Codex Deck設定画面で質問文・モデル・推論強度・権限を設定します。",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "name",
+              "prompt",
+              "settings"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "質問プリセットを識別する固定ID"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "description": "右クリックメニューに表示する名前"
+              },
+              "prompt": {
+                "type": "string",
+                "minLength": 1,
+                "description": "選択した文章への質問文"
+              },
+              "settings": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "model",
+                  "effort",
+                  "mode"
+                ],
+                "properties": {
+                  "model": {
+                    "type": "string",
+                    "minLength": 1,
+                    "default": "latest",
+                    "markdownDescription": "モデルID。`latest`は推奨モデルを自動選択します。HF経由は`hf:組織/モデル:プロバイダー`、登録したResponses APIは`responses:接続先ID:モデルID`を指定します。"
+                  },
+                  "effort": {
+                    "type": "string",
+                    "minLength": 1,
+                    "default": "high",
+                    "markdownDescription": "推論強度。`default`はモデルの既定値を使用します。"
+                  },
+                  "pricing": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "input",
+                      "output"
+                    ],
+                    "description": "外部APIの入力・出力単価（USD／100万トークン・任意）。タスクの利用額の概算に使用します。",
+                    "properties": {
+                      "input": {
+                        "type": "number",
+                        "minimum": 0,
+                        "description": "入力単価（USD／100万トークン）"
+                      },
+                      "output": {
+                        "type": "number",
+                        "minimum": 0,
+                        "description": "出力単価（USD／100万トークン）"
+                      }
+                    }
+                  },
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "auto-review",
+                      "workspace-write",
+                      "danger-full-access",
+                      "read-only",
+                      "default"
+                    ],
+                    "enumItemLabels": [
+                      "Approve for me",
+                      "Ask for approval",
+                      "Full Access",
+                      "Read Only",
+                      "Codex設定を引き継ぐ"
+                    ],
+                    "enumDescriptions": [
+                      "承認が必要な操作を自動レビューします。",
+                      "ワークスペース外の編集やインターネットへのアクセスを承認します。",
+                      "サンドボックスと承認確認を使用しません。",
+                      "読み取り専用で実行します。",
+                      "Codexの権限設定を引き継ぎます。"
+                    ],
+                    "default": "auto-review"
+                  }
+                }
+              }
+            }
+          }
         }
       }
     }

@@ -12,6 +12,7 @@ import { TaskManager, readTaskRecords } from './core/taskManager';
 import { messageMarkdown, taskMarkdown } from './core/taskCopy';
 import { linkedThreadId, taskDeepLink } from './core/taskReferences';
 import { selectionReference } from './core/selectionReference';
+import { questionPresetMessage, readQuestionPresets, validateQuestionPreset } from './core/questionPresets';
 import { IMAGE_FORMAT_ERROR, isImageDataUrl, MAX_ATTACHMENT_BYTES } from './core/attachments';
 import { configPermissionMode, parseSlashCommand, permissionOptions, permissionPresets, resolveSkillMentions, slashCommands } from './core/composer';
 import { workingDiff } from './core/gitDiff';
@@ -53,6 +54,7 @@ class DeckExtension implements PanelHost {
   private stopping = false;
   private virtualDocuments = new Map<string, string>();
   private presetSelections = new WeakMap<Task, { signature: string; index: number }>();
+  private questionStarts = new WeakMap<Task, { requestId: string; promise: Promise<void> }>();
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.manager = new TaskManager(this.client, { save: async records => { await context.workspaceState.update(STORAGE_KEY, { version: 1, tasks: records }); } }, readTaskRecords(context.workspaceState.get(STORAGE_KEY)), {
@@ -230,6 +232,23 @@ class DeckExtension implements PanelHost {
   }
   async command(task: Task, message: JsonObject): Promise<JsonObject | void> {
     switch (message.type) {
+      case 'selectionAction': {
+        const text = string(message.text), requestId = string(message.requestId);
+        if (!requestId || !text.trim()) throw new Error('操作する文章を範囲選択してください。');
+        if (text.length > 2 * 1024 * 1024) throw new Error('メッセージが大きすぎます。');
+        if (message.action === 'copy') await vscode.env.clipboard.writeText(text);
+        else if (message.action === 'mention') await this.mentionSelection({ codexDeckTaskId: task.id, codexDeckSelectionText: text });
+        else if (message.action === 'question') {
+          const previous = this.questionStarts.get(task);
+          if (previous?.requestId === requestId) await previous.promise;
+          else {
+            const promise = this.startQuestion(task, string(message.questionPresetId), text);
+            this.questionStarts.set(task, { requestId, promise });
+            await promise;
+          }
+        } else throw new Error('選択範囲の操作が不正です。');
+        return { type: 'selectionResult', requestId };
+      }
       case 'copyCode':
         await vscode.env.clipboard.writeText(string(message.text));
         return { type: 'codeCopied', requestId: message.requestId };
@@ -397,6 +416,19 @@ class DeckExtension implements PanelHost {
     const task = await this.task();
     this.panels.open(task);
     this.panels.message(task.id, { type: 'insertReference', text: selectionReference(text, source) });
+  }
+  private async startQuestion(source: Task, presetId: string, selectedText: string): Promise<void> {
+    const link = taskDeepLink(source);
+    const config = vscode.workspace.getConfiguration('codexDeck', vscode.Uri.file(source.cwd));
+    const matches = readQuestionPresets(config.get('questionPresets')).filter(preset => preset.id === presetId);
+    if (matches.length !== 1) throw new Error('質問プリセットが見つからないか、IDが重複しています。設定を確認してください。');
+    await this.connect();
+    const models = isHuggingFaceModel(matches[0]!.settings.model) ? [] : await this.client.listModels();
+    const preset = validateQuestionPreset(matches[0]!, models);
+    const text = questionPresetMessage(preset, selectedText, { title: source.title, link });
+    const task = this.manager.create(source.cwd, resolveRunSettings(preset.settings, models));
+    this.panels.open(task);
+    this.panels.message(task.id, { type: 'initialQuestion', sendId: randomUUID(), text });
   }
   private async signIn(): Promise<void> {
     await this.connect();

@@ -15,19 +15,19 @@ async function snapshot(page: Page, extra: Record<string, unknown> = {}) {
 }
 
 test.beforeEach(async ({ page }) => {
-  const html = settingsHtml({ cspSource: 'http://deck.test', script: 'http://deck.test/settings.js', css: 'http://deck.test/settings.css', nonce: 'test-nonce' });
+  const html = settingsHtml({ cspSource: 'http://localhost', script: 'http://localhost/settings.js', css: 'http://localhost/settings.css', nonce: 'test-nonce' });
   await page.addInitScript(() => {
     const state = window as unknown as { sent: unknown[]; acquireVsCodeApi: () => unknown };
     state.sent = [];
     state.acquireVsCodeApi = () => ({ postMessage: (value: unknown) => state.sent.push(value), setState: () => {}, getState: () => ({}) });
   });
-  await page.route('http://deck.test/**', async route => {
+  await page.route('http://localhost/**', async route => {
     const url = route.request().url();
     if (url.endsWith('settings.js')) await route.fulfill({ contentType: 'text/javascript', body: await readFile('dist/settings.js', 'utf8') });
     else if (url.endsWith('settings.css')) await route.fulfill({ contentType: 'text/css', body: await readFile('media/settings.css', 'utf8') });
     else await route.fulfill({ contentType: 'text/html', body: html });
   });
-  await page.goto('http://deck.test/');
+  await page.goto('http://localhost/');
   await expect.poll(async () => (await messages(page)).at(-1)?.type).toBe('loadSettings');
 });
 
@@ -49,12 +49,12 @@ test('the first preset supplies defaults and uses live dropdowns without saving 
 test('presets can be added, edited, reordered and deleted before saving the complete list', async ({ page }, info) => {
   await snapshot(page);
   await page.getByLabel('保存先').selectOption('workspace'); await snapshot(page);
-  await page.getByRole('button', { name: 'プリセットを追加' }).click();
+  await page.getByRole('button', { name: 'プリセットを追加', exact: true }).click();
   const second = page.getByRole('group', { name: 'プリセット2', exact: true });
   await second.getByLabel('モデル', { exact: true }).selectOption('specialized');
   await expect(second.getByLabel('推論強度', { exact: true })).toHaveValue('future-effort');
   await second.getByLabel('権限').selectOption('read-only');
-  await page.getByRole('button', { name: 'プリセットを追加' }).click();
+  await page.getByRole('button', { name: 'プリセットを追加', exact: true }).click();
   await page.getByRole('group', { name: 'プリセット3', exact: true }).getByLabel('権限').selectOption('danger-full-access');
   await page.getByRole('button', { name: 'プリセット2を上へ' }).click();
   await expect(page.locator('#preset-model-0')).toHaveValue('specialized');
@@ -65,7 +65,7 @@ test('presets can be added, edited, reordered and deleted before saving the comp
   await page.getByRole('button', { name: '保存', exact: true }).click();
   const presets = [{ model: 'specialized', effort: 'future-effort', mode: 'read-only' }, initialPreset];
   expect((await messages(page)).at(-1)).toMatchObject({ type: 'saveSettings', scope: 'workspace', presets });
-  await expect(page.getByRole('button', { name: 'プリセットを追加' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'プリセットを追加', exact: true })).toBeDisabled();
   await snapshot(page, { saved: true, presets });
   await page.setViewportSize({ width: 380, height: 800 });
   expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
@@ -80,7 +80,7 @@ test('presets can be added, edited, reordered and deleted before saving the comp
 test('preset drafts survive save failures and unavailable models must be repaired or removed', async ({ page }) => {
   await snapshot(page, { presets: [initialPreset, { model: 'missing', effort: 'high', mode: 'workspace-write' }] });
   await expect(page.locator('#preset-model-1 option:checked')).toContainText('候補にありません');
-  await page.getByRole('button', { name: 'プリセットを追加' }).click();
+  await page.getByRole('button', { name: 'プリセットを追加', exact: true }).click();
   await expect(page.getByRole('button', { name: '保存', exact: true })).toBeDisabled();
   await page.getByRole('button', { name: 'プリセット2を削除' }).click();
   await page.locator('#preset-mode-1').selectOption('read-only');
@@ -369,4 +369,71 @@ test('provider changes invalidate old checks and missing models cannot be saved'
   await page.getByLabel('APIのモデルID', { exact: true }).fill('different');
   await expect(page.getByRole('button', { name: '保存', exact: true })).toBeDisabled();
   await expect(page.locator('#preset-model-0 option:checked')).toContainText('候補にありません');
+});
+
+test('question presets have independent model settings, reorder by identity, and keep drafts on failure', async ({ page }, info) => {
+  await snapshot(page);
+  await page.getByLabel('保存先').selectOption('workspace'); await snapshot(page);
+  const save = page.getByRole('button', { name: '保存', exact: true });
+  await page.getByRole('button', { name: '質問プリセットを追加', exact: true }).click();
+  const first = page.getByRole('group', { name: '質問プリセット1', exact: true });
+  await expect(first.getByLabel('表示名')).toBeFocused();
+  await expect(save).toBeDisabled();
+  await first.getByLabel('表示名').fill('かみ砕いて');
+  await first.getByLabel('質問文').fill('具体例を交えて\n説明してください。');
+  await first.getByLabel('モデル', { exact: true }).selectOption('specialized');
+  await first.getByLabel('権限', { exact: true }).selectOption('read-only');
+  await expect(first.getByLabel('推論強度', { exact: true })).toHaveValue('future-effort');
+  await page.getByRole('button', { name: '質問プリセットを追加', exact: true }).click();
+  const second = page.getByRole('group', { name: '質問プリセット2', exact: true });
+  await second.getByLabel('表示名').fill('理解を確認');
+  await second.getByLabel('質問文').fill('この文章の前提を説明してください。');
+  await save.click();
+  const request = (await messages(page)).at(-1)!;
+  expect(request).toMatchObject({ type: 'saveSettings', scope: 'workspace', presets: [initialPreset], questionPresets: [
+    { name: 'かみ砕いて', prompt: '具体例を交えて\n説明してください。', settings: { model: 'specialized', effort: 'future-effort', mode: 'read-only' } },
+    { name: '理解を確認', settings: initialPreset },
+  ] });
+  const questions = request.questionPresets as { id: string; name: string; settings: unknown }[];
+  expect(questions[0]!.id).not.toBe(questions[1]!.id);
+  await receive(page, { type: 'settingsError', requestId: request.requestId, message: '保存に失敗しました' });
+  await expect(first.getByLabel('質問文')).toHaveValue('具体例を交えて\n説明してください。');
+  await page.getByRole('button', { name: '質問プリセット2を上へ', exact: true }).click();
+  await page.locator('#preset-model-0').selectOption('specialized');
+  await save.click();
+  expect((await messages(page)).at(-1)?.questionPresets).toEqual([questions[1], questions[0]]);
+  await snapshot(page, { saved: true, questionPresets: [questions[1], questions[0]] });
+  await page.setViewportSize({ width: 380, height: 850 });
+  expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
+  await page.locator('#question-presets').screenshot({ path: info.outputPath('question-presets.png') });
+  await page.getByRole('button', { name: '質問プリセット2を削除', exact: true }).click();
+  await page.getByRole('button', { name: '質問プリセット1を削除', exact: true }).click();
+  await expect(page.getByRole('button', { name: '質問プリセットを追加', exact: true })).toBeFocused();
+  await save.click();
+  expect((await messages(page)).at(-1)?.questionPresets).toEqual([]);
+});
+
+test('question models support external providers and prices and reject missing models', async ({ page }) => {
+  const providers = [{ id: 'local', name: 'Local', baseUrl: 'http://localhost/v1', models: [{ id: 'model', reasoningEfforts: ['low', 'high'] }] }];
+  await snapshot(page, { providers, questionPresets: [{ id: 'ask', name: '質問', prompt: '解説して', settings: { model: 'missing', effort: 'default', mode: 'read-only' } }] });
+  const question = page.getByRole('group', { name: '質問プリセット1', exact: true });
+  const save = page.getByRole('button', { name: '保存', exact: true });
+  await question.getByLabel('質問文').fill('説明してください');
+  await expect(save).toBeDisabled();
+  await question.getByLabel('モデル', { exact: true }).selectOption('huggingface');
+  await question.getByLabel('HFのモデルID', { exact: true }).fill('org/model:provider');
+  await question.getByLabel('入力単価（USD／100万トークン）', { exact: true }).fill('0.5');
+  await question.getByLabel('出力単価（USD／100万トークン）', { exact: true }).fill('1.5');
+  await save.click();
+  let request = (await messages(page)).at(-1)!;
+  expect(request).toMatchObject({ questionPresets: [{ settings: { model: 'hf:org/model:provider', effort: 'default', mode: 'read-only', pricing: { input: 0.5, output: 1.5 } } }] });
+  await snapshot(page, { providers, saved: true, questionPresets: request.questionPresets });
+  await question.getByLabel('モデル', { exact: true }).selectOption('responses:local:model');
+  await expect(question.getByLabel('推論強度', { exact: true }).locator('option')).toHaveText(['モデルの既定値', 'low', 'high']);
+  await question.getByLabel('推論強度', { exact: true }).selectOption('low');
+  await save.click();
+  request = (await messages(page)).at(-1)!;
+  expect(request).toMatchObject({ questionPresets: [{ settings: { model: 'responses:local:model', effort: 'low', mode: 'read-only' } }] });
+  expect((request.questionPresets as { settings: Record<string, unknown> }[])[0]!.settings.pricing).toBeUndefined();
+  expect((await messages(page)).some(message => message.type === 'checkProviderModel')).toBe(false);
 });

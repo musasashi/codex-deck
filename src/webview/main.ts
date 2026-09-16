@@ -6,7 +6,8 @@ import { latestModel, presetEffortOptions, selectedModel } from '../core/setting
 import { isExternalTask, sameTaskProvider } from '../core/providers';
 import { costLabel } from '../core/cost';
 import { Composer } from './composer';
-import { bindSelectionContext, selectedTranscriptText } from './selection';
+import { SelectionMenu, selectedTranscriptText } from './selection';
+import type { QuestionPresetMenuItem } from '../core/questionPresets';
 import { UsageGauges } from './usage';
 import { Requests } from './requests';
 import { pendingSubmission, reconcilePendingSends, submissionContent, type PendingSend, type Submission } from './submissions';
@@ -20,6 +21,7 @@ let connected = false;
 let usage: Usage | undefined;
 let models: Model[] = [];
 let presetCount = 0;
+let questionPresets: QuestionPresetMenuItem[] = [];
 let transcriptHtml = '';
 let copiedMessage: string | undefined;
 let copyTimer: ReturnType<typeof setTimeout> | undefined;
@@ -38,6 +40,7 @@ let draftTimer: ReturnType<typeof setTimeout> | undefined;
 let initialFocus = true;
 const prompt = $<HTMLTextAreaElement>('prompt');
 const saved = object(vscode.getState());
+let initialQuestionId = string(saved.initialQuestionId);
 let dismissedNotice = string(saved.dismissedNotice);
 prompt.value = string(saved.draft);
 for (const savedSend of array(saved.pendingSends).map(object)) {
@@ -51,7 +54,7 @@ for (const savedSend of array(saved.pendingSends).map(object)) {
 const completion = new Composer(prompt, $('completions'), $('skills'), post, saveDraft, renderPermissions, array(saved.skillPaths).filter((value): value is string => typeof value === 'string'));
 const usageGauges = new UsageGauges($('usage-gauges'));
 const requests = new Requests($('requests'), post);
-bindSelectionContext($('transcript'), () => task?.id);
+const selectionMenu = new SelectionMenu($('transcript'), () => ({ taskId: task?.id, hasThread: !!task?.threadId, presets: questionPresets }), post, () => render());
 let selectingTranscript = false;
 document.addEventListener('selectionchange', () => {
   const selected = !!selectedTranscriptText($('transcript'));
@@ -61,7 +64,7 @@ document.addEventListener('selectionchange', () => {
 });
 
 function saveDraft(): void {
-  if (task) vscode.setState({ taskId: task.id, draft: prompt.value, skillPaths: completion.skillPaths(), pendingSends, dismissedNotice });
+  if (task) vscode.setState({ taskId: task.id, draft: prompt.value, skillPaths: completion.skillPaths(), pendingSends, dismissedNotice, initialQuestionId });
 }
 function updateSendButton(): void {
   $<HTMLButtonElement>('send').disabled = !!sending || !!task?.busy || pendingPastes.size > 0;
@@ -200,7 +203,7 @@ function render(): void {
   const conversation = $('conversation');
   const atBottom = conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight < 80;
   const transcript = $('transcript');
-  const selected = !!selectedTranscriptText(transcript);
+  const selected = selectionMenu.opened || !!selectedTranscriptText(transcript);
   const html = renderTranscript(task) + pendingSends.map(renderPendingSend).join('');
   if (transcriptHtml !== html && !selected) {
     const detailStates = new Map([...transcript.querySelectorAll<HTMLDetailsElement>('details[data-item]')].map(details => [
@@ -261,12 +264,22 @@ window.addEventListener('message', event => {
     task = message.task as Task;
     models = message.models as Model[];
     presetCount = typeof message.presetCount === 'number' ? message.presetCount : 0;
+    questionPresets = array(message.questionPresets).map(value => ({ id: string(object(value).id), name: string(object(value).name) }));
+    selectionMenu.refresh();
     enterBehavior = string(message.enterBehavior, 'modEnter');
     connected = message.connected === true;
     usage = message.usage as Usage | undefined;
     render();
     if (initialFocus && !task.threadId) prompt.focus();
     initialFocus = false;
+  } else if (message.type === 'selectionResult') {
+    selectionMenu.finished(string(message.requestId));
+  } else if (message.type === 'initialQuestion') {
+    const id = string(message.sendId), text = string(message.text);
+    if (!task || !id || id === initialQuestionId || task.threadId || sending || pendingSends.length) return;
+    initialQuestionId = id;
+    completion.restore(text, []);
+    sendSubmission({ id, text, skillPaths: [], attachments: [], optimistic: true }, true);
   } else if (message.type === 'messageCopied') {
     copiedMessage = JSON.stringify([message.turnId, message.itemId, 'copy']);
     clearTimeout(copyTimer);
