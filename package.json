@@ -7,7 +7,7 @@
   "publisher": "codex-deck",
   "private": true,
   "engines": {
-    "vscode": "^1.96.0",
+    "vscode": "^1.106.0",
     "node": ">=24.0.0"
   },
   "categories": [
@@ -19,6 +19,7 @@
     "workspace"
   ],
   "activationEvents": [
+    "onStartupFinished",
     "onWebviewPanel:codexDeck.task"
   ],
   "capabilities": {
@@ -204,6 +205,25 @@
           "group": "navigation@1"
         }
       ],
+      "editor/title/context": [
+        {
+          "submenu": "codexDeck.copyTask",
+          "when": "resourceScheme == webview-panel && resourceFilename =~ /^webview-codexDeck\\.task\\./",
+          "group": "1_copy"
+        },
+        {
+          "command": "codexDeck.renameTask",
+          "when": "resourceScheme == webview-panel && resourceFilename =~ /^webview-codexDeck\\.task\\./"
+        },
+        {
+          "command": "codexDeck.forkTask",
+          "when": "resourceScheme == webview-panel && resourceFilename =~ /^webview-codexDeck\\.task\\./"
+        },
+        {
+          "command": "codexDeck.archiveTask",
+          "when": "resourceScheme == webview-panel && resourceFilename =~ /^webview-codexDeck\\.task\\./"
+        }
+      ],
       "view/title": [
         {
           "command": "codexDeck.newTask",
@@ -283,7 +303,7 @@
       {
         "command": "codexDeck.cyclePreset",
         "key": "ctrl+tab",
-        "when": "activeWebviewPanelId == codexDeck.task"
+        "when": "activeWebviewPanelId =~ /^codexDeck\\.task\\./"
       }
     ],
     "configuration": {

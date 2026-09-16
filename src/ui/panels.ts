@@ -14,6 +14,8 @@ function taskIcon(uri: vscode.Uri, status: TaskStatus): { light: vscode.Uri; dar
   };
 }
 
+function taskViewType(id: string): string { return `codexDeck.task.${encodeURIComponent(id)}`; }
+
 export interface PanelHost {
   models: Model[];
   command(task: Task, message: JsonObject): Promise<JsonObject | void>;
@@ -23,6 +25,7 @@ export interface PanelHost {
 
 export class TaskPanels implements vscode.WebviewPanelSerializer, vscode.Disposable {
   private panels = new Map<string, vscode.WebviewPanel>();
+  private serializers = new Map<string, vscode.Disposable>();
   private ready = new Set<string>();
   private pendingMessages = new Map<string, JsonObject[]>();
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -42,15 +45,30 @@ export class TaskPanels implements vscode.WebviewPanelSerializer, vscode.Disposa
       if (state.focused && this.activeId) this.post(this.activeId);
     });
     this.subscriptions.push(() => windowState.dispose());
+    for (const task of manager.openTasks) this.registerSerializer(task.id);
   }
   get activeId(): string | undefined { return [...this.panels].find(([, panel]) => panel.active)?.[0]; }
+  idForEditorResource(resourcePath: string): string | undefined {
+    // VS Code tab menus pass webview-panel/webview-<viewType>-<resource UUID>.
+    const match = /^\/?webview-panel\/webview-codexDeck\.task\.(.+)-[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/.exec(resourcePath);
+    return match ? decodeURIComponent(match[1]!) : undefined;
+  }
+  private registerSerializer(id: string): void {
+    const viewType = taskViewType(id);
+    if (!this.serializers.has(viewType)) this.serializers.set(viewType, vscode.window.registerWebviewPanelSerializer(viewType, this));
+  }
   async deserializeWebviewPanel(panel: vscode.WebviewPanel, state: unknown): Promise<void> {
     const id = string(object(state).taskId);
     if (!id || !this.manager.tasks.has(id)) { panel.dispose(); return; }
     const existing = this.panels.get(id);
     if (existing) { panel.dispose(); existing.reveal(); return; }
-    this.manager.open(id);
-    this.bind(panel, this.manager.get(id));
+    if (panel.viewType === 'codexDeck.task') {
+      panel.dispose();
+      this.open(this.manager.get(id));
+    } else {
+      this.manager.open(id);
+      this.bind(panel, this.manager.get(id));
+    }
     try { await this.host.connect(); await this.manager.restore(id); }
     catch (error) { this.host.report(error); }
   }
@@ -58,10 +76,18 @@ export class TaskPanels implements vscode.WebviewPanelSerializer, vscode.Disposa
     const existing = this.panels.get(task.id);
     if (existing) { existing.reveal(existing.viewColumn); return; }
     this.manager.open(task.id);
-    const panel = vscode.window.createWebviewPanel('codexDeck.task', task.title, vscode.ViewColumn.Active, { enableScripts: true, retainContextWhenHidden: true });
+    this.registerSerializer(task.id);
+    const panel = vscode.window.createWebviewPanel(taskViewType(task.id), task.title, vscode.ViewColumn.Active, { enableScripts: true, retainContextWhenHidden: true });
     this.bind(panel, task);
   }
-  close(id: string): void { this.panels.get(id)?.dispose(); }
+  async close(id: string): Promise<void> {
+    const panel = this.panels.get(id);
+    if (panel) { panel.dispose(); return; }
+    // A restored tab may not have been deserialized yet.
+    const tabs = vscode.window.tabGroups.all.flatMap(group => group.tabs).filter(tab =>
+      tab.input instanceof vscode.TabInputWebview && tab.input.viewType === `mainThreadWebview-${taskViewType(id)}`);
+    if (!tabs.length || await vscode.window.tabGroups.close(tabs)) this.manager.close(id);
+  }
   private bind(panel: vscode.WebviewPanel, task: Task): void {
     this.panels.set(task.id, panel);
     const webview = panel.webview;
@@ -145,6 +171,8 @@ export class TaskPanels implements vscode.WebviewPanelSerializer, vscode.Disposa
   dispose(): void {
     this.stopping = true;
     for (const dispose of this.subscriptions) dispose();
+    for (const serializer of this.serializers.values()) serializer.dispose();
+    this.serializers.clear();
     for (const timer of this.timers.values()) clearTimeout(timer);
     for (const panel of this.panels.values()) panel.dispose();
     this.panels.clear();

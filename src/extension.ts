@@ -212,6 +212,11 @@ class DeckExtension implements PanelHost {
     return task;
   }
   private async task(arg?: unknown): Promise<Task> {
+    if (object(arg).scheme === 'webview-panel') {
+      const id = this.panels.idForEditorResource(string(object(arg).path));
+      if (!id) throw new Error('対象のタスクが見つかりません。');
+      return this.manager.get(id);
+    }
     const id = typeof arg === 'string' ? arg : string(object(arg).id) || this.panels.activeId;
     if (id) return this.manager.get(id);
     const open = this.manager.openTasks;
@@ -366,7 +371,7 @@ class DeckExtension implements PanelHost {
     if (task.activeTurnId || task.busy) throw new Error('実行を停止してからアーカイブしてください。');
     this.manager.setAutoResume(task.id, false);
     if (task.threadId) { await this.connect(); await this.client.archiveThread(task.threadId); }
-    this.panels.close(task.id);
+    await this.panels.close(task.id);
   }
   private async fork(task: Task, lastTurnId?: string): Promise<void> {
     await this.connect();
@@ -600,7 +605,7 @@ class DeckExtension implements PanelHost {
         await vscode.env.clipboard.writeText(string(item.data.text)); break;
       }
       case 'logout': await this.signOut(); break;
-      case 'quit': case 'exit': this.panels.close(task.id); break;
+      case 'quit': case 'exit': await this.panels.close(task.id); break;
       case 'review':
         if (!command.args) await this.review(task);
         else { await this.connect(); await this.manager.runReview(task.id, threadId => this.client.review(threadId, { type: 'custom', instructions: command.args })); }

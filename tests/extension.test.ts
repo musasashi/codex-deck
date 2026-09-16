@@ -49,12 +49,14 @@ function activate(records: TaskRecord[], options: { remoteName?: string; isTrust
   let stored: unknown = { version: 1, tasks: structuredClone(records) };
   let clipboardText = '';
   let serializer!: vscode.WebviewPanelSerializer;
+  const serializers = new Map<string, vscode.WebviewPanelSerializer>();
   let createdPanels = 0;
   const openedPanels: ReturnType<typeof panel>[] = [];
   const trees = new Map<string, { getChildren(): Task[] }>();
   const commands = new Map<string, (arg?: unknown) => unknown>();
   const api = {
     EventEmitter: Emitter,
+    TabInputWebview: class { constructor(readonly viewType: string) {} },
     ViewColumn: { Active: -1 },
     env: { remoteName: options.remoteName, clipboard: {
       async writeText(value: string) { clipboardText = value; },
@@ -65,12 +67,17 @@ function activate(records: TaskRecord[], options: { remoteName?: string; isTrust
     window: {
       state: { focused: true },
       activeTextEditor: undefined as vscode.TextEditor | undefined,
+      tabGroups: { all: [] as { tabs: vscode.Tab[] }[], close: async (_tabs: readonly vscode.Tab[]): Promise<boolean> => true },
       showQuickPick: async (_items: { label: string; task: Task }[]): Promise<{ label: string; task: Task } | undefined> => undefined,
+      showInputBox: async (): Promise<string | undefined> => undefined,
       createOutputChannel: () => ({ ...disposable(), append() {}, appendLine() {} }),
       onDidChangeWindowState: disposable, registerFileDecorationProvider: disposable,
       registerTreeDataProvider(id: string, tree: { getChildren(): Task[] }) { trees.set(id, tree); return disposable(); },
-      registerWebviewPanelSerializer(_type: string, value: vscode.WebviewPanelSerializer) { serializer = value; return disposable(); },
-      createWebviewPanel() { createdPanels++; const value = panel(); openedPanels.push(value); return value; },
+      registerWebviewPanelSerializer(type: string, value: vscode.WebviewPanelSerializer) {
+        serializer = value; serializers.set(type, value);
+        return { dispose() { serializers.delete(type); } };
+      },
+      createWebviewPanel(viewType: string) { createdPanels++; const value = Object.assign(panel(), { viewType }); openedPanels.push(value); return value; },
     },
     workspace: {
       isTrusted: options.isTrusted ?? false, // Restoration must populate the tree even when connecting is unavailable.
@@ -89,7 +96,7 @@ function activate(records: TaskRecord[], options: { remoteName?: string; isTrust
   new Function('require', 'module', 'exports', bundle)((id: string) => id === 'vscode' ? api : nodeRequire(id), module, module.exports);
   module.exports.activate(context as unknown as vscode.ExtensionContext);
   return {
-    rows: () => trees.get('codexDeck.tasks')!.getChildren(), serializer, commands, api, openedPanels,
+    rows: () => trees.get('codexDeck.tasks')!.getChildren(), serializer, serializers, commands, api, openedPanels,
     createdPanels: () => createdPanels,
     records: () => (stored as { tasks: TaskRecord[] }).tasks, clipboard: () => clipboardText,
     async shutdown() {
@@ -126,7 +133,7 @@ test('preset cycling is a customizable command bound to Ctrl+Tab in task editors
     const manifest = nodeRequire('./package.json');
     assert.equal(manifest.contributes.commands.find((command: { command: string }) => command.command === 'codexDeck.cyclePreset').title, '次のプリセットに切り替え');
     assert.deepEqual(manifest.contributes.keybindings.find((binding: { command: string }) => binding.command === 'codexDeck.cyclePreset'), {
-      command: 'codexDeck.cyclePreset', key: 'ctrl+tab', when: 'activeWebviewPanelId == codexDeck.task',
+      command: 'codexDeck.cyclePreset', key: 'ctrl+tab', when: 'activeWebviewPanelId =~ /^codexDeck\\.task\\./',
     });
 
     host.models = [{ id: 'test-model', label: 'Test', description: '', defaultEffort: 'test-effort', efforts: [{ id: 'high', description: '' }, { id: 'test-effort', description: '' }], isDefault: true, inputModalities: ['text'] }];
@@ -275,6 +282,70 @@ function connectedExtension(records: TaskRecord[] = [], options: Parameters<type
   host.connect = async () => {};
   return { ...extension, host, manager, gateway };
 }
+
+function editorResource(id: string) {
+  return { scheme: 'webview-panel', path: `webview-panel/webview-codexDeck.task.${encodeURIComponent(id)}-00000000-0000-4000-8000-000000000000` };
+}
+
+test('tab menu commands act on the clicked task even when an identically named task is active in another group', async () => {
+  const extension = connectedExtension();
+  const { manager, gateway, commands, api } = extension;
+  const archived: string[] = [];
+  Object.assign(manager.gateway, { forkThread: gateway.forkThread.bind(gateway), archiveThread: async (id: string) => { archived.push(id); } });
+  api.window.showInputBox = async () => '名前を変更したタスク';
+  try {
+    const first = manager.adoptThread({ ...thread('first'), title: '同じ名前' });
+    const source = { ...thread('target'), title: '同じ名前', turns: [{ id: 'target-turn', status: 'completed',
+      items: [{ id: 'target-reply', kind: 'agentMessage', data: { text: '対象の会話' } }] }] };
+    gateway.threads.set(source.id, source);
+    const target = manager.adoptThread(source);
+    await extension.serializer.deserializeWebviewPanel(panel(), { taskId: first.id });
+    await extension.serializer.deserializeWebviewPanel(Object.assign(panel(), { active: false, viewColumn: 2 }), { taskId: target.id });
+    const resource = editorResource(target.id);
+
+    await commands.get('codexDeck.copyTaskDeepLink')!(resource);
+    assert.equal(extension.clipboard(), 'codex://threads/target');
+    await commands.get('codexDeck.copyTaskMarkdown')!(resource);
+    assert.match(extension.clipboard(), /対象の会話/);
+    await commands.get('codexDeck.renameTask')!(resource);
+    assert.equal(target.title, '名前を変更したタスク');
+    assert.equal(first.title, '同じ名前');
+    await commands.get('codexDeck.forkTask')!(resource);
+    const fork = [...manager.tasks.values()].find(task => task.threadId?.startsWith('fork-'))!;
+    assert.deepEqual(fork.turns, target.turns);
+    assert.equal(extension.openedPanels[0]!.viewType, `codexDeck.task.${fork.id}`);
+    assert.ok(extension.serializers.has(extension.openedPanels[0]!.viewType));
+    await commands.get('codexDeck.archiveTask')!(resource);
+    assert.deepEqual(archived, ['target']);
+    assert.equal(target.open, false);
+    assert.equal(first.open, true);
+
+    for (const invalid of [editorResource('missing'), { scheme: 'webview-panel', path: 'webview-panel/webview-codexDeck.settings-00000000-0000-4000-8000-000000000000' }]) {
+      await commands.get('codexDeck.archiveTask')!(invalid);
+      assert.deepEqual(archived, ['target'], 'an unknown tab must never fall back to the active task');
+    }
+  } finally { await extension.shutdown(); }
+});
+
+test('saved task tabs register their serializers at startup and can be archived before being shown', async () => {
+  const extension = connectedExtension([record('first', true, true), record('hidden', true, true)]);
+  const { api, manager } = extension;
+  const hiddenTab = { input: new api.TabInputWebview('mainThreadWebview-codexDeck.task.hidden') } as vscode.Tab;
+  api.window.tabGroups.all = [{ tabs: [hiddenTab] }];
+  let closed: readonly vscode.Tab[] = [];
+  api.window.tabGroups.close = async tabs => { closed = tabs; return true; };
+  try {
+    assert.ok(extension.serializers.has('codexDeck.task.first'));
+    assert.ok(extension.serializers.has('codexDeck.task.hidden'));
+    await extension.serializer.deserializeWebviewPanel(panel(), { taskId: 'first' });
+    await extension.commands.get('codexDeck.archiveTask')!(editorResource('hidden'));
+    assert.deepEqual(closed, [hiddenTab]);
+    assert.equal(manager.get('hidden').open, false);
+    assert.equal(manager.get('first').open, true);
+    assert.equal(extension.createdPanels(), 0);
+  } finally { await extension.shutdown(); }
+  assert.equal(extension.serializers.size, 0);
+});
 
 test('/plan toggles without a turn and inline instructions use the normal send path with images and skills', async () => {
   const extension = connectedExtension();
