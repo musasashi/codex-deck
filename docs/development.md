@@ -47,19 +47,28 @@ xvfb-run -a npm run test:history
 
 ## リリースする
 
-次のどちらかでバージョンを更新し、変更をコミットしてpushします。
+リリースは`master`で直接行います。リリース用のブランチやPRは作成しません。
+
+`master`を最新にし、次のどちらかでバージョンを更新します。
 
 ```sh
+git switch master
+git pull --ff-only
 npm version minor --no-git-tag-version
 npm version major --no-git-tag-version
 ```
 
-パッケージを作成してGitHub Releasesに公開します。
+どちらか一方だけを実行します。パッケージ作成時に型チェックとビルドも実行されます。
+
+バージョン更新を直接`master`へコミットし、パッケージをGitHub Releasesに公開します。
 
 ```sh
 npm run package
 release_version=$(node -p "require('./package.json').version")
-git tag "v${release_version}"
+git add package.json package-lock.json
+git commit -m "chore: release v${release_version}"
+git push origin master
+git tag -a "v${release_version}" -m "${release_version}"
 git push origin "v${release_version}"
 gh release create "v${release_version}" "./codex-deck-${release_version}.vsix" \
   --title "v${release_version}" \
