@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { randomBytes } from 'node:crypto';
-import { object, string, messageOf, statusLabel, type JsonObject, type Model, type Task, type TaskStatus } from '../core/types';
+import { array, object, string, messageOf, statusLabel, type JsonObject, type Model, type Task, type TaskStatus } from '../core/types';
 import { TaskManager } from '../core/taskManager';
 import { readPresets, taskPresets } from '../core/settings';
 import { withHuggingFaceModels } from '../core/huggingFace';
@@ -72,8 +72,13 @@ export class TaskPanels implements vscode.WebviewPanelSerializer, vscode.Disposa
         if (message.type === 'ready') {
           this.ready.add(task.id);
           this.post(task.id);
+          void this.postKeybindings(task.id);
           for (const pending of this.pendingMessages.get(task.id) ?? []) void webview.postMessage(pending);
           this.pendingMessages.delete(task.id);
+          return;
+        }
+        if (message.type === 'keybindings') {
+          await this.postKeybindings(task.id);
           return;
         }
         if (message.type === 'read') {
@@ -122,6 +127,19 @@ export class TaskPanels implements vscode.WebviewPanelSerializer, vscode.Disposa
     else this.pendingMessages.set(id, [...(this.pendingMessages.get(id) ?? []), message]);
   }
   broadcast(message: JsonObject): void { for (const id of this.panels.keys()) this.message(id, message); }
+  private async postKeybindings(id: string): Promise<void> {
+    const panel = this.panels.get(id);
+    if (!panel) return;
+    let cyclePreset = '';
+    try {
+      // VS Code's command palette lookup reflects user overrides and removed bindings.
+      const commands = await vscode.commands.executeCommand<unknown>('_getAllCommands');
+      const command = array(commands).map(object).find(command => command.command === 'codexDeck.cyclePreset');
+      const keybinding = string(command?.keybinding).trim();
+      if (keybinding !== 'Not set') cyclePreset = keybinding;
+    } catch { /* Keep the tooltip usable if the internal lookup is unavailable. */ }
+    if (this.panels.get(id) === panel) void panel.webview.postMessage({ type: 'keybindings', cyclePreset });
+  }
   private post(id: string): void {
     const panel = this.panels.get(id);
     if (!panel) return;
