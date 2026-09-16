@@ -1,4 +1,4 @@
-import { array, object, string, Signal, type FileReference, type Gateway, type Input, type Item, type JsonObject, type Model, type PendingRequest, type RequestAnswer, type RunSettings, type ServerEvent, type Skill, type Thread, type Turn, type Usage } from '../core/types';
+import { array, object, string, Signal, type FileReference, type Gateway, type Input, type Item, type JsonObject, type Model, type PendingRequest, type RequestAnswer, type RunSettings, type ServerEvent, type Skill, type Thread, type Turn, type TurnError, type Usage } from '../core/types';
 import { hasSkillMention, permissionMode } from '../core/composer';
 import { questionAnswers } from '../core/questions';
 import { JsonRpcPeer, requestKey, RpcError, type ServerRequest } from './rpc';
@@ -16,9 +16,15 @@ export function decodeItem(raw: unknown): Item {
   const data = object(raw);
   return { id: requiredString(data.id, 'item.id'), kind: string(data.type, 'unknown'), data };
 }
+function decodeTurnError(raw: unknown): TurnError {
+  const error = object(raw);
+  return {
+    message: [string(error.message, '実行に失敗しました。'), string(error.additionalDetails)].filter(Boolean).join('\n'),
+    kind: typeof error.codexErrorInfo === 'string' ? error.codexErrorInfo : Object.keys(object(error.codexErrorInfo))[0],
+  };
+}
 export function decodeTurn(raw: unknown): Turn {
   const data = object(raw);
-  const error = object(data.error);
   const timing: Pick<Turn, 'startedAt' | 'completedAt' | 'durationMs'> = {};
   for (const field of ['startedAt', 'completedAt', 'durationMs'] as const) {
     const value = data[field];
@@ -28,7 +34,7 @@ export function decodeTurn(raw: unknown): Turn {
     id: requiredString(data.id, 'turn.id'), status: string(data.status, 'unknown'),
     items: array(data.items).filter(item => typeof object(item).id === 'string').map(decodeItem),
     ...timing,
-    ...(data.error ? { error: { message: string(error.message, '実行に失敗しました。'), kind: typeof error.codexErrorInfo === 'string' ? error.codexErrorInfo : Object.keys(object(error.codexErrorInfo))[0] } } : {}),
+    ...(data.error ? { error: decodeTurnError(data.error) } : {}),
   };
 }
 export function decodeThread(raw: unknown): Thread {
@@ -400,6 +406,7 @@ export class AppServerClient implements Gateway {
         break;
       }
       case 'turn/started': case 'turn/completed': this.events.emit({ type: 'turn', threadId, turn: decodeTurn(data.turn), completed: method === 'turn/completed' }); break;
+      case 'error': this.events.emit({ type: 'error', threadId, turnId, error: decodeTurnError(data.error), willRetry: data.willRetry === true }); break;
       case 'item/started': case 'item/completed': this.events.emit({ type: 'item', threadId, turnId, item: decodeItem(data.item), completed: method === 'item/completed' }); break;
       case 'thread/status/changed': this.events.emit({ type: 'status', threadId, status: string(object(data.status).type), flags: array(object(data.status).activeFlags).map(v => string(v)) }); break;
       case 'thread/name/updated': this.events.emit({ type: 'name', threadId, title: string(data.threadName) || string(data.name) }); break;

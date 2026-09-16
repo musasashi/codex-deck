@@ -1305,6 +1305,48 @@ test('nullable reply phases and steering preserve the final answer and user mess
   await expect(page.locator('[data-message-id="steer"] time')).toHaveCount(0);
 });
 
+test('upstream retry diagnostics stay visible without blocking input and clear when the model responds', async ({ page }, info) => {
+  const gateway = new FakeGateway();
+  const manager = new TaskManager(gateway, { async save() {} }, [], { schedule: false });
+  const value = thread(); gateway.threads.set(value.id, value);
+  const current = manager.adoptThread(value);
+  try {
+    await manager.send(current.id, '応答を確認して');
+    const turnId = current.activeTurnId!;
+    const error = { message: 'Reconnecting... 1/5\nstream disconnected; request ID fixture-request <img src=x>' };
+    gateway.events.emit({ type: 'error', threadId: value.id, turnId, error, willRetry: true });
+    await state(page, current);
+    await expect(page.locator('#status')).toHaveText('再試行中');
+    await expect(page.locator('#notice')).toBeVisible();
+    await expect(page.locator('#notice-text')).toHaveText(`Codexが再試行しています。\n${error.message}`);
+    await expect(page.locator('#notice img')).toHaveCount(0);
+    await expect(page.locator('#stop')).toBeVisible();
+    await expect(page.locator('#stop')).toBeEnabled();
+    await page.locator('#prompt').fill('途中で入力したメモ');
+    await expect(page.locator('#send')).toBeEnabled();
+    await expect(page.locator('#send')).toHaveText('追加入力');
+    await page.screenshot({ path: info.outputPath('stream-retry.png') });
+    gateway.events.emit({ type: 'tokens', threadId: value.id, value: {} });
+    await state(page, current);
+    await expect(page.locator('#notice')).toBeVisible();
+    gateway.events.emit({ type: 'delta', threadId: value.id, turnId, itemId: 'answer', kind: 'agentMessage', field: 'text', text: '回答を再開しました。' });
+    await state(page, current);
+    await expect(page.locator('#notice')).toBeHidden();
+    await expect(page.locator('#status')).toHaveText('実行中');
+    await expect(page.locator('#prompt')).toHaveValue('途中で入力したメモ');
+    const fatal = { message: 'Retries exhausted\nrequest ID fixture-request' };
+    gateway.events.emit({ type: 'error', threadId: value.id, turnId, error: fatal, willRetry: false });
+    await state(page, current);
+    await expect(page.locator('#notice-text')).toHaveText(fatal.message);
+    gateway.events.emit({ type: 'turn', threadId: value.id, turn: { id: turnId, status: 'failed', items: [], error: fatal }, completed: true });
+    await state(page, current);
+    await expect(page.locator('#notice-text')).toHaveText(fatal.message);
+    await expect(page.locator('#status')).toHaveText('エラー');
+    await expect(page.locator('#stop')).toBeHidden();
+    expect(gateway.sent).toHaveLength(1);
+  } finally { manager.dispose(); }
+});
+
 test('streaming, quota wait and questions preserve unsent answers across updates', async ({ page }, info) => {
   const value = task(); value.autoResume = true; value.status = 'waiting'; value.recoveryAt = Date.now() + 600_000;
   value.claims = [{ stoppedTurnId: 'old-stop', clientId: 'automatic-client', turnId: 'turn-1' }];

@@ -146,5 +146,6 @@ VS Codeの再起動時にタブを復元すると、予約も復元して使用�
 | WSL専用の案内が表示される | 作業フォルダーをWSL接続で開き、Codex Deckと公式Codex CLIをWSL側にインストール |
 | CLIが見つからない | WSL内で`codex --version`を確認し、VS Codeの設定`codexDeck.cliPath`に`codex`またはWSL内の実行ファイルのパスを指定 |
 | 未接続 | タスク右上の「•••」→「App Serverに再接続」 |
+| 再試行中 | Codexから届いたエラーの詳細を画面上部に表示します。応答が再開すると表示が消えます。中断する場合は「停止」を押してください |
 | `Missing environment variable: HF_TOKEN` | WSL内の`.bashrc`などに`HF_TOKEN`を設定し、「Developer: Reload Window」を実行。ターミナル内だけの設定は引き継がれません |
 | エラーの詳細を見たい | 操作した画面と、出力パネルの「Codex Deck」を確認 |
