@@ -20,6 +20,7 @@ let connected = false;
 let usage: Usage | undefined;
 let models: Model[] = [];
 let presetCount = 0;
+let cyclePresetKeybinding = '';
 let transcriptHtml = '';
 let copiedMessage: string | undefined;
 let copyTimer: ReturnType<typeof setTimeout> | undefined;
@@ -170,6 +171,10 @@ function renderPendingSend(submission: PendingSend): string {
   const status = retry ? `${state === 'unknown' ? '送信結果を確認できませんでした。' : '送信できませんでした。'}<button type="button" class="secondary" data-retry-send="${escapeHtml(id)}"${sending || task.busy || isTaskRunning(task) || state === 'unknown' && !task.hydrated ? ' disabled' : ''}>再送</button>` : state === 'sending' ? '送信中…' : '送信済み';
   return `<section class="turn pending-send" data-send="${escapeHtml(id)}">${message}<div class="pending-status" role="status">${status}</div></section>`;
 }
+function updatePresetTitle(): void {
+  $('cycle-preset').title = !presetCount ? '設定からプリセットを追加してください' : !models.length ? 'モデル一覧を読み込み中…'
+    : `次のプリセットに切り替え${cyclePresetKeybinding ? ` (${cyclePresetKeybinding})` : ''}`;
+}
 function render(): void {
   if (!task) return;
   pendingSends = reconcilePendingSends(pendingSends, task);
@@ -248,7 +253,7 @@ function render(): void {
   if (external && !model?.efforts.length) $<HTMLSelectElement>('effort').disabled = true;
   const cyclePreset = $<HTMLButtonElement>('cycle-preset');
   cyclePreset.disabled = running || busy || !presetCount || !models.length;
-  cyclePreset.title = !presetCount ? '設定からプリセットを追加してください' : !models.length ? 'モデル一覧を読み込み中…' : '次のプリセットに切り替え';
+  updatePresetTitle();
   saveDraft();
   const last = task.turns.at(-1);
   if (transcriptHtml === html && last?.status === 'completed' && last.id === task.unreadTurnId) post('read', { turnId: last.id });
@@ -265,6 +270,9 @@ window.addEventListener('message', event => {
     render();
     if (initialFocus && !task.threadId) prompt.focus();
     initialFocus = false;
+  } else if (message.type === 'keybindings') {
+    cyclePresetKeybinding = string(message.cyclePreset);
+    updatePresetTitle();
   } else if (message.type === 'messageCopied') {
     copiedMessage = JSON.stringify([message.turnId, message.itemId, 'copy']);
     clearTimeout(copyTimer);
@@ -346,6 +354,7 @@ $('dismiss-notice').addEventListener('click', () => {
 });
 for (const [id, type] of [['menu', 'menu'], ['attach', 'attach'], ['stop', 'stop']]) $(id!).addEventListener('click', () => post(type!));
 $('cycle-preset').addEventListener('click', () => post('cyclePreset'));
+for (const event of ['mouseenter', 'focus']) $('cycle-preset').addEventListener(event, () => post('keybindings'));
 for (const id of ['model', 'effort', 'mode']) $(id).addEventListener('change', () => post('settings', {
   model: $<HTMLSelectElement>('model').value, effort: id === 'model' ? '' : $<HTMLSelectElement>('effort').value, mode: $<HTMLSelectElement>('mode').value,
 }));
