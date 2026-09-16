@@ -13,7 +13,7 @@ WSL内のCodexのタスクをVS Codeのエディタタブで並行して扱う�
 
 ## はじめる
 
-必要なものは **WSL・WindowsのVS Code 1.96以降とWSL拡張・WSL内の公式Codex CLI・Node.js 24以降（WSL内でのVSIX作成用）** です。
+必要なものは **WSL・WindowsのVS Code 1.106以降とWSL拡張・WSL内の公式Codex CLI・Node.js 24以降（WSL内でのVSIX作成用）** です。
 
 1. VS CodeからWSLに接続して、作業フォルダーを開きます。
 2. WSL内に公式Codex CLIをインストールし、WSLのターミナルで`codex --version`を確認します。

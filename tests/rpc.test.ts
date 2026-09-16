@@ -61,6 +61,28 @@ test('initialization completes before initialized and enables collaboration mode
   h.peer.close(); assert.equal(client.connected, false); client.detach();
 });
 
+test('stream errors expose retry state, turn identity and upstream details before completion', async () => {
+  const h = harness(); const client = new AppServerClient();
+  const events: import('../src/core/types').ServerEvent[] = [];
+  const connecting = client.connect(h.peer); h.send({ id: h.messages[0]!.id, result: {} }); await connecting;
+  client.events.subscribe(event => events.push(event));
+  const error = { message: 'Reconnecting... 1/5', codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 503 } }, additionalDetails: 'stream disconnected before completion; request ID fixture-request' };
+  try {
+    h.send({ method: 'error', params: { threadId: 'one', turnId: 'turn', willRetry: true, error } });
+    assert.deepEqual(events, [{ type: 'error', threadId: 'one', turnId: 'turn', willRetry: true,
+      error: { message: `${error.message}\n${error.additionalDetails}`, kind: 'responseStreamDisconnected' } }]);
+    const fatal = { ...error, message: 'Retries exhausted', codexErrorInfo: 'other' };
+    h.send({ method: 'error', params: { threadId: 'one', turnId: 'turn', willRetry: false, error: fatal } });
+    h.send({ method: 'turn/completed', params: { threadId: 'one', turn: { id: 'turn', status: 'failed', error: fatal, items: [] } } });
+    assert.deepEqual(events[1], { type: 'error', threadId: 'one', turnId: 'turn', willRetry: false,
+      error: { message: `${fatal.message}\n${fatal.additionalDetails}`, kind: 'other' } });
+    const finished = events[2];
+    assert.ok(finished?.type === 'turn');
+    assert.equal(finished.turn.error?.message, `${fatal.message}\n${fatal.additionalDetails}`);
+    assert.equal(finished.turn.status, 'failed');
+  } finally { h.peer.close(); client.detach(); }
+});
+
 test('title generation uses the shared connection without exposing its turns or errors as task events', async () => {
   const h = harness(); const client = new AppServerClient();
   const server = new JsonRpcPeer(h.output, h.input);
@@ -79,6 +101,7 @@ test('title generation uses the shared connection without exposing its turns or 
     server.notify('turn/started', { threadId: 'title-thread', turn: { id: 'title-turn', status: 'inProgress' } });
     server.notify('item/agentMessage/delta', { threadId: 'title-thread', itemId: 'title-answer', delta: '{"title":"Fix login"}' });
     server.notify('warning', { threadId: 'title-thread', message: 'Internal title warning' });
+    server.notify('error', { threadId: 'title-thread', turnId: 'title-turn', willRetry: true, error: { message: 'Internal title retry' } });
     server.notify('turn/started', { threadId: 'real-task', turn: { id: 'real-turn', status: 'inProgress' } });
     server.notify('turn/completed', { threadId: 'title-thread', turn: { id: 'title-turn', status: 'completed', items: [] } });
     assert.equal(await generated, 'Fix login');

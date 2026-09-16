@@ -421,6 +421,107 @@ test('a completed notification before turn/start response remains authoritative'
   assert.equal(state.task.activeTurnId, undefined);
 });
 
+test('retry notifications survive the start acknowledgement without scheduling another turn', async () => {
+  const { manager, gateway, task } = setup();
+  const diagnostics: string[] = [];
+  manager.errors.subscribe(message => diagnostics.push(message));
+  manager.setAutoResume(task.id, true);
+  const error = { kind: 'usageLimitExceeded', message: 'Retrying; request ID fixture-request' };
+  gateway.turnStarter = async threadId => {
+    const turn: Turn = { id: 'retry-turn', status: 'inProgress', items: [] };
+    gateway.events.emit({ type: 'turn', threadId, turn, completed: false });
+    gateway.events.emit({ type: 'error', threadId, turnId: turn.id, error, willRetry: true });
+    return turn;
+  };
+  try {
+    await manager.send(task.id, 'hello');
+    assert.deepEqual(task.turnError, { turnId: 'retry-turn', error, willRetry: true });
+    assert.equal(task.activeTurnId, 'retry-turn');
+    assert.equal(task.status, 'running');
+    assert.equal(task.turns[0]?.error, undefined);
+    assert.equal(task.waiting, undefined);
+    await manager.checkUsage();
+    assert.equal(gateway.sent.length, 1);
+    assert.match(diagnostics[0]!, /thread-1\/retry-turn.*fixture-request/);
+    await manager.send(task.id, 'status?');
+    assert.equal(gateway.steered[0]?.turnId, 'retry-turn');
+    assert.equal(task.turnError?.willRetry, true, 'steering alone does not prove the response has recovered');
+    await manager.stop(task.id);
+    assert.deepEqual(gateway.interrupted, ['retry-turn']);
+    assert.equal(task.turnError, undefined);
+    assert.equal(task.activeTurnId, undefined);
+  } finally { manager.dispose(); }
+});
+
+test('only model output for the affected turn clears a retry notice and stale errors stay scoped', async () => {
+  const { manager, gateway, task } = setup();
+  const other = manager.adoptThread(thread('other'));
+  const error = { message: 'Reconnecting... 1/5' };
+  try {
+    await manager.send(task.id, 'hello');
+    const turnId = task.activeTurnId!;
+    gateway.events.emit({ type: 'error', threadId: task.threadId!, turnId, error, willRetry: true });
+    gateway.events.emit({ type: 'tokens', threadId: task.threadId!, value: {} });
+    gateway.events.emit({ type: 'status', threadId: task.threadId!, status: 'active', flags: [] });
+    gateway.events.emit({ type: 'item', threadId: task.threadId!, turnId, completed: true, item: { id: 'steer', kind: 'userMessage', data: {} } });
+    gateway.events.emit({ type: 'delta', threadId: task.threadId!, turnId, itemId: 'tool', kind: 'commandExecution', field: 'aggregatedOutput', text: 'background output' });
+    gateway.events.emit({ type: 'delta', threadId: 'other', turnId: 'other-turn', itemId: 'answer', kind: 'agentMessage', field: 'text', text: 'other answer' });
+    assert.equal(other.turnError, undefined);
+    assert.equal(task.turnError?.willRetry, true);
+    gateway.events.emit({ type: 'delta', threadId: task.threadId!, turnId, itemId: 'answer', kind: 'agentMessage', field: 'text', text: 'recovered' });
+    assert.equal(task.turnError, undefined);
+    assert.equal(task.status, 'running');
+    gateway.finish(task.threadId!, turnId, 'completed');
+    await manager.send(task.id, 'next');
+    gateway.events.emit({ type: 'error', threadId: task.threadId!, turnId: task.activeTurnId!, error, willRetry: true });
+    gateway.events.emit({ type: 'error', threadId: task.threadId!, turnId, error: { message: 'late failure' }, willRetry: false });
+    const currentError = manager.get(task.id).turnError;
+    assert.equal(currentError?.turnId, task.activeTurnId);
+    assert.equal(currentError?.error.message, error.message);
+    gateway.events.emit({ type: 'item', threadId: task.threadId!, turnId: task.activeTurnId!, completed: false, item: { id: 'thinking', kind: 'reasoning', data: {} } });
+    assert.equal(task.turnError, undefined);
+  } finally { manager.dispose(); }
+});
+
+test('terminal errors wait for turn completion and disconnecting clears transient retry state', async () => {
+  const { manager, gateway, task } = setup();
+  try {
+    await manager.send(task.id, 'hello');
+    const turnId = task.activeTurnId!;
+    const error = { kind: 'responseTooManyFailedAttempts', message: 'Retries exhausted\nrequest ID fixture-request' };
+    gateway.events.emit({ type: 'error', threadId: task.threadId!, turnId, error, willRetry: false });
+    assert.equal(task.activeTurnId, turnId);
+    assert.equal(task.turnError?.willRetry, false);
+    gateway.events.emit({ type: 'turn', threadId: task.threadId!, turn: { id: turnId, status: 'failed', items: [], error }, completed: true });
+    assert.equal(task.turnError, undefined);
+    assert.equal(task.error, error.message);
+    assert.equal(task.status, 'error');
+    await manager.send(task.id, 'try again');
+    gateway.events.emit({ type: 'error', threadId: task.threadId!, turnId: task.activeTurnId!, error, willRetry: true });
+    gateway.events.emit({ type: 'connection', connected: false, message: 'Connection closed' });
+    assert.equal(task.turnError, undefined);
+    assert.equal(task.error, 'Connection closed');
+    assert.equal(task.status, 'disconnected');
+  } finally { manager.dispose(); }
+});
+
+test('resume hydration replays retry diagnostics after loading the active turn', async () => {
+  const { manager, gateway, task } = setup();
+  const result = deferred<Thread>(); gateway.resumeThread = () => result.promise;
+  task.hydrated = false;
+  try {
+    const restoring = manager.restore(task.id);
+    const error = { message: 'Reconnecting... 2/5' };
+    gateway.events.emit({ type: 'error', threadId: task.threadId!, turnId: 'active', error, willRetry: true });
+    result.resolve({ ...thread(), status: 'active', turns: [{ id: 'active', status: 'inProgress', items: [] }] });
+    await restoring;
+    assert.deepEqual(task.turnError, { turnId: 'active', error, willRetry: true });
+    gateway.finish(task.threadId!, 'active', 'completed');
+    assert.equal(task.turnError, undefined);
+    assert.equal(task.error, undefined);
+  } finally { manager.dispose(); }
+});
+
 test('visible idle tasks refresh usage on open, notifications, resets and reconnect without auto-resume', async t => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1000 });
   const gateway = new FakeGateway();

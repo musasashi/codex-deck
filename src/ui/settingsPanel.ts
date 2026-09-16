@@ -6,6 +6,7 @@ import { settingsHtml } from './settingsHtml';
 import { isExternalModel, parseResponsesModel, providerModels, readProviders, validateProviders, type ResponsesProvider } from '../core/providers';
 import { readTokenPrice, validateTokenPrice, type TokenPrice } from '../core/cost';
 import type { ProviderCheck, ProviderCheckPurpose } from '../core/providerCheck';
+import { readQuestionPresets, validateQuestionPresets, type QuestionPreset } from '../core/questionPresets';
 
 interface SettingsHost {
   loadModels(): Promise<Model[]>;
@@ -71,11 +72,12 @@ export class SettingsPanel implements vscode.Disposable {
           if (saving) {
             const titleModel = validateTitleModel(message.titleModel, models);
             const presets = validatePresets(message.presets, models);
+            const questionPresets = validateQuestionPresets(message.questionPresets ?? [], models);
             const titleEffort = validateTitleEffort(message.titleEffort, selectedModel(models, titleModel));
             const titlePricing = isExternalModel(titleModel) && message.titlePricing !== undefined ? validateTokenPrice(message.titlePricing) : undefined;
             signal.throwIfAborted();
             if (this.panel === panel) void webview.postMessage({ type: 'settingsSaving', requestId: message.requestId });
-            await this.save(scope, presets, titleModel, titleEffort, titlePricing);
+            await this.save(scope, presets, questionPresets, titleModel, titleEffort, titlePricing);
             if (JSON.stringify(providers) !== JSON.stringify(storedProviders)) {
               await vscode.workspace.getConfiguration('codexDeck').update('providers', providers, vscode.ConfigurationTarget.Global);
               this.host.providersChanged();
@@ -84,6 +86,7 @@ export class SettingsPanel implements vscode.Disposable {
           if (this.panel === panel) void webview.postMessage({ type: 'settingsState', requestId: message.requestId, saved: saving,
             scopes: scopes.map(({ id, label }) => ({ id, label })), scope: scope.id,
             presets: readPresets(this.read(scope, 'presets')), titleModel: readTitleModel(this.read(scope, 'titleModel')),
+            questionPresets: readQuestionPresets(this.read(scope, 'questionPresets')),
             titleEffort: readTitleEffort(this.read(scope, 'titleEffort')), titlePricing: readTokenPrice(this.read(scope, 'titlePricing')), providers, models, modelError });
         } finally { if (this.operation === operation) { this.saving = false; this.operation = undefined; } }
       } catch (error) {
@@ -107,9 +110,10 @@ export class SettingsPanel implements vscode.Disposable {
     return (scope.field === 'workspaceFolderValue' ? value?.workspaceFolderValue : undefined)
       ?? (scope.field !== 'globalValue' ? value?.workspaceValue : undefined) ?? value?.globalValue ?? value?.defaultValue;
   }
-  private async save(scope: Scope, presets: ReturnType<typeof validatePresets>, titleModel: string, titleEffort: string, titlePricing?: TokenPrice): Promise<void> {
+  private async save(scope: Scope, presets: ReturnType<typeof validatePresets>, questionPresets: QuestionPreset[], titleModel: string, titleEffort: string, titlePricing?: TokenPrice): Promise<void> {
     const config = vscode.workspace.getConfiguration('codexDeck', scope.uri);
     await config.update('presets', presets, scope.target);
+    await config.update('questionPresets', questionPresets, scope.target);
     await config.update('titleModel', titleModel, scope.target);
     await config.update('titleEffort', titleEffort, scope.target);
     await config.update('titlePricing', titlePricing, scope.target);

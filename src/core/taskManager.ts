@@ -171,6 +171,7 @@ export class TaskManager {
     task.effectivePermissionMode = thread.permissionMode ?? task.effectivePermissionMode;
     task.hydrated = true;
     task.error = undefined;
+    task.turnError = undefined;
     const last = task.turns.at(-1);
     // Loading history for the first time does not announce old answers as new.
     this.updateLastTurn(task, last, !!task.lastTurn);
@@ -414,6 +415,7 @@ export class TaskManager {
   private setFinishedState(task: Task, turn: Turn): void {
     task.activeTurnId = undefined;
     task.error = turn.error?.message;
+    task.turnError = undefined;
     if (turn.status === 'failed' && turn.error?.kind === 'usageLimitExceeded') {
       task.status = 'limited';
       if (!isExternalTask(task) && task.open && task.autoResume && task.suppressedTurnId !== turn.id && !task.claims.some(claim => claim.stoppedTurnId === turn.id)) {
@@ -450,6 +452,8 @@ export class TaskManager {
     if (task.turns.at(-1)?.id !== turn.id) return;
     this.updateLastTurn(task, turn);
     if (turn.status === 'inProgress') {
+      // A late turn/start acknowledgement must not erase an intervening retry notification.
+      if (task.turnError?.turnId !== turn.id) task.turnError = undefined;
       task.effectiveModel = task.settings.model ?? task.effectiveModel;
       task.effectiveEffort = isExternalTask(task) ? (task.settings.effort === 'default' ? undefined : task.settings.effort) : task.settings.effort ?? task.effectiveEffort;
       if (task.settings.mode !== 'default') task.effectivePermissionMode = task.settings.mode;
@@ -477,7 +481,7 @@ export class TaskManager {
         for (const id of this.titleJobs.keys()) this.cancelTitle(id);
         for (const task of this.tasks.values()) {
           if (!task.threadId) continue;
-          task.hydrated = false; task.status = 'disconnected'; task.activeTurnId = undefined; task.requests = []; task.error = event.message;
+          task.hydrated = false; task.status = 'disconnected'; task.activeTurnId = undefined; task.requests = []; task.error = event.message; task.turnError = undefined;
           this.touch(task);
         }
       }
@@ -498,7 +502,16 @@ export class TaskManager {
     if (!task) { if (event.type === 'request') this.gateway.rejectRequest(event.request.id, 'No task is associated with this thread'); return; }
     switch (event.type) {
       case 'turn': this.acceptTurn(task, event.turn, event.completed); break;
+      case 'error':
+        this.errors.emit(`Codex ${event.willRetry ? '再試行中' : 'エラー'} (${threadId}/${event.turnId}): ${event.error.message}`);
+        if (task.activeTurnId !== event.turnId) break;
+        task.turnError = { turnId: event.turnId, error: event.error, willRetry: event.willRetry };
+        // Retry notifications are progress updates, not completed turns or new submissions.
+        break;
       case 'item': case 'delta': {
+        if (task.turnError?.willRetry && task.turnError.turnId === event.turnId
+          && ['agentMessage', 'reasoning', 'plan'].includes(event.type === 'item' ? event.item.kind : event.kind)
+          && (event.type === 'item' || event.text)) task.turnError = undefined;
         let turn = task.turns.find(value => value.id === event.turnId);
         if (!turn) { turn = { id: event.turnId, status: 'inProgress', items: [] }; task.turns.push(turn); }
         const itemId = event.type === 'item' ? event.item.id : event.itemId;

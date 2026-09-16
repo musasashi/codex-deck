@@ -6,7 +6,8 @@ import { latestModel, presetEffortOptions, selectedModel } from '../core/setting
 import { isExternalTask, sameTaskProvider } from '../core/providers';
 import { costLabel } from '../core/cost';
 import { Composer } from './composer';
-import { bindSelectionContext, selectedTranscriptText } from './selection';
+import { SelectionMenu, selectedTranscriptText } from './selection';
+import type { QuestionPresetMenuItem } from '../core/questionPresets';
 import { UsageGauges } from './usage';
 import { Requests } from './requests';
 import { pendingSubmission, reconcilePendingSends, submissionContent, type PendingSend, type Submission } from './submissions';
@@ -20,6 +21,7 @@ let connected = false;
 let usage: Usage | undefined;
 let models: Model[] = [];
 let presetCount = 0;
+let questionPresets: QuestionPresetMenuItem[] = [];
 let cyclePresetKeybinding = '';
 let transcriptHtml = '';
 let copiedMessage: string | undefined;
@@ -39,6 +41,7 @@ let draftTimer: ReturnType<typeof setTimeout> | undefined;
 let initialFocus = true;
 const prompt = $<HTMLTextAreaElement>('prompt');
 const saved = object(vscode.getState());
+let initialQuestionId = string(saved.initialQuestionId);
 let dismissedNotice = string(saved.dismissedNotice);
 prompt.value = string(saved.draft);
 for (const savedSend of array(saved.pendingSends).map(object)) {
@@ -52,7 +55,7 @@ for (const savedSend of array(saved.pendingSends).map(object)) {
 const completion = new Composer(prompt, $('completions'), $('skills'), post, saveDraft, renderPermissions, array(saved.skillPaths).filter((value): value is string => typeof value === 'string'));
 const usageGauges = new UsageGauges($('usage-gauges'));
 const requests = new Requests($('requests'), post);
-bindSelectionContext($('transcript'), () => task?.id);
+const selectionMenu = new SelectionMenu($('transcript'), () => ({ taskId: task?.id, hasThread: !!task?.threadId, presets: questionPresets }), post, () => render());
 let selectingTranscript = false;
 document.addEventListener('selectionchange', () => {
   const selected = !!selectedTranscriptText($('transcript'));
@@ -62,7 +65,7 @@ document.addEventListener('selectionchange', () => {
 });
 
 function saveDraft(): void {
-  if (task) vscode.setState({ taskId: task.id, draft: prompt.value, skillPaths: completion.skillPaths(), pendingSends, dismissedNotice });
+  if (task) vscode.setState({ taskId: task.id, draft: prompt.value, skillPaths: completion.skillPaths(), pendingSends, dismissedNotice, initialQuestionId });
 }
 function updateSendButton(): void {
   $<HTMLButtonElement>('send').disabled = !!sending || !!task?.busy || pendingPastes.size > 0;
@@ -187,23 +190,25 @@ function render(): void {
   $('task-cost').textContent = cost.label;
   $('task-cost').title = cost.detail;
   $('task-cost').setAttribute('aria-label', `このタスクの外部API利用額: ${cost.label}`);
-  $('status').textContent = busy ? '送信中' : statusLabel[task.status];
+  const retrying = task.turnError?.willRetry === true;
+  $('status').textContent = busy ? '送信中' : retrying && task.status === 'running' ? '再試行中' : statusLabel[task.status];
   $('status-dot').className = `dot ${task.status}`;
   $<HTMLInputElement>('auto-resume').checked = task.autoResume;
   $<HTMLInputElement>('auto-resume').disabled = external;
   $<HTMLInputElement>('auto-resume').closest<HTMLElement>('label')!.hidden = external;
   const notice = $('notice');
   const waiting = task.status === 'waiting';
-  const noticeText = waiting ? `使用量の回復を待っています。${task.recoveryAt ? ` 回復予定: ${new Date(task.recoveryAt).toLocaleString()}` : ''}` : task.error ?? (!connected ? 'App Serverに未接続です。メニューから再接続できます。' : '');
+  const turnError = task.turnError ? `${retrying ? 'Codexが再試行しています。\n' : ''}${task.turnError.error.message}` : undefined;
+  const noticeText = waiting ? `使用量の回復を待っています。${task.recoveryAt ? ` 回復予定: ${new Date(task.recoveryAt).toLocaleString()}` : ''}` : task.error ?? turnError ?? (!connected ? 'App Serverに未接続です。メニューから再接続できます。' : '');
   if (waiting || dismissedNotice !== JSON.stringify([task.id, noticeText])) dismissedNotice = '';
   $('notice-text').textContent = noticeText;
   notice.hidden = !noticeText || !!dismissedNotice;
-  notice.className = waiting ? 'waiting-notice' : 'error-notice';
+  notice.className = waiting || retrying && !task.error ? 'waiting-notice' : 'error-notice';
   $('dismiss-notice').hidden = waiting;
   const conversation = $('conversation');
   const atBottom = conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight < 80;
   const transcript = $('transcript');
-  const selected = !!selectedTranscriptText(transcript);
+  const selected = selectionMenu.opened || !!selectedTranscriptText(transcript);
   const html = renderTranscript(task) + pendingSends.map(renderPendingSend).join('');
   if (transcriptHtml !== html && !selected) {
     const detailStates = new Map([...transcript.querySelectorAll<HTMLDetailsElement>('details[data-item]')].map(details => [
@@ -264,12 +269,22 @@ window.addEventListener('message', event => {
     task = message.task as Task;
     models = message.models as Model[];
     presetCount = typeof message.presetCount === 'number' ? message.presetCount : 0;
+    questionPresets = array(message.questionPresets).map(value => ({ id: string(object(value).id), name: string(object(value).name) }));
+    selectionMenu.refresh();
     enterBehavior = string(message.enterBehavior, 'modEnter');
     connected = message.connected === true;
     usage = message.usage as Usage | undefined;
     render();
     if (initialFocus && !task.threadId) prompt.focus();
     initialFocus = false;
+  } else if (message.type === 'selectionResult') {
+    selectionMenu.finished(string(message.requestId));
+  } else if (message.type === 'initialQuestion') {
+    const id = string(message.sendId), text = string(message.text);
+    if (!task || !id || id === initialQuestionId || task.threadId || sending || pendingSends.length) return;
+    initialQuestionId = id;
+    completion.restore(text, []);
+    sendSubmission({ id, text, skillPaths: [], attachments: [], optimistic: true }, true);
   } else if (message.type === 'keybindings') {
     cyclePresetKeybinding = string(message.cyclePreset);
     updatePresetTitle();

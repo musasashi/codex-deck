@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
+import { readFile, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import { buildSync } from 'esbuild';
@@ -44,16 +45,18 @@ function panel() {
   return Object.assign(webviewPanel, { messages, receive: (value: unknown) => receive(value) });
 }
 
-function activate(records: TaskRecord[], options: { remoteName?: string; isTrusted?: boolean; cliPath?: string; presets?: unknown } = { remoteName: 'wsl' }) {
+function activate(records: TaskRecord[], options: { remoteName?: string; isTrusted?: boolean; cliPath?: string; presets?: unknown; questionPresets?: unknown } = { remoteName: 'wsl' }) {
   let stored: unknown = { version: 1, tasks: structuredClone(records) };
   let clipboardText = '';
   let serializer!: vscode.WebviewPanelSerializer;
+  const serializers = new Map<string, vscode.WebviewPanelSerializer>();
   let createdPanels = 0;
   const openedPanels: ReturnType<typeof panel>[] = [];
   const trees = new Map<string, { getChildren(): Task[] }>();
   const commands = new Map<string, (arg?: unknown) => unknown>();
   const api = {
     EventEmitter: Emitter,
+    TabInputWebview: class { constructor(readonly viewType: string) {} },
     ViewColumn: { Active: -1 },
     env: { remoteName: options.remoteName, clipboard: {
       async writeText(value: string) { clipboardText = value; },
@@ -64,18 +67,23 @@ function activate(records: TaskRecord[], options: { remoteName?: string; isTrust
     window: {
       state: { focused: true },
       activeTextEditor: undefined as vscode.TextEditor | undefined,
+      tabGroups: { all: [] as { tabs: vscode.Tab[] }[], close: async (_tabs: readonly vscode.Tab[]): Promise<boolean> => true },
       showQuickPick: async (_items: { label: string; task: Task }[]): Promise<{ label: string; task: Task } | undefined> => undefined,
+      showInputBox: async (): Promise<string | undefined> => undefined,
       createOutputChannel: () => ({ ...disposable(), append() {}, appendLine() {} }),
       onDidChangeWindowState: disposable, registerFileDecorationProvider: disposable,
       registerTreeDataProvider(id: string, tree: { getChildren(): Task[] }) { trees.set(id, tree); return disposable(); },
-      registerWebviewPanelSerializer(_type: string, value: vscode.WebviewPanelSerializer) { serializer = value; return disposable(); },
-      createWebviewPanel() { createdPanels++; const value = panel(); openedPanels.push(value); return value; },
+      registerWebviewPanelSerializer(type: string, value: vscode.WebviewPanelSerializer) {
+        serializer = value; serializers.set(type, value);
+        return { dispose() { serializers.delete(type); } };
+      },
+      createWebviewPanel(viewType: string) { createdPanels++; const value = Object.assign(panel(), { viewType }); openedPanels.push(value); return value; },
     },
     workspace: {
       isTrusted: options.isTrusted ?? false, // Restoration must populate the tree even when connecting is unavailable.
       workspaceFolders: [{ uri: { fsPath: '/project' } }],
       onDidChangeConfiguration: disposable, onDidCloseTextDocument: disposable, registerTextDocumentContentProvider: disposable,
-      getConfiguration: () => ({ get: (key: string, fallback: unknown) => key === 'cliPath' ? options.cliPath ?? fallback : key === 'presets' ? options.presets ?? fallback : fallback }),
+      getConfiguration: () => ({ get: (key: string, fallback: unknown) => key === 'cliPath' ? options.cliPath ?? fallback : key === 'presets' ? options.presets ?? fallback : key === 'questionPresets' ? options.questionPresets ?? fallback : fallback }),
     },
     commands: { registerCommand(id: string, action: (arg?: unknown) => unknown) { commands.set(id, action); return disposable(); } },
   };
@@ -88,7 +96,7 @@ function activate(records: TaskRecord[], options: { remoteName?: string; isTrust
   new Function('require', 'module', 'exports', bundle)((id: string) => id === 'vscode' ? api : nodeRequire(id), module, module.exports);
   module.exports.activate(context as unknown as vscode.ExtensionContext);
   return {
-    rows: () => trees.get('codexDeck.tasks')!.getChildren(), serializer, commands, api, openedPanels,
+    rows: () => trees.get('codexDeck.tasks')!.getChildren(), serializer, serializers, commands, api, openedPanels,
     createdPanels: () => createdPanels,
     records: () => (stored as { tasks: TaskRecord[] }).tasks, clipboard: () => clipboardText,
     async shutdown() {
@@ -125,7 +133,7 @@ test('preset cycling is a customizable command bound to Ctrl+Tab in task editors
     const manifest = nodeRequire('./package.json');
     assert.equal(manifest.contributes.commands.find((command: { command: string }) => command.command === 'codexDeck.cyclePreset').title, '次のプリセットに切り替え');
     assert.deepEqual(manifest.contributes.keybindings.find((binding: { command: string }) => binding.command === 'codexDeck.cyclePreset'), {
-      command: 'codexDeck.cyclePreset', key: 'ctrl+tab', when: 'activeWebviewPanelId == codexDeck.task',
+      command: 'codexDeck.cyclePreset', key: 'ctrl+tab', when: 'activeWebviewPanelId =~ /^codexDeck\\.task\\./',
     });
 
     host.models = [{ id: 'test-model', label: 'Test', description: '', defaultEffort: 'test-effort', efforts: [{ id: 'high', description: '' }, { id: 'test-effort', description: '' }], isDefault: true, inputModalities: ['text'] }];
@@ -160,7 +168,7 @@ test('selection mentions replace the old command and use the source chat instead
     assert.equal(manifest.contributes.commands.some((command: { command: string }) => command.command === 'codexDeck.addSelection'), false);
     assert.equal(manifest.contributes.commands.find((command: { command: string }) => command.command === 'codexDeck.mentionSelection').title, 'Codex-Deckで言及');
     assert.equal(manifest.contributes.menus['editor/context'][0].command, 'codexDeck.mentionSelection');
-    assert.deepEqual(manifest.contributes.menus['webview/context'], [{ command: 'codexDeck.mentionSelection', when: 'webviewId == codexDeck.task && codexDeckHasSelection', group: 'codexDeck' }]);
+    assert.equal(manifest.contributes.menus['webview/context'], undefined);
 
     await extension.commands.get('codexDeck.mentionSelection')!({ webview: 'codexDeck.task', codexDeckTaskId: 'source', codexDeckSelectionText: '選択した文章\n  字下げを保持' });
     assert.deepEqual(source.messages.at(-1), { type: 'insertReference', text: '> 参照元: 会話「source」\n>\n> 選択した文章\n>   字下げを保持\n\n' });
@@ -257,8 +265,8 @@ test('reloading without selecting any task retains open drafts and conversations
   } finally { await reloaded.shutdown(); }
 });
 
-function connectedExtension(records: TaskRecord[] = []) {
-  const extension = activate(records);
+function connectedExtension(records: TaskRecord[] = [], options: Parameters<typeof activate>[1] = {}) {
+  const extension = activate(records, { remoteName: 'wsl', ...options });
   const { host, manager } = extension.serializer as unknown as { host: PanelHost; manager: TaskManager };
   const gateway = new FakeGateway();
   const client = manager.gateway;
@@ -274,6 +282,70 @@ function connectedExtension(records: TaskRecord[] = []) {
   host.connect = async () => {};
   return { ...extension, host, manager, gateway };
 }
+
+function editorResource(id: string) {
+  return { scheme: 'webview-panel', path: `webview-panel/webview-codexDeck.task.${encodeURIComponent(id)}-00000000-0000-4000-8000-000000000000` };
+}
+
+test('tab menu commands act on the clicked task even when an identically named task is active in another group', async () => {
+  const extension = connectedExtension();
+  const { manager, gateway, commands, api } = extension;
+  const archived: string[] = [];
+  Object.assign(manager.gateway, { forkThread: gateway.forkThread.bind(gateway), archiveThread: async (id: string) => { archived.push(id); } });
+  api.window.showInputBox = async () => '名前を変更したタスク';
+  try {
+    const first = manager.adoptThread({ ...thread('first'), title: '同じ名前' });
+    const source = { ...thread('target'), title: '同じ名前', turns: [{ id: 'target-turn', status: 'completed',
+      items: [{ id: 'target-reply', kind: 'agentMessage', data: { text: '対象の会話' } }] }] };
+    gateway.threads.set(source.id, source);
+    const target = manager.adoptThread(source);
+    await extension.serializer.deserializeWebviewPanel(panel(), { taskId: first.id });
+    await extension.serializer.deserializeWebviewPanel(Object.assign(panel(), { active: false, viewColumn: 2 }), { taskId: target.id });
+    const resource = editorResource(target.id);
+
+    await commands.get('codexDeck.copyTaskDeepLink')!(resource);
+    assert.equal(extension.clipboard(), 'codex://threads/target');
+    await commands.get('codexDeck.copyTaskMarkdown')!(resource);
+    assert.match(extension.clipboard(), /対象の会話/);
+    await commands.get('codexDeck.editor.renameTask')!(resource);
+    assert.equal(target.title, '名前を変更したタスク');
+    assert.equal(first.title, '同じ名前');
+    await commands.get('codexDeck.editor.forkTask')!(resource);
+    const fork = [...manager.tasks.values()].find(task => task.threadId?.startsWith('fork-'))!;
+    assert.deepEqual(fork.turns, target.turns);
+    assert.equal(extension.openedPanels[0]!.viewType, `codexDeck.task.${fork.id}`);
+    assert.ok(extension.serializers.has(extension.openedPanels[0]!.viewType));
+    await commands.get('codexDeck.editor.archiveTask')!(resource);
+    assert.deepEqual(archived, ['target']);
+    assert.equal(target.open, false);
+    assert.equal(first.open, true);
+
+    for (const invalid of [editorResource('missing'), { scheme: 'webview-panel', path: 'webview-panel/webview-codexDeck.settings-00000000-0000-4000-8000-000000000000' }]) {
+      await commands.get('codexDeck.editor.archiveTask')!(invalid);
+      assert.deepEqual(archived, ['target'], 'an unknown tab must never fall back to the active task');
+    }
+  } finally { await extension.shutdown(); }
+});
+
+test('saved task tabs register their serializers at startup and can be archived before being shown', async () => {
+  const extension = connectedExtension([record('first', true, true), record('hidden', true, true)]);
+  const { api, manager } = extension;
+  const hiddenTab = { input: new api.TabInputWebview('mainThreadWebview-codexDeck.task.hidden') } as vscode.Tab;
+  api.window.tabGroups.all = [{ tabs: [hiddenTab] }];
+  let closed: readonly vscode.Tab[] = [];
+  api.window.tabGroups.close = async tabs => { closed = tabs; return true; };
+  try {
+    assert.ok(extension.serializers.has('codexDeck.task.first'));
+    assert.ok(extension.serializers.has('codexDeck.task.hidden'));
+    await extension.serializer.deserializeWebviewPanel(panel(), { taskId: 'first' });
+    await extension.commands.get('codexDeck.editor.archiveTask')!(editorResource('hidden'));
+    assert.deepEqual(closed, [hiddenTab]);
+    assert.equal(manager.get('hidden').open, false);
+    assert.equal(manager.get('first').open, true);
+    assert.equal(extension.createdPanels(), 0);
+  } finally { await extension.shutdown(); }
+  assert.equal(extension.serializers.size, 0);
+});
 
 test('/plan toggles without a turn and inline instructions use the normal send path with images and skills', async () => {
   const extension = connectedExtension();
@@ -330,5 +402,81 @@ test('/plan restores a saved task before checking for an active turn and rejects
     draft.busy = true;
     await assert.rejects(host.command(draft, { type: 'send', text: '/plan' }), /実行が完了/);
     assert.equal(draft.settings.collaborationMode, undefined);
+  } finally { await extension.shutdown(); }
+});
+
+for (const settings of [
+  { model: 'latest', effort: 'high', mode: 'read-only' },
+  { model: 'hf:org/model', effort: 'default', mode: 'workspace-write', pricing: { input: 1, output: 2 } },
+]) test(`selection questions create one independent task with ${settings.model} and reference the source conversation`, async () => {
+  const questions = [{ id: 'explain', name: '具体例で', prompt: '/new という語を説明してください。', settings }];
+  const extension = connectedExtension([], { questionPresets: questions });
+  const { host, manager, gateway } = extension;
+  let referenceFile: string | undefined;
+  try {
+    const parent = { ...thread('parent'), cwd: '/source-project', status: 'active', turns: [{ id: 'source-turn', status: 'inProgress',
+      items: [{ id: 'source-reply', kind: 'agentMessage', data: { text: 'コードの説明です。' } }] }] };
+    gateway.threads.set(parent.id, parent);
+    const source = manager.adoptThread(parent);
+    source.settings = { model: 'test-model', mode: 'danger-full-access', collaborationMode: 'plan' };
+    const before = structuredClone(source);
+    const contexts: string[] = [];
+    const configuration = extension.api.workspace.getConfiguration;
+    extension.api.workspace.getConfiguration = (_section?: string, uri?: URL) => { if (uri) contexts.push(uri.pathname); return configuration(); };
+    const request = { type: 'selectionAction', action: 'question', requestId: 'ask-once', questionPresetId: 'explain', text: '選択した文章\n  code();' };
+    await Promise.all([host.command(source, request), host.command(source, request)]);
+    const child = [...manager.tasks.values()].find(task => task !== source)!;
+    assert.equal(extension.createdPanels(), 1);
+    assert.equal(child.cwd, source.cwd);
+    assert.deepEqual(child.settings, { ...settings, model: settings.model === 'latest' ? 'test-model' : settings.model, effort: settings.model.startsWith('hf:') ? undefined : 'high' });
+    assert.ok(contexts.includes(source.cwd));
+    assert.equal(gateway.sent.length, 0, 'sending waits until the new webview is ready');
+    const panel = extension.openedPanels[0]!;
+    assert.equal(panel.messages.some(message => message.type === 'initialQuestion'), false);
+    await panel.receive({ type: 'ready' });
+    await panel.receive({ type: 'ready' });
+    const initial = panel.messages.filter(message => message.type === 'initialQuestion');
+    assert.equal(initial.length, 1);
+    assert.match(String(initial[0]!.text), /^質問: \/new/);
+    assert.match(String(initial[0]!.text), /> 選択した文章\n>   code\(\);/);
+    assert.match(String(initial[0]!.text), /codex:\/\/threads\/parent$/);
+    await panel.receive({ type: 'send', text: initial[0]!.text, sendId: initial[0]!.sendId, attachmentIds: [], skillPaths: [] });
+    assert.equal(gateway.sent.length, 1);
+    assert.equal(gateway.steered.length, 0);
+    assert.equal(manager.tasks.size, 2, '/new in a question must not execute a command');
+    assert.equal(gateway.sent[0]!.settings.mode, settings.mode);
+    const reference = gateway.sent[0]!.input.find(input => input.text?.includes('<codex_deck_reference>'))!.text!;
+    referenceFile = JSON.parse(reference.match(/スナップショット: (.+)/)![1]!);
+    assert.match(await readFile(referenceFile!, 'utf8'), /コードの説明です/);
+    assert.deepEqual(source, before);
+    questions[0]!.settings = { model: 'hf:another/model', effort: 'default', mode: 'read-only' };
+    await panel.receive({ type: 'ready' });
+    assert.equal(child.settings.mode, settings.mode, 'editing questions does not change an existing task');
+  } finally {
+    await extension.shutdown();
+    if (referenceFile) await rm(path.dirname(referenceFile), { recursive: true, force: true });
+  }
+});
+
+test('invalid selection questions do not create tasks; copy and mention remain scoped to the source', async () => {
+  const questions = [{ id: 'ask', name: '質問', prompt: '説明してください', settings: { model: 'missing', effort: 'high', mode: 'read-only' } }];
+  const extension = connectedExtension([], { questionPresets: questions });
+  const { host, manager } = extension;
+  try {
+    const source = manager.adoptThread(thread('source'));
+    const base = { type: 'selectionAction', action: 'question', text: '説明', questionPresetId: 'ask' };
+    await assert.rejects(host.command(source, { ...base, requestId: 'missing-model' }), /モデル/);
+    await assert.rejects(host.command(source, { ...base, requestId: 'deleted', questionPresetId: 'deleted' }), /見つからない/);
+    questions.push({ ...questions[0]! });
+    await assert.rejects(host.command(source, { ...base, requestId: 'duplicate' }), /重複/);
+    assert.equal(extension.createdPanels(), 0);
+    assert.equal(manager.tasks.size, 1);
+    await host.command(source, { ...base, action: 'copy', text: '  正確な引用\n次の行', requestId: 'copy' });
+    assert.equal(extension.clipboard(), '  正確な引用\n次の行');
+    await host.command(source, { ...base, action: 'mention', requestId: 'mention' });
+    const panel = extension.openedPanels[0]!;
+    await panel.receive({ type: 'ready' });
+    assert.ok(panel.messages.some(message => message.type === 'insertReference' && String(message.text).includes('会話「source」')));
+    assert.equal(manager.tasks.size, 1);
   } finally { await extension.shutdown(); }
 });

@@ -100,6 +100,7 @@ export interface RequestAnswer { choice?: number; answers?: Record<string, strin
 export type ServerEvent =
   | { type: 'connection'; connected: boolean; message?: string }
   | { type: 'turn'; threadId: string; turn: Turn; completed: boolean }
+  | { type: 'error'; threadId: string; turnId: string; error: TurnError; willRetry: boolean }
   | { type: 'item'; threadId: string; turnId: string; item: Item; completed: boolean }
   | { type: 'delta'; threadId: string; turnId: string; itemId: string; kind: string; field: string; text: string; index?: number }
   | { type: 'status'; threadId: string; status: string; flags: string[] }
@@ -170,6 +171,7 @@ export interface Task extends TaskRecord {
   busy: boolean;
   hydrated: boolean;
   error?: string;
+  turnError?: { turnId: string; error: TurnError; willRetry: boolean };
   recoveryAt?: number;
   diff?: string;
   plan?: { explanation: string; steps: { step: string; status: string }[] };

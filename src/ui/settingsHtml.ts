@@ -1,6 +1,6 @@
 export function settingsHtml(options: { cspSource: string; script: string; css: string; nonce: string }): string {
   return `<!doctype html><html lang="ja"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${options.cspSource}; script-src 'nonce-${options.nonce}';"><link href="${options.css}" rel="stylesheet"><title>Codex Deck 設定</title></head><body>
-    <main><header><h1>Codex Deck 設定</h1><p>タスクのプリセットと、タスク名の要約に使うモデル・推論強度を設定します。先頭のプリセットが新規タスクの初期設定になります。</p></header>
+    <main><header><h1>Codex Deck 設定</h1><p>タスクと質問のプリセット、タスク名の要約に使うモデル・推論強度を設定します。先頭のタスクプリセットが新規タスクの初期設定になります。</p></header>
     <form id="settings-form"><label for="scope">保存先</label><select id="scope" disabled></select>
       <fieldset id="providers" disabled><legend>Responses API接続先</legend>
         <p class="hint">接続先はユーザー設定に保存します。Base URLには「/responses」の前までを入力してください。HTTPS必須で、HTTPはループバック接続（localhost・127.0.0.0/8・[::1]）のみ使用できます。登録したモデルはプリセットとタスク名の候補に追加されます。対応機能はモデルの仕様に合わせて選択してください。</p>
@@ -10,6 +10,11 @@ export function settingsHtml(options: { cspSource: string; script: string; css: 
         <p class="hint">タスクの切り替えボタンで、上から順に循環します。プリセットは1件以上必要です。</p>
         <div id="preset-list"></div>
         <button id="add-preset" type="button" class="accent">プリセットを追加</button>
+      </fieldset>
+      <fieldset id="question-presets" disabled><legend>質問プリセット</legend>
+        <p class="hint">タスクの文章を範囲選択して右クリックすると、上から順に表示します。選ぶと質問文・選択範囲・元の会話へのリンクを新規タスクに自動送信します。モデル・推論強度・権限は質問ごとに設定します。</p>
+        <div id="question-preset-list"></div>
+        <button id="add-question-preset" type="button" class="accent">質問プリセットを追加</button>
       </fieldset>
       <fieldset id="task-titles" disabled><legend>タスク名</legend>
         <label for="title-model">要約に使うモデル</label><select id="title-model" aria-describedby="title-model-description"></select>
