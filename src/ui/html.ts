@@ -4,7 +4,7 @@ export function chatHtml(options: { cspSource: string; script: string; css: stri
     '使用量の上限で作業が停止した場合、利用枠の回復を確認してから自動で作業を再開します。',
     '待機中は、VS Codeを起動し、接続した状態にしておいてください。',
   ].join('\n');
-    return `<!doctype html><html lang="ja"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource}; img-src ${cspSource} data:; script-src 'nonce-${nonce}';"><link href="${css}" rel="stylesheet"><title>Codex Deck</title></head><body>
+    return `<!doctype html><html lang="ja"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource}; style-src-attr 'unsafe-inline'; font-src ${cspSource}; img-src ${cspSource} data:; script-src 'nonce-${nonce}';"><link href="${css}" rel="stylesheet"><title>Codex Deck</title></head><body>
       <header class="topbar"><div class="connection"><span id="status-dot" class="dot"></span><span id="status">接続中</span></div><label class="auto-resume" title="${autoResumeDescription}"><input id="auto-resume" type="checkbox">使用量回復後に自動継続</label><button id="menu" class="icon-button" aria-label="コマンドメニュー" title="コマンドメニュー">•••</button></header>
       <div id="notice" role="status" hidden><span id="notice-text"></span><button type="button" id="dismiss-notice" aria-label="メッセージを閉じる" title="メッセージを閉じる">×</button></div>
       <main id="conversation" tabindex="0" aria-label="会話"><section id="skills" aria-label="登録されたスキル" hidden></section><div id="transcript" role="log" aria-label="チャット履歴"></div><div id="plan"></div></main>

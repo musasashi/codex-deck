@@ -679,6 +679,7 @@
     "test:history": "npm run build && node --import tsx scripts/testHistory.ts"
   },
   "dependencies": {
+    "katex": "^0.18.7",
     "marked": "^16.3.0"
   },
   "devDependencies": {

@@ -1,3 +1,5 @@
+@import 'katex/dist/katex.min.css';
+
 :root { color-scheme: light dark; --muted: var(--vscode-descriptionForeground); --border: var(--vscode-widget-border, #7774); --surface: var(--vscode-input-background); }
 * { box-sizing: border-box; }
 body { margin: 0; height: 100vh; display: flex; flex-direction: column; color: var(--vscode-foreground); background: var(--vscode-editor-background); font: var(--vscode-font-size, 13px)/1.65 var(--vscode-font-family, sans-serif); }
@@ -65,6 +67,9 @@ code, pre { font-family: var(--vscode-editor-font-family, monospace); font-size:
 .markdown table { border-collapse: collapse; display: block; overflow: auto; }
 .markdown td, .markdown th { border: 1px solid var(--border); padding: 6px 10px; }
 .markdown blockquote { border-left: 3px solid var(--vscode-textBlockQuote-border); margin-left: 0; padding-left: 14px; color: var(--muted); }
+.markdown .katex { overflow-wrap: normal; }
+.markdown .katex-display { margin: 12px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; }
+.markdown .katex-display > .katex { width: max-content; min-width: 100%; }
 .inline-link { display: inline; color: var(--vscode-textLink-foreground); background: transparent; padding: 0; border: 0; text-align: left; overflow-wrap: anywhere; }
 .inline-link:hover { color: var(--vscode-textLink-activeForeground); background: transparent; text-decoration: underline; }
 details { margin: 10px 0; color: var(--muted); }
