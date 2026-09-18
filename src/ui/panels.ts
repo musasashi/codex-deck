@@ -183,7 +183,7 @@ export class TaskPanels implements vscode.WebviewPanelSerializer, vscode.Disposa
   private html(webview: vscode.Webview): string {
     const nonce = randomBytes(18).toString('base64');
     const script = webview.asWebviewUri(vscode.Uri.joinPath(this.uri, 'dist', 'webview.js'));
-    const css = webview.asWebviewUri(vscode.Uri.joinPath(this.uri, 'media', 'chat.css'));
+    const css = webview.asWebviewUri(vscode.Uri.joinPath(this.uri, 'dist', 'chat.css'));
     return chatHtml({ cspSource: webview.cspSource, script: script.toString(), css: css.toString(), nonce });
   }
   dispose(): void {

@@ -92,12 +92,11 @@ export class TaskManager {
       effort: isExternalTask(source) ? source.settings.effort : source.settings.effort ?? source.effectiveEffort };
     const thread = await this.gateway.forkThread(threadId, { lastTurnId, settings });
     const task = this.adoptThread({ ...thread, name: undefined, title: FORK_TITLE });
+    task.settings = { ...settings };
     if (isExternalTask(task)) {
-      task.settings = { ...settings };
       task.effectiveEffort = settings.effort === 'default' ? undefined : settings.effort;
       task.cost = emptyTaskCost(false, thread.turns.map(turn => turn.id));
     }
-    if (source.settings.collaborationMode) task.settings.collaborationMode = source.settings.collaborationMode;
     task.titleSource = 'fork';
     // Persist the fallback so history and reloads also stop using the inherited name.
     try { await this.writeTitle(task, task.title, 'fork'); }
@@ -164,7 +163,8 @@ export class TaskManager {
     task.instructionSources = thread.instructionSources ?? task.instructionSources;
     task.effectiveModel = thread.model;
     task.modelProvider = thread.modelProvider ?? task.modelProvider;
-    if (!task.settings.model && isExternalModel(thread.model)) task.settings.model = thread.model;
+    task.settings.model ??= thread.model;
+    if (!isExternalTask(task)) task.settings.effort ??= thread.effort;
     if (isExternalTask(task)) { task.autoResume = false; this.cancel(task); task.cost ??= emptyTaskCost(thread.turns.length > 0, thread.turns.map(turn => turn.id)); }
     if (isHuggingFaceTask(task)) task.settings.effort = 'default';
     task.effectiveEffort = isExternalTask(task) ? (task.settings.effort === 'default' ? undefined : task.settings.effort) : thread.effort;

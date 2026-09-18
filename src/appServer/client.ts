@@ -177,21 +177,27 @@ export class AppServerClient implements Gateway {
     const known = this.threadProviders.get(threadId);
     if (known) return known;
     const result = await this.call('thread/read', { threadId, includeTurns: false });
-    const provider = string(object(result.thread).modelProvider) || undefined;
+    const thread = decodeThread(result.thread);
+    const provider = thread.modelProvider;
     if (provider) this.threadProviders.set(threadId, provider);
+    this.threadDefaults.set(threadId, { model: modelRequest(thread.model).model, effort: thread.effort });
     return provider;
   }
   async resumeThread(threadId: string, settings?: RunSettings): Promise<Thread> {
     const provider = await this.storedProvider(threadId);
-    const model = modelRequest(settings?.model);
-    this.assertProvider(provider, settings?.model);
-    if (isExternalProvider(provider) || isExternalModel(settings?.model)) this.threadPricing.set(threadId, settings?.pricing);
+    const defaults = this.threadDefaults.get(threadId);
+    // A provider override bypasses Codex's stored-model fallback, so pin the recorded settings too.
+    const selectedModel = settings?.model ?? displayModel(defaults?.model, provider);
+    const effort = settings?.effort ?? (!settings?.model && !isExternalProvider(provider) ? defaults?.effort : undefined);
+    const model = modelRequest(selectedModel);
+    this.assertProvider(provider, selectedModel);
+    if (isExternalProvider(provider) || isExternalModel(selectedModel)) this.threadPricing.set(threadId, settings?.pricing);
     const thread = await this.threadResult(await this.call('thread/resume', { threadId,
       ...(provider ? { modelProvider: provider } : model.modelProvider ? { modelProvider: model.modelProvider } : {}),
       ...(model.model && model.model !== 'latest' ? { model: model.model } : {}),
-      ...await this.runConfig(settings?.model, settings?.effort, provider),
+      ...await this.runConfig(selectedModel, effort, provider),
     }));
-    this.threadSettings.set(threadId, JSON.stringify([settings?.model, settings?.effort]));
+    this.threadSettings.set(threadId, JSON.stringify([selectedModel, effort]));
     return thread;
   }
   async readThread(threadId: string): Promise<Thread> { return this.threadResult(await this.call('thread/read', { threadId, includeTurns: true })); }

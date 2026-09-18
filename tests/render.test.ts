@@ -3,6 +3,65 @@ import assert from 'node:assert/strict';
 import { renderAttachments, renderItem, renderMarkdown } from '../src/webview/render';
 import { chatHtml } from '../src/ui/html';
 import { taskReferenceText } from '../src/core/taskReferenceText';
+import { inducedVoltageAnswer } from './fixtures/math';
+
+test('the reported induced-voltage answer renders fractions and all three aligned equations', () => {
+  const html = renderMarkdown(inducedVoltageAnswer);
+  assert.equal((html.match(/class="katex-display"/g) ?? []).length, 2);
+  assert.equal((html.match(/<mfrac>/g) ?? []).length, 2);
+  assert.match(html, /<mtable/);
+  for (const phase of ['u', 'v', 'w']) assert.ok(html.includes(`e_${phase} &amp;\\approx`));
+  assert.match(html, /<strong>50 ms<\/strong>/);
+  assert.doesNotMatch(html, /katex-error/);
+});
+
+test('inline and display delimiters work in paragraphs, lists and tables without Markdown altering TeX', () => {
+  const html = renderMarkdown(String.raw`周波数は \(f_e = 20\ \mathrm{Hz}\)、周期は $T = 1/f_e$ です。
+\[a_b + c_d\]
+$$\frac{1}{2}$$
+
+- **電圧**: $e_u$ と \(e_v\)
+
+| 信号 | 値 |
+| --- | --- |
+| $e_w$ | \(5.10\) |`);
+  assert.equal((html.match(/class="katex"/g) ?? []).length, 8);
+  assert.equal((html.match(/class="katex-display"/g) ?? []).length, 2);
+  assert.match(html, /<li><strong>電圧<\/strong>/);
+  assert.match(html, /<td><span class="katex">/);
+  assert.doesNotMatch(html, /<em>|katex-error/);
+  assert.doesNotMatch(renderMarkdown(String.raw`$\text{cost: \$5}$`), /katex-error/);
+});
+
+test('code, escaped delimiters and currency remain literal', () => {
+  const html = renderMarkdown([
+    '`\\(x\\)` と `$x$`、`$$x$$`、`\\[x\\]`',
+    '```tex\n\\[x\\]\n$$x$$\n```',
+    '    $$x$$',
+    String.raw`\\(literal\\) と \$5、価格は $5 と $10 です。`,
+  ].join('\n\n'));
+  assert.doesNotMatch(html, /class="katex/);
+  assert.match(html, /<code>\\\(x\\\)<\/code>/);
+  assert.ok(html.includes('価格は $5 と $10 です。'));
+});
+
+test('partial and invalid math do not prevent the rest of a message from rendering', () => {
+  const partial = '\\[\n\\frac{600}{60}';
+  assert.doesNotMatch(renderMarkdown(partial), /class="katex/);
+  assert.match(renderMarkdown(`${partial}\n\\]`), /class="katex-display"/);
+  const invalid = renderMarkdown('\\[\\frac{1}{\\]\n\n**後続の説明**');
+  assert.match(invalid, /class="katex-error"/);
+  assert.match(invalid, /<strong>後続の説明<\/strong>/);
+});
+
+test('math cannot introduce executable HTML, links or external resources', () => {
+  const html = renderMarkdown(String.raw`\(\href{javascript:alert(1)}{run}\)
+\(\includegraphics{https://host/image.png}\)
+\(\htmlStyle{background:url(https://host/image.png)}{x}\)
+\[\invalid{<img src=x onerror="alert(1)">}\]`);
+  assert.doesNotMatch(html, /<a\b|<img\b|<script\b|style="[^"]*url\(/);
+  assert.match(html, /&lt;img/);
+});
 
 test('model text cannot inject executable HTML or navigate using command links', () => {
   const html = renderMarkdown('<img src=x onerror="alert(1)">\n\n[run](command:deleteEverything)\n\n![remote](https://host/image.png)');
@@ -46,7 +105,9 @@ test('webview CSP disables network, raw HTML scripts and command execution', () 
   const html = chatHtml({ cspSource: 'test:', script: 'test:/webview.js', css: 'test:/chat.css', nonce: 'nonce' });
   assert.ok(html.includes("default-src 'none'"));
   assert.ok(html.includes("script-src 'nonce-nonce'"));
-  assert.ok(!html.includes('unsafe-inline'));
+  assert.ok(html.includes('style-src test:;'));
+  assert.ok(html.includes("style-src-attr 'unsafe-inline';"));
+  assert.ok(html.includes('font-src test:;'));
   assert.ok(html.includes('使用量回復後に自動継続'));
 });
 

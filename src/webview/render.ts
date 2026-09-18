@@ -2,10 +2,11 @@ import { Marked } from 'marked';
 import { array, object, string, type Attachment, type Item, type Task, type Turn } from '../core/types';
 import { isImageDataUrl } from '../core/attachments';
 import { taskReferenceBody } from '../core/taskReferenceText';
+import { mathExtensions } from './math';
 
 export const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);
 const copyIcon = '<svg viewBox="0 0 16 16" aria-hidden="true"><g class="copy-icon"><rect x="2" y="5" width="9" height="9" rx="2"/><path d="M5 5V4a2 2 0 0 1 2-2h5a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-1"/></g><path class="copied-icon" d="m3 8 3 3 7-7"/></svg>';
-const markdown = new Marked({ breaks: true, gfm: true });
+const markdown = new Marked({ breaks: true, gfm: true, extensions: mathExtensions });
 markdown.use({ renderer: {
   html({ text }) { return escapeHtml(text); },
   link({ href, tokens }) { return `<button class="inline-link" data-link="${escapeHtml(href)}">${this.parser.parseInline(tokens)}</button>`; },

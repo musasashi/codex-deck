@@ -13,6 +13,7 @@ import type { Skill, Task, Usage } from '../../src/core/types';
 import { emptyTaskCost } from '../../src/core/cost';
 import { withHuggingFaceModels } from '../../src/core/huggingFace';
 import { providerModels, validateProviders } from '../../src/core/providers';
+import { inducedVoltageAnswer } from '../fixtures/math';
 
 test('Responses tasks only offer their own provider and declared efforts, including the provider default', async ({ page }) => {
   const catalog = providerModels(validateProviders([
@@ -137,7 +138,8 @@ test.beforeEach(async ({ page }) => {
   await page.route('http://localhost/**', async route => {
     const url = route.request().url();
     if (url.endsWith('/webview.js')) await route.fulfill({ contentType: 'text/javascript', body: await readFile('dist/webview.js', 'utf8') });
-    else if (url.endsWith('/chat.css')) await route.fulfill({ contentType: 'text/css', body: theme + await readFile('media/chat.css', 'utf8') });
+    else if (url.endsWith('/chat.css')) await route.fulfill({ contentType: 'text/css', body: theme + await readFile('dist/chat.css', 'utf8') });
+    else if (/\/fonts\/[\w.-]+\.(woff2?|ttf)$/.test(url)) await route.fulfill({ contentType: `font/${url.split('.').at(-1)}`, body: await readFile(`dist${new URL(url).pathname}`) });
     else await route.fulfill({ contentType: 'text/html', body: html });
   });
   await page.goto('http://localhost/');
@@ -148,6 +150,45 @@ async function openSelectionMenu(page: Page, selector: string, point?: { x: numb
   if (point) await page.mouse.click(point.x, point.y, { button: 'right' });
   else await page.locator(selector).click({ button: 'right' });
 }
+
+test('reference equations render with bundled fonts and styles under the webview CSP', async ({ page }, info) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.evaluate(() => {
+    const violations: string[] = [];
+    Object.assign(window, { mathCspViolations: violations });
+    document.addEventListener('securitypolicyviolation', event => violations.push(event.violatedDirective));
+  });
+  const value = task();
+  value.turns = [{ id: 'math', status: 'completed', items: [{ id: 'reply', kind: 'agentMessage', data: { text: inducedVoltageAnswer } }] }];
+  await state(page, value);
+  await expect(page.locator('.katex-display')).toHaveCount(2);
+  await expect(page.locator('.katex-error')).toHaveCount(0);
+  await expect(page.locator('.katex-display .katex-html').first()).toBeVisible();
+  const fonts = await page.evaluate(async () => {
+    await document.fonts.ready;
+    return Array.from(document.fonts).filter(font => font.family.startsWith('KaTeX') && font.status === 'loaded').map(font => font.family);
+  });
+  await page.screenshot({ path: info.outputPath('reference-math.png'), fullPage: true });
+  expect(fonts).toContain('KaTeX_Main');
+  expect(fonts).toContain('KaTeX_Math');
+  expect(await page.locator('.frac-line').first().evaluate(element => parseFloat(getComputedStyle(element).borderBottomWidth))).toBeGreaterThan(0);
+  expect(await page.evaluate(() => (window as unknown as { mathCspViolations: string[] }).mathCspViolations)).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test('wide display equations scroll within a narrow chat instead of expanding the page', async ({ page }, info) => {
+  await page.setViewportSize({ width: 380, height: 850 });
+  const value = task();
+  value.turns = [{ id: 'math', status: 'completed', items: [{ id: 'reply', kind: 'agentMessage', data: { text: `$$${Array.from({ length: 40 }, (_, index) => `a_{${index}}`).join(' + ')}$$` } }] }];
+  await state(page, value);
+  const bounds = await page.locator('.katex-display').evaluate(element => ({ width: element.clientWidth, scrollWidth: element.scrollWidth,
+    left: element.getBoundingClientRect().left, formulaLeft: element.querySelector('.katex-html')!.getBoundingClientRect().left }));
+  expect(bounds.scrollWidth).toBeGreaterThan(bounds.width);
+  expect(bounds.formulaLeft).toBeGreaterThanOrEqual(bounds.left);
+  expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
+  await page.screenshot({ path: info.outputPath('wide-math.png'), fullPage: true });
+});
 
 test('dragging an answer exposes a selection menu and appends a quote followed by a comment', async ({ page }, info) => {
   const value = task();
