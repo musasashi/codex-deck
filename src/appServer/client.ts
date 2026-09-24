@@ -43,6 +43,7 @@ export function decodeThread(raw: unknown): Thread {
   const status = object(data.status);
   return {
     id: requiredString(data.id, 'thread.id'), title: string(data.name) || string(data.preview).slice(0, 80) || '新規タスク', name: string(data.name) || undefined,
+    forkedFromId: string(data.forkedFromId) || undefined, parentThreadId: string(data.parentThreadId) || undefined,
     cwd: string(data.cwd), status: string(status.type, 'unknown'), activeFlags: array(status.activeFlags).filter((v): v is string => typeof v === 'string'),
     turns: array(data.turns).map(decodeTurn), updatedAt: typeof data.updatedAt === 'number' ? data.updatedAt : undefined,
     model: displayModel(typeof data.model === 'string' ? data.model : undefined, string(data.modelProvider)),
@@ -238,6 +239,15 @@ export class AppServerClient implements Gateway {
     const result = await this.call('thread/list', { limit: 50, archived, useStateDbOnly: true, ...(cursor ? { cursor } : {}) });
     return { threads: array(result.data).map(decodeThread), cursor: typeof result.nextCursor === 'string' ? result.nextCursor : undefined };
   }
+  async listThreadsForDeletion(): Promise<Thread[]> {
+    // References can live outside the visible history page, provider, or archive.
+    const sourceKinds = ['cli', 'vscode', 'exec', 'appServer', 'subAgent', 'subAgentReview', 'subAgentCompact', 'subAgentThreadSpawn', 'subAgentOther', 'unknown'];
+    const threads: Thread[] = [];
+    for (const archived of [false, true]) {
+      threads.push(...(await this.pages('thread/list', { limit: 100, archived, useStateDbOnly: true, modelProviders: [], sourceKinds })).map(decodeThread));
+    }
+    return threads;
+  }
   async forkThread(threadId: string, options: { cwd?: string; lastTurnId?: string; settings?: RunSettings } = {}): Promise<Thread> {
     const provider = await this.storedProvider(threadId);
     const model = modelRequest(options.settings?.model);
@@ -253,6 +263,7 @@ export class AppServerClient implements Gateway {
     return this.titles.generate(request, signal);
   }
   async archiveThread(threadId: string): Promise<void> { await this.call('thread/archive', { threadId }); }
+  async deleteThread(threadId: string): Promise<void> { await this.call('thread/delete', { threadId }); }
   async unarchiveThread(threadId: string): Promise<void> { await this.call('thread/unarchive', { threadId }); }
   async compactThread(threadId: string): Promise<void> { await this.call('thread/compact/start', { threadId }); }
   private encodeInput(input: Input[]): JsonObject[] {
@@ -450,7 +461,8 @@ export class AppServerClient implements Gateway {
           this.emitCost(threadId, threadId, data.tokenUsage, this.threadPricing.get(threadId), turnId);
         }
         break;
-      case 'thread/archived': case 'thread/deleted': this.events.emit({ type: 'archived', threadId }); break;
+      case 'thread/archived': this.events.emit({ type: 'archived', threadId }); break;
+      case 'thread/deleted': this.events.emit({ type: 'deleted', threadId }); break;
       case 'serverRequest/resolved': {
         if (typeof data.requestId !== 'string' && typeof data.requestId !== 'number') break;
         const id = requestKey(data.requestId);

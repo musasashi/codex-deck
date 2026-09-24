@@ -56,6 +56,8 @@ export interface Turn {
 }
 export interface Thread {
   id: string;
+  forkedFromId?: string;
+  parentThreadId?: string;
   title: string;
   name?: string;
   cwd: string;
@@ -118,7 +120,7 @@ export type ServerEvent =
   | { type: 'warning'; threadId?: string; message: string }
   | { type: 'tokens'; threadId: string; value: unknown }
   | { type: 'cost'; threadId: string; sample: CostSample }
-  | { type: 'archived'; threadId: string };
+  | { type: 'archived' | 'deleted'; threadId: string };
 
 export interface Gateway {
   readonly connected: boolean;

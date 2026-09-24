@@ -9,6 +9,7 @@ import { appServerEnvironment, requireWslHost } from './appServer/environment';
 import { HuggingFaceProxy } from './appServer/huggingFaceProxy';
 import { ResponsesConnections } from './appServer/responsesConnections';
 import { TaskManager, readTaskRecords } from './core/taskManager';
+import { deleteThreadHistory } from './core/threadDeletion';
 import { messageMarkdown, taskMarkdown } from './core/taskCopy';
 import { linkedThreadId, taskDeepLink } from './core/taskReferences';
 import { selectionReference } from './core/selectionReference';
@@ -400,6 +401,24 @@ class DeckExtension implements PanelHost {
         const task = [...this.manager.tasks.values()].find(task => task.threadId === thread.id);
         if (task) await this.archive(task);
         else { await this.connect(); await this.client.archiveThread(thread.id); }
+      },
+      delete: async (thread, confirm) => {
+        await this.connect();
+        const validate = (threads: { id: string; title: string }[]): void => {
+          const ids = new Set(threads.map(thread => thread.id));
+          const running = [...this.manager.tasks.values()].find(task => task.threadId && ids.has(task.threadId) && (task.busy || isTaskRunning(task)));
+          if (running) throw new Error(`「${running.title}」の実行を停止してから削除してください。`);
+        };
+        return deleteThreadHistory(thread, {
+          list: () => this.client.listThreadsForDeletion(), validate,
+          delete: async target => {
+            validate([target]);
+            const task = [...this.manager.tasks.values()].find(task => task.threadId === target.id);
+            if (task) this.manager.setAutoResume(task.id, false);
+            await this.client.deleteThread(target.id);
+            this.manager.removeThread(target.id);
+          },
+        }, confirm);
       },
       report: error => this.report(error),
     });

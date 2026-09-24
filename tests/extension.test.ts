@@ -464,6 +464,29 @@ test('saved task tabs register their serializers at startup and can be archived 
   assert.equal(extension.serializers.size, 0);
 });
 
+test('deleted chats close visible and hidden tabs and cannot restore saved task data', async () => {
+  const extension = connectedExtension([record('visible', true), record('hidden', true), record('other', true)]);
+  extension.gateway.threads.set('thread-visible', thread('thread-visible'));
+  const { api, manager } = extension;
+  const hiddenTab = { input: new api.TabInputWebview('mainThreadWebview-codexDeck.task.hidden') } as vscode.Tab;
+  api.window.tabGroups.all = [{ tabs: [hiddenTab] }];
+  let closed: readonly vscode.Tab[] = [];
+  api.window.tabGroups.close = async tabs => { closed = tabs; return true; };
+  const visible = panel();
+  let disposed = false;
+  visible.onDidDispose(() => { disposed = true; });
+  try {
+    await extension.serializer.deserializeWebviewPanel(visible, { taskId: 'visible' });
+    manager.gateway.events.emit({ type: 'deleted', threadId: 'thread-visible' });
+    manager.gateway.events.emit({ type: 'deleted', threadId: 'thread-hidden' });
+    await manager.flush();
+    assert.equal(disposed, true);
+    assert.deepEqual(closed, [hiddenTab]);
+    assert.deepEqual(extension.records().map(record => record.id), ['other']);
+    assert.deepEqual(extension.rows().map(task => task.id), ['other']);
+  } finally { await extension.shutdown(); }
+});
+
 test('/plan toggles without a turn and inline instructions use the normal send path with images and skills', async () => {
   const extension = connectedExtension();
   const { host, manager, gateway } = extension;
