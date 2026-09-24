@@ -80,7 +80,10 @@ export interface LimitBucket {
   credits?: { hasCredits: boolean; unlimited: boolean };
   complete: boolean;
 }
-export interface Usage { buckets: LimitBucket[] }
+export interface ResetCredit { id: string; title?: string; expiresAt: number | null }
+export interface ResetCredits { availableCount: number; credits?: ResetCredit[] }
+export type ResetCreditOutcome = 'reset' | 'nothingToReset' | 'noCredit' | 'alreadyRedeemed';
+export interface Usage { buckets: LimitBucket[]; resetCredits?: ResetCredits; accountId?: string }
 export interface PendingRequest {
   id: string;
   threadId: string;

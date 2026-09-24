@@ -19,6 +19,7 @@ import { workingDiff } from './core/gitDiff';
 import { isHuggingFaceModel, withHuggingFaceModels } from './core/huggingFace';
 import { isExternalModel, parseResponsesModel, providerModels, readProviders, sameTaskProvider, type ResponsesProvider } from './core/providers';
 import { readTokenPrice } from './core/cost';
+import { availableResetCredits, resetCreditExpiry } from './core/usage';
 import { nextPresetIndex, readPresets, readTitleEffort, readTitleModel, resolveRunSettings, selectedModel, taskPresets, validatePreset } from './core/settings';
 import { array, object, string, messageOf, statusLabel, isTaskRunning, type ComposerCatalog, type ExecutionMode, type JsonObject, type Model, type Task } from './core/types';
 import { TaskPanels, TaskTree, type PanelHost } from './ui/panels';
@@ -55,6 +56,9 @@ class DeckExtension implements PanelHost {
   private virtualDocuments = new Map<string, string>();
   private presetSelections = new WeakMap<Task, { signature: string; index: number }>();
   private questionStarts = new WeakMap<Task, { requestId: string; promise: Promise<void> }>();
+  private resetCreditBusy = false;
+  private resetCreditEpoch = 0;
+  private resetCreditKeys = new Map<string, string>();
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.manager = new TaskManager(this.client, { save: async records => { await context.workspaceState.update(STORAGE_KEY, { version: 1, tasks: records }); } }, readTaskRecords(context.workspaceState.get(STORAGE_KEY)), {
@@ -96,6 +100,10 @@ class DeckExtension implements PanelHost {
       this.output.appendLine(`${task.title}: ${statusLabel[task.status]}`);
     });
     const eventsSubscription = this.client.events.subscribe(event => {
+      if (event.type === 'account' || event.type === 'connection') {
+        this.resetCreditEpoch++;
+        if (event.type === 'account') this.resetCreditKeys.clear();
+      }
       if (event.type === 'skills') this.invalidateComposerCatalogs();
       if (event.type === 'account') {
         if (event.success !== undefined) {
@@ -238,6 +246,7 @@ class DeckExtension implements PanelHost {
   }
   async command(task: Task, message: JsonObject): Promise<JsonObject | void> {
     switch (message.type) {
+      case 'requestResetCredit': return this.requestResetCredit(task, message);
       case 'selectionAction': {
         const text = string(message.text), requestId = string(message.requestId);
         if (!requestId || !text.trim()) throw new Error('操作する文章を範囲選択してください。');
@@ -307,6 +316,45 @@ class DeckExtension implements PanelHost {
         await this.send(task, text, message); return;
       }
     }
+  }
+  private async requestResetCredit(task: Task, message: JsonObject): Promise<JsonObject> {
+    const result = { type: 'resetCreditResult', requestId: message.requestId };
+    const creditId = string(message.creditId);
+    if (!creditId || !string(message.requestId)) return { ...result, error: '使用するチケットを選択してください。' };
+    if (this.resetCreditBusy) return { ...result, error: '別のチケット操作が進行中です。' };
+    this.resetCreditBusy = true;
+    const epoch = this.resetCreditEpoch;
+    try {
+      await this.manager.checkUsage();
+      const snapshot = this.manager.usage;
+      const credit = availableResetCredits(snapshot?.resetCredits).find(credit => credit.id === creditId);
+      if (!credit || epoch !== this.resetCreditEpoch || !this.client.connected) throw new Error('このチケットは現在使用できません。残数と期限を確認してください。');
+      const action = 'チケットを使用';
+      const confirmed = await vscode.window.showWarningMessage('リセットチケットを1枚使用しますか？', {
+        modal: true, detail: `${credit.title ?? 'Codex リセットチケット'}\n${resetCreditExpiry(credit.expiresAt)}\n\n使用するとCodexの使用量枠がリセットされます。`,
+      }, action);
+      if (confirmed !== action) return result;
+      await this.manager.checkUsage();
+      const current = availableResetCredits(this.manager.usage?.resetCredits).find(credit => credit.id === creditId);
+      if (!current || current.expiresAt !== credit.expiresAt || this.manager.usage?.accountId !== snapshot?.accountId
+        || epoch !== this.resetCreditEpoch || !this.client.connected || this.stopping || !task.open)
+        throw new Error('チケットまたは接続の状態が変わりました。もう一度確認してください。');
+      // Preserve the key after an uncertain response; retrying must not consume another credit.
+      const key = this.resetCreditKeys.get(creditId) ?? randomUUID();
+      this.resetCreditKeys.set(creditId, key);
+      try {
+        const outcome = await this.client.consumeResetCredit(creditId, key);
+        this.resetCreditKeys.delete(creditId);
+        const messages = {
+          reset: 'チケットを1枚使用し、使用量枠をリセットしました。',
+          nothingToReset: 'リセットが必要な使用量枠はありません。',
+          noCredit: '使用可能なチケットがありません。',
+          alreadyRedeemed: 'このチケットはすでに使用されています。',
+        };
+        return { ...result, message: messages[outcome] };
+      } finally { await this.manager.checkUsage(); }
+    } catch (error) { return { ...result, error: messageOf(error) }; }
+    finally { this.resetCreditBusy = false; }
   }
   private async send(task: Task, text: string, message: JsonObject): Promise<void> {
     this.manager.prepareInput(task.id);

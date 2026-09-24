@@ -1,8 +1,34 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { evaluateUsage } from '../src/core/usage';
+import { availableResetCredits, evaluateUsage } from '../src/core/usage';
 import { decodeUsage } from '../src/appServer/client';
 import { usage } from './helpers';
+
+test('reset credit summaries preserve counts, known expiry dates and count-only responses', () => {
+  const credit = { id: 'ticket', resetType: 'codexRateLimits', status: 'available', title: 'ボーナス', expiresAt: 2_000_000_000 };
+  const value = decodeUsage({ accountId: 'account', rateLimitResetCredits: { availableCount: 5, credits: [credit, { ...credit, id: 'no-expiry', expiresAt: null }] } });
+  assert.equal(value.accountId, 'account');
+  assert.deepEqual(value.resetCredits, { availableCount: 5, credits: [
+    { id: 'ticket', title: 'ボーナス', expiresAt: 2_000_000_000_000 }, { id: 'no-expiry', title: 'ボーナス', expiresAt: null },
+  ] });
+  assert.deepEqual(availableResetCredits(value.resetCredits, 2_000_000_000_000).map(credit => credit.id), ['no-expiry']);
+  assert.deepEqual(decodeUsage({ rateLimitResetCredits: { availableCount: 3, credits: null } }).resetCredits, { availableCount: 3, credits: undefined });
+  assert.deepEqual(decodeUsage({ rateLimitResetCredits: { availableCount: 0, credits: [] } }).resetCredits, { availableCount: 0, credits: [] });
+  assert.equal(decodeUsage({ rateLimitResetCredits: null }).resetCredits, undefined);
+});
+
+test('unavailable, unknown and malformed reset credits cannot be redeemed', () => {
+  const credit = { id: 'ticket', resetType: 'codexRateLimits', status: 'available', expiresAt: null };
+  const invalid = [
+    { status: 'redeemed' }, { status: 'redeeming' }, { status: 'unknown' }, { resetType: 'unknown' }, { id: '' },
+    { expiresAt: undefined }, { expiresAt: 'tomorrow' }, { expiresAt: NaN }, { expiresAt: Infinity }, { expiresAt: 1e20 },
+  ].map(fields => ({ ...credit, ...fields }));
+  const value = decodeUsage({ rateLimitResetCredits: { availableCount: 2, credits: [...invalid, credit, credit] } });
+  assert.deepEqual(availableResetCredits(value.resetCredits), [{ id: 'ticket', title: undefined, expiresAt: null }]);
+  for (const availableCount of [-1, 1.5, Infinity, '1', undefined])
+    assert.equal(decodeUsage({ rateLimitResetCredits: { availableCount, credits: [credit] } }).resetCredits, undefined);
+  assert.deepEqual(availableResetCredits({ availableCount: 0, credits: [{ id: 'ticket', expiresAt: null }] }), []);
+});
 
 test('quota window lengths identify weekly-only accounts independently of the primary slot', () => {
   const value = decodeUsage({ rateLimits: { limitId: 'codex', planType: 'pro', primary: { usedPercent: 12.5, windowDurationMins: 10_080, resetsAt: 2_000_000_000 }, secondary: null } });

@@ -7,6 +7,7 @@ import type { TitleRequest } from '../core/types';
 import { HF_MODEL_CONFIG, isHuggingFaceModel, isHuggingFaceProvider } from '../core/huggingFace';
 import { canonicalProvider, displayModel, externalModelConfig, isExternalModel, isExternalProvider, modelProvider, modelRequest, parseResponsesModel, providerId, providerModels, responsesModelId, type ResponsesProvider } from '../core/providers';
 import { costSample, type TokenPrice } from '../core/cost';
+import type { ResetCredits, ResetCreditOutcome } from '../core/types';
 
 function requiredString(value: unknown, field: string): string {
   if (typeof value !== 'string' || !value) throw new Error(`App Server応答に${field}がありません。`);
@@ -52,7 +53,22 @@ export function decodeUsage(raw: unknown): Usage {
   const data = object(raw);
   const buckets = object(data.rateLimitsByLimitId);
   const rows = Object.keys(buckets).length ? Object.entries(buckets) : [['default', data.rateLimits]] as [string, unknown][];
-  return { buckets: rows.map(([id, value]) => {
+  const resetSummary = object(data.rateLimitResetCredits);
+  let resetCredits: ResetCredits | undefined;
+  if (typeof resetSummary.availableCount === 'number' && Number.isSafeInteger(resetSummary.availableCount) && resetSummary.availableCount >= 0) {
+    const ids = new Set<string>();
+    resetCredits = { availableCount: resetSummary.availableCount,
+      credits: Array.isArray(resetSummary.credits) ? resetSummary.credits.flatMap(raw => {
+        const credit = object(raw);
+        const id = string(credit.id);
+        const expiresAt = credit.expiresAt === null ? null : typeof credit.expiresAt === 'number' ? credit.expiresAt * 1000 : NaN;
+        if (!id || ids.has(id) || credit.status !== 'available' || credit.resetType !== 'codexRateLimits'
+          || (expiresAt !== null && (!Number.isFinite(expiresAt) || !Number.isFinite(new Date(expiresAt).getTime())))) return [];
+        ids.add(id);
+        return [{ id, title: string(credit.title) || undefined, expiresAt }];
+      }) : undefined };
+  }
+  return { ...(resetCredits ? { resetCredits } : {}), ...(typeof data.accountId === 'string' ? { accountId: data.accountId } : {}), buckets: rows.map(([id, value]) => {
     const bucket = object(value);
     const windows: Usage['buckets'][number]['windows'] = ['primary', 'secondary'].flatMap(key => {
       const window = object(bucket[key]);
@@ -276,6 +292,12 @@ export class AppServerClient implements Gateway {
   async interruptTurn(threadId: string, turnId: string): Promise<void> { await this.call('turn/interrupt', { threadId, turnId }); }
   async review(threadId: string, target: JsonObject): Promise<Turn> { return decodeTurn((await this.call('review/start', { threadId, target, delivery: 'inline' })).turn); }
   async readUsage(): Promise<Usage> { return decodeUsage(await this.call('account/rateLimits/read')); }
+  async consumeResetCredit(creditId: string, idempotencyKey: string): Promise<ResetCreditOutcome> {
+    const { outcome } = await this.call('account/rateLimitResetCredit/consume', { creditId, idempotencyKey });
+    if (outcome !== 'reset' && outcome !== 'nothingToReset' && outcome !== 'noCredit' && outcome !== 'alreadyRedeemed')
+      throw new Error('チケットの使用結果を確認できませんでした。残数を確認してください。');
+    return outcome;
+  }
   async listModels(forceReload = false): Promise<Model[]> {
     if (forceReload) this.modelList = undefined;
     const listing = this.modelList ??= this.loadModels();

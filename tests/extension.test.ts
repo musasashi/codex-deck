@@ -9,7 +9,8 @@ import type * as vscode from 'vscode';
 import type { JsonObject, Task, TaskRecord } from '../src/core/types';
 import type { TaskManager } from '../src/core/taskManager';
 import type { PanelHost } from '../src/ui/panels';
-import { FakeGateway, thread } from './helpers';
+import { deferred, FakeGateway, thread } from './helpers';
+import type { AppServerClient } from '../src/appServer/client';
 
 const bundle = buildSync({ entryPoints: [path.resolve('src/extension.ts')], bundle: true, write: false,
   platform: 'node', format: 'cjs', external: ['vscode'], logLevel: 'silent' }).outputFiles[0]!.text;
@@ -70,6 +71,7 @@ function activate(records: TaskRecord[], options: { remoteName?: string; isTrust
       tabGroups: { all: [] as { tabs: vscode.Tab[] }[], close: async (_tabs: readonly vscode.Tab[]): Promise<boolean> => true },
       showQuickPick: async (_items: { label: string; task: Task }[]): Promise<{ label: string; task: Task } | undefined> => undefined,
       showInputBox: async (): Promise<string | undefined> => undefined,
+      showWarningMessage: async (_message: string, _options: vscode.MessageOptions, ..._items: string[]): Promise<string | undefined> => undefined,
       createOutputChannel: () => ({ ...disposable(), append() {}, appendLine() {} }),
       onDidChangeWindowState: disposable, registerFileDecorationProvider: disposable,
       registerTreeDataProvider(id: string, tree: { getChildren(): Task[] }) { trees.set(id, tree); return disposable(); },
@@ -270,6 +272,7 @@ function connectedExtension(records: TaskRecord[] = [], options: Parameters<type
   const { host, manager } = extension.serializer as unknown as { host: PanelHost; manager: TaskManager };
   const gateway = new FakeGateway();
   const client = manager.gateway;
+  const resetRequests: { creditId: string; idempotencyKey: string }[] = [];
   Object.assign(client, {
     connected: true,
     startThread: gateway.startThread.bind(gateway), resumeThread: gateway.resumeThread.bind(gateway), readThread: gateway.readThread.bind(gateway),
@@ -277,11 +280,125 @@ function connectedExtension(records: TaskRecord[] = [], options: Parameters<type
     generateTitle: gateway.generateTitle.bind(gateway), renameThread: gateway.renameThread.bind(gateway), readUsage: gateway.readUsage.bind(gateway),
     listSkills: async () => [{ name: 'sample', path: '/skills/sample/SKILL.md', description: '', scope: 'user' }],
     readConfig: async () => ({}),
+    // All reset operations in extension tests terminate at this in-memory stub.
+    consumeResetCredit: async (creditId: string, idempotencyKey: string) => { resetRequests.push({ creditId, idempotencyKey }); return 'reset'; },
   });
   gateway.events.subscribe(event => client.events.emit(event));
   host.connect = async () => {};
-  return { ...extension, host, manager, gateway };
+  return { ...extension, host, manager, gateway, resetRequests };
 }
+
+function resetCreditExtension() {
+  const extension = connectedExtension([record('reset', true, true)]);
+  extension.gateway.limits.accountId = 'test-account';
+  extension.gateway.limits.resetCredits = { availableCount: 2, credits: [
+    { id: 'test-credit', title: 'テスト専用チケット', expiresAt: 4_000_000_000_000 }, { id: 'other-credit', expiresAt: null },
+  ] };
+  return { ...extension, task: extension.manager.get('reset'), request: { type: 'requestResetCredit', creditId: 'test-credit', requestId: 'test-request' } };
+}
+
+test('one reset click only opens confirmation; cancellation and concurrent clicks never consume tickets', async () => {
+  const extension = resetCreditExtension();
+  const confirmation = deferred<string | undefined>();
+  const opened = deferred<void>();
+  extension.api.window.showWarningMessage = async (message, options, ...items) => {
+    assert.match(message, /1枚使用/); assert.equal(options.modal, true);
+    assert.match(options.detail!, /テスト専用チケット\n有効期限:/); assert.deepEqual(items, ['チケットを使用']);
+    opened.resolve(); return confirmation.promise;
+  };
+  let pending: Promise<unknown> | undefined;
+  try {
+    pending = extension.host.command(extension.task, { ...extension.request, confirmed: true });
+    await opened.promise;
+    assert.equal(extension.resetRequests.length, 0, 'the initial click cannot redeem a ticket, even with a forged confirmation field');
+    const other = extension.manager.create('/project');
+    const duplicate = await extension.host.command(other, { ...extension.request, requestId: 'duplicate' });
+    assert.match(String(duplicate?.error), /進行中/);
+    confirmation.resolve(undefined);
+    assert.deepEqual(await pending, { type: 'resetCreditResult', requestId: 'test-request' });
+    assert.equal(extension.resetRequests.length, 0);
+  } finally { confirmation.resolve(undefined); await pending; await extension.shutdown(); }
+});
+
+test('explicit reset confirmation consumes only the selected mock credit and refreshes the shared balance', async () => {
+  const extension = resetCreditExtension();
+  const consumed = deferred<void>();
+  const finish = deferred<'reset'>();
+  extension.api.window.showWarningMessage = async () => 'チケットを使用';
+  const client = extension.manager.gateway as AppServerClient;
+  const mockConsume = client.consumeResetCredit.bind(client);
+  client.consumeResetCredit = async (creditId, key) => {
+    await mockConsume(creditId, key); consumed.resolve();
+    const result = await finish.promise;
+    extension.gateway.limits.resetCredits = { availableCount: 1, credits: [{ id: 'other-credit', expiresAt: null }] };
+    return result;
+  };
+  let pending: Promise<unknown> | undefined;
+  try {
+    pending = extension.host.command(extension.task, extension.request);
+    await consumed.promise;
+    await extension.host.command(extension.task, { ...extension.request, requestId: 'double-click' });
+    assert.equal(extension.resetRequests.length, 1);
+    assert.equal(extension.resetRequests[0]!.creditId, 'test-credit');
+    assert.match(extension.resetRequests[0]!.idempotencyKey, /^[\da-f-]{36}$/);
+    finish.resolve('reset'); await pending;
+    assert.equal(extension.manager.usage?.resetCredits?.availableCount, 1);
+  } finally { finish.resolve('reset'); await pending; await extension.shutdown(); }
+});
+
+test('expired or unavailable tickets, changed accounts and lost connections invalidate reset confirmation', async () => {
+  for (const change of ['expired', 'removed', 'account', 'account-id', 'connection', 'read-failure', 'closed'] as const) {
+    const extension = resetCreditExtension();
+    extension.api.window.showWarningMessage = async () => {
+      if (change === 'expired') extension.gateway.limits.resetCredits!.credits![0]!.expiresAt = Date.now() - 1;
+      if (change === 'removed') extension.gateway.limits.resetCredits = { availableCount: 0, credits: [] };
+      if (change === 'account') extension.gateway.events.emit({ type: 'account' });
+      if (change === 'account-id') extension.gateway.limits.accountId = 'different-account';
+      if (change === 'connection') { Object.assign(extension.manager.gateway, { connected: false }); extension.gateway.events.emit({ type: 'connection', connected: false }); }
+      if (change === 'read-failure') extension.gateway.usageReader = async () => { throw new Error('mock read failure'); };
+      if (change === 'closed') extension.manager.close(extension.task.id);
+      return 'チケットを使用';
+    };
+    try {
+      const response = await extension.host.command(extension.task, extension.request);
+      assert.ok(response?.error, change);
+      assert.equal(extension.resetRequests.length, 0, change);
+    } finally { await extension.shutdown(); }
+  }
+});
+
+test('an uncertain reset outcome is never retried automatically and explicit retries reuse the same key', async () => {
+  const extension = resetCreditExtension();
+  let confirmations = 0;
+  extension.api.window.showWarningMessage = async () => { confirmations++; return 'チケットを使用'; };
+  const client = extension.manager.gateway as AppServerClient;
+  const mockConsume = client.consumeResetCredit.bind(client);
+  client.consumeResetCredit = async (creditId, key) => { await mockConsume(creditId, key); throw new Error('mock timeout'); };
+  try {
+    assert.match(String((await extension.host.command(extension.task, extension.request))?.error), /mock timeout/);
+    assert.equal(extension.resetRequests.length, 1);
+    extension.gateway.events.emit({ type: 'connection', connected: false });
+    extension.gateway.events.emit({ type: 'connection', connected: true });
+    await extension.host.command(extension.task, { ...extension.request, requestId: 'retry' });
+    assert.equal(confirmations, 2);
+    assert.equal(extension.resetRequests.length, 2);
+    assert.equal(extension.resetRequests[0]!.idempotencyKey, extension.resetRequests[1]!.idempotencyKey);
+  } finally { await extension.shutdown(); }
+});
+
+test('a later reset after nothingToReset starts a new explicitly confirmed attempt', async () => {
+  const extension = resetCreditExtension();
+  extension.api.window.showWarningMessage = async () => 'チケットを使用';
+  const client = extension.manager.gateway as AppServerClient;
+  const mockConsume = client.consumeResetCredit.bind(client);
+  client.consumeResetCredit = async (creditId, key) => { await mockConsume(creditId, key); return 'nothingToReset'; };
+  try {
+    assert.match(String((await extension.host.command(extension.task, extension.request))?.message), /リセットが必要な使用量枠はありません/);
+    await extension.host.command(extension.task, { ...extension.request, requestId: 'new-attempt' });
+    assert.equal(extension.resetRequests.length, 2);
+    assert.notEqual(extension.resetRequests[0]!.idempotencyKey, extension.resetRequests[1]!.idempotencyKey);
+  } finally { await extension.shutdown(); }
+});
 
 function editorResource(id: string) {
   return { scheme: 'webview-panel', path: `webview-panel/webview-codexDeck.task.${encodeURIComponent(id)}-00000000-0000-4000-8000-000000000000` };
