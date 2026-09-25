@@ -151,11 +151,12 @@ export async function testHistory(): Promise<void> {
     await picker.getByText('通常の履歴に戻る', { exact: true }).click();
     await expect(row('History fixture 5')).toBeVisible();
     await expect(row('History fixture 4')).toHaveCount(0);
-    const queries = (await requests('thread/list')).filter(request => request.params.modelProviders);
-    assert.ok(queries.some(request => request.params.archived === false && request.params.cursor), 'reference lookup must include later pages of active history');
-    assert.ok(queries.some(request => request.params.archived === true), 'reference lookup must include archived history');
+    const queries = await requests('thread/read');
+    for (const id of ['history-fixture-55', 'history-fixture-103']) {
+      assert.ok(queries.some(request => request.params.threadId === id && request.params.includeTurns === false), 'reference lookup must include chats beyond the visible page and forks omitted by thread/list');
+    }
     console.log('History UI passed: same-position confirmation, double click, duplicate prevention, inline failure and retry, confirmation reset, pagination, restore, and open-tab cleanup.');
-    console.log('Deletion UI passed: single and bulk confirmation, related chat titles across pages and archives, cancellation, dependency order, and failure/retry.');
+    console.log('Deletion UI passed: single and bulk confirmation, related chat titles including unlisted forks, cancellation, dependency order, and failure/retry.');
     console.log(`History test artifacts: ${folder}`);
   } catch (error) {
     await page.screenshot({ path: path.join(folder, 'failure.png') });

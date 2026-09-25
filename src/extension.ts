@@ -410,7 +410,7 @@ class DeckExtension implements PanelHost {
           if (running) throw new Error(`「${running.title}」の実行を停止してから削除してください。`);
         };
         return deleteThreadHistory(thread, {
-          list: () => this.client.listThreadsForDeletion(), validate,
+          list: () => this.client.listThreadsForDeletion(thread), validate,
           delete: async target => {
             validate([target]);
             const task = [...this.manager.tasks.values()].find(task => task.threadId === target.id);

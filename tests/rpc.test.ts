@@ -294,29 +294,10 @@ test('history pages use the state database and preserve cursors and archived fil
   } finally { h.peer.close(); client.detach(); }
 });
 
-test('deletion scans all providers and source kinds across active and archived pages without hydrating history', async () => {
+test('permanent deletion sends the thread ID and handles deletion notifications', async () => {
   const h = harness(); const client = new AppServerClient();
   const connecting = client.connect(h.peer); h.send({ id: h.messages[0]!.id, result: {} }); await connecting;
   try {
-    const listing = client.listThreadsForDeletion();
-    const first = h.messages.at(-1)!;
-    assert.equal(first.method, 'thread/list');
-    assert.deepEqual(object(first.params).modelProviders, []);
-    assert.deepEqual(object(first.params).sourceKinds, ['cli', 'vscode', 'exec', 'appServer', 'subAgent', 'subAgentReview', 'subAgentCompact', 'subAgentThreadSpawn', 'subAgentOther', 'unknown']);
-    assert.equal(object(first.params).useStateDbOnly, true);
-    assert.equal(object(first.params).archived, false);
-    h.send({ id: first.id, result: { data: [{ id: 'fork', name: '参照するチャット', forkedFromId: 'root' }], nextCursor: 'next' } });
-    await h.tick();
-    assert.equal(object(h.messages.at(-1)!.params).cursor, 'next');
-    h.send({ id: h.messages.at(-1)!.id, result: { data: [{ id: 'child', parentThreadId: 'fork' }], nextCursor: null } });
-    await h.tick();
-    assert.equal(object(h.messages.at(-1)!.params).archived, true);
-    assert.equal(object(h.messages.at(-1)!.params).cursor, undefined);
-    h.send({ id: h.messages.at(-1)!.id, result: { data: [{ id: 'root', name: '元のチャット' }], nextCursor: null } });
-    const threads = await listing;
-    assert.deepEqual(threads.map(thread => [thread.id, thread.forkedFromId, thread.parentThreadId]), [['fork', 'root', undefined], ['child', undefined, 'fork'], ['root', undefined, undefined]]);
-    assert.equal(h.messages.filter(message => message.method === 'thread/read' || message.method === 'thread/turns/list').length, 0);
-
     const events: unknown[] = [];
     client.events.subscribe(event => events.push(event));
     const deleting = client.deleteThread('root');

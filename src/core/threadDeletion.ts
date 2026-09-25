@@ -1,4 +1,4 @@
-import { messageOf, type Thread } from './types';
+import { messageOf, type Thread, type ThreadReference } from './types';
 
 export interface ThreadDeletionResult { deletedIds: string[]; error?: Error }
 export type ConfirmThreadDeletion = (threads: Thread[]) => Promise<boolean>;
@@ -9,20 +9,20 @@ interface ThreadDeletionHost {
 }
 
 /** Delete forks and spawned children before the history they depend on. */
-export function threadDeletionOrder(root: Thread, threads: Thread[]): Thread[] {
+export function threadDeletionOrder<T extends ThreadReference>(root: T, threads: T[]): T[] {
   const byId = new Map(threads.map(thread => [thread.id, thread]));
   if (!byId.has(root.id)) byId.set(root.id, root);
-  const dependents = new Map<string, Thread[]>();
+  const dependents = new Map<string, T[]>();
   for (const thread of byId.values()) {
-    for (const parent of new Set([thread.forkedFromId, thread.parentThreadId])) {
+    for (const parent of new Set([thread.forkedFromId, thread.parentThreadId, thread.historyBaseThreadId])) {
       if (!parent) continue;
       const children = dependents.get(parent) ?? [];
       children.push(thread); dependents.set(parent, children);
     }
   }
   const visiting = new Set<string>(), visited = new Set<string>();
-  const ordered: Thread[] = [];
-  function visit(thread: Thread): void {
+  const ordered: T[] = [];
+  function visit(thread: T): void {
     if (visiting.has(thread.id)) throw new Error('チャットの参照関係が循環しているため削除できません。');
     if (visited.has(thread.id)) return;
     visiting.add(thread.id);

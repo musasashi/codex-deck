@@ -54,10 +54,13 @@ export interface Turn {
   completedAt?: number;
   durationMs?: number;
 }
-export interface Thread {
+export interface ThreadReference {
   id: string;
   forkedFromId?: string;
   parentThreadId?: string;
+  historyBaseThreadId?: string;
+}
+export interface Thread extends ThreadReference {
   title: string;
   name?: string;
   cwd: string;

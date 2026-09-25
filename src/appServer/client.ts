@@ -1,4 +1,7 @@
-import { array, object, string, Signal, type FileReference, type Gateway, type Input, type Item, type JsonObject, type Model, type PendingRequest, type RequestAnswer, type RunSettings, type ServerEvent, type Skill, type Thread, type Turn, type TurnError, type Usage } from '../core/types';
+import { isAbsolute } from 'node:path';
+import { array, object, string, Signal, type FileReference, type Gateway, type Input, type Item, type JsonObject, type Model, type PendingRequest, type RequestAnswer, type RunSettings, type ServerEvent, type Skill, type Thread, type ThreadReference, type Turn, type TurnError, type Usage } from '../core/types';
+import { threadDeletionOrder } from '../core/threadDeletion';
+import { readRolloutReferences } from './rolloutMetadata';
 import { hasSkillMention, permissionMode } from '../core/composer';
 import { questionAnswers } from '../core/questions';
 import { JsonRpcPeer, requestKey, RpcError, type ServerRequest } from './rpc';
@@ -100,6 +103,7 @@ export class AppServerClient implements Gateway {
   readonly events = new Signal<ServerEvent>();
   connected = false;
   private peer?: JsonRpcPeer;
+  private codexHome?: string;
   private pending = new Map<string, { request: PendingRequest; raw: JsonObject; decisions: unknown[]; resolve: (value: unknown) => void; reject: (error: Error) => void }>();
   private subscriptions: (() => void)[] = [];
   private parentThreads = new Map<string, string>();
@@ -150,7 +154,8 @@ export class AppServerClient implements Gateway {
       this.pending.clear();
       this.events.emit({ type: 'connection', connected: false, message: error.message });
     }));
-    await peer.request('initialize', { clientInfo: { name: 'codex_deck', title: 'Codex Deck', version: '0.1.0' }, capabilities: { experimentalApi: true } });
+    const initialized = object(await peer.request('initialize', { clientInfo: { name: 'codex_deck', title: 'Codex Deck', version: '0.1.0' }, capabilities: { experimentalApi: true } }));
+    if (typeof initialized.codexHome === 'string' && isAbsolute(initialized.codexHome)) this.codexHome = initialized.codexHome;
     peer.notify('initialized');
     this.connected = true;
     this.events.emit({ type: 'connection', connected: true });
@@ -168,6 +173,7 @@ export class AppServerClient implements Gateway {
     this.threadDefaults.clear();
     this.modelList = undefined;
     this.peer = undefined;
+    this.codexHome = undefined;
     this.connected = false;
   }
   private async call(method: string, params?: unknown): Promise<JsonObject> {
@@ -239,12 +245,18 @@ export class AppServerClient implements Gateway {
     const result = await this.call('thread/list', { limit: 50, archived, useStateDbOnly: true, ...(cursor ? { cursor } : {}) });
     return { threads: array(result.data).map(decodeThread), cursor: typeof result.nextCursor === 'string' ? result.nextCursor : undefined };
   }
-  async listThreadsForDeletion(): Promise<Thread[]> {
-    // References can live outside the visible history page, provider, or archive.
-    const sourceKinds = ['cli', 'vscode', 'exec', 'appServer', 'subAgent', 'subAgentReview', 'subAgentCompact', 'subAgentThreadSpawn', 'subAgentOther', 'unknown'];
+  async listThreadsForDeletion(root: Thread): Promise<Thread[]> {
+    if (!this.codexHome) throw new Error('チャットの参照関係を確認できません：App Server応答にCodexの保存先がありません。');
+    const references = threadDeletionOrder<ThreadReference>(root, await readRolloutReferences(this.codexHome));
     const threads: Thread[] = [];
-    for (const archived of [false, true]) {
-      threads.push(...(await this.pages('thread/list', { limit: 100, archived, useStateDbOnly: true, modelProviders: [], sourceKinds })).map(decodeThread));
+    // Read current titles and runtime status only for the affected chats, without resuming them.
+    for (const reference of references) {
+      const thread = decodeThread((await this.call('thread/read', { threadId: reference.id, includeTurns: false })).thread);
+      if (thread.id !== reference.id) throw new Error('App Server応答のチャットIDが一致しません。');
+      threads.push({ ...thread,
+        forkedFromId: reference.forkedFromId ?? thread.forkedFromId,
+        parentThreadId: reference.parentThreadId ?? thread.parentThreadId,
+        historyBaseThreadId: reference.historyBaseThreadId });
     }
     return threads;
   }
