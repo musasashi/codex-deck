@@ -3,7 +3,7 @@
   "displayName": "Codex Deck",
   "icon": "media/icon.png",
   "description": "WSL内のCodexタスクをエディタタブで並行実行するVS Code拡張機能",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "publisher": "codex-deck",
   "private": true,
   "engines": {
