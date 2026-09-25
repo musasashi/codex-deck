@@ -18,6 +18,29 @@ function harness() {
   return { peer, input, output, messages, send, tick };
 }
 
+test('reset credit redemption uses only the explicitly selected ID and preserves its idempotency key over in-memory RPC', async () => {
+  // PassThrough streams cannot contact Codex or an account; no real ticket can be consumed.
+  const h = harness(); const client = new AppServerClient();
+  const connecting = client.connect(h.peer); h.send({ id: h.messages[0]!.id, result: {} }); await connecting;
+  try {
+    const reading = client.readUsage();
+    assert.equal(h.messages.at(-1)!.method, 'account/rateLimits/read');
+    h.send({ id: h.messages.at(-1)!.id, result: { rateLimitResetCredits: { availableCount: 1, credits: null } } });
+    assert.equal((await reading).resetCredits?.availableCount, 1);
+    assert.equal(h.messages.filter(message => message.method === 'account/rateLimitResetCredit/consume').length, 0);
+    for (const outcome of ['reset', 'nothingToReset', 'noCredit', 'alreadyRedeemed']) {
+      const consuming = client.consumeResetCredit('fake-credit', 'fake-idempotency-key');
+      const request = h.messages.at(-1)!;
+      assert.equal(request.method, 'account/rateLimitResetCredit/consume');
+      assert.deepEqual(request.params, { creditId: 'fake-credit', idempotencyKey: 'fake-idempotency-key' });
+      h.send({ id: request.id, result: { outcome } }); assert.equal(await consuming, outcome);
+    }
+    const unknown = client.consumeResetCredit('fake-credit', 'fake-idempotency-key');
+    h.send({ id: h.messages.at(-1)!.id, result: { outcome: 'future' } });
+    await assert.rejects(unknown, /使用結果を確認できません/);
+  } finally { client.detach(); h.peer.close(); }
+});
+
 test('JSONL correlates out-of-order responses, preserves UTF-8 framing and omits the jsonrpc header', async () => {
   const h = harness();
   const first = h.peer.request('first'); const second = h.peer.request('second');
@@ -269,6 +292,22 @@ test('history pages use the state database and preserve cursors and archived fil
     h.send({ id: h.messages.at(-1)!.id, result: { data: [], nextCursor: null } });
     assert.deepEqual(await archived, { threads: [], cursor: undefined });
   } finally { h.peer.close(); client.detach(); }
+});
+
+test('permanent deletion sends the thread ID and handles deletion notifications', async () => {
+  const h = harness(); const client = new AppServerClient();
+  const connecting = client.connect(h.peer); h.send({ id: h.messages[0]!.id, result: {} }); await connecting;
+  try {
+    const events: unknown[] = [];
+    client.events.subscribe(event => events.push(event));
+    const deleting = client.deleteThread('root');
+    assert.equal(h.messages.at(-1)!.method, 'thread/delete');
+    assert.deepEqual(h.messages.at(-1)!.params, { threadId: 'root' });
+    h.send({ id: h.messages.at(-1)!.id, result: {} }); await deleting;
+    h.send({ method: 'thread/deleted', params: { threadId: 'root' } });
+    h.send({ method: 'thread/archived', params: { threadId: 'other' } });
+    assert.deepEqual(events, [{ type: 'deleted', threadId: 'root' }, { type: 'archived', threadId: 'other' }]);
+  } finally { client.detach(); h.peer.close(); }
 });
 
 test('a new paginated thread sends the first user message before requesting stored history', async () => {

@@ -682,6 +682,109 @@ test('weekly-only accounts show one gauge and missing balances never become zero
   await expect(page.locator('#usage-gauges')).toBeHidden();
 });
 
+test('weekly hover lists reset ticket expirations and sends only a confirmation request on the first click', async ({ page }, info) => {
+  // acquireVsCodeApi only records messages in this fixture; there is no extension or real account bridge.
+  await page.route('**/*', route => route.request().url().startsWith('http://localhost/') ? route.fallback() : route.abort());
+  const value = task();
+  const usage = decodeUsage({ rateLimits: { limitId: 'codex', primary: { usedPercent: 20, windowDurationMins: 300 }, secondary: { usedPercent: 80, windowDurationMins: 10_080 } },
+    rateLimitResetCredits: { availableCount: 2, credits: [
+      { id: 'fake-one', resetType: 'codexRateLimits', status: 'available', title: 'ボーナスチケット', expiresAt: 4_000_000_000 },
+      { id: 'fake-two', resetType: 'codexRateLimits', status: 'available', title: '追加チケット', expiresAt: null },
+    ] } });
+  await state(page, value, usage);
+  await page.getByRole('meter', { name: 'Codex 5時間枠の残量' }).hover();
+  await expect(page.getByRole('tooltip')).not.toContainText('チケット');
+  const weekly = page.getByRole('meter', { name: 'Codex 週次枠の残量' });
+  await weekly.hover();
+  const popup = page.getByRole('dialog', { name: 'Codex 週次枠' });
+  await expect(popup).toContainText('リセットチケット · 残り2枚');
+  await expect(popup).toContainText('有効期限: 2096/');
+  await expect(popup).toContainText('有効期限: なし');
+  await expect(popup.getByRole('button')).toHaveCount(2);
+  const use = popup.getByRole('button', { name: 'ボーナスチケットを使用' });
+  await use.hover();
+  await expect(popup).toBeVisible();
+  expect((await messages(page)).filter(message => message.type === 'requestResetCredit')).toHaveLength(0);
+  await page.setViewportSize({ width: 380, height: 700 });
+  await weekly.hover();
+  await expect(popup).toBeVisible();
+  const box = (await popup.boundingBox())!;
+  expect(box.x).toBeGreaterThanOrEqual(0); expect(box.x + box.width).toBeLessThanOrEqual(380); expect(box.y).toBeGreaterThanOrEqual(0);
+  expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
+  await page.screenshot({ path: info.outputPath('weekly-reset-tickets.png') });
+  await use.click();
+  await use.evaluate(button => (button as HTMLButtonElement).click());
+  await expect(use).toBeDisabled();
+  await expect(popup.getByRole('button', { name: '追加チケットを使用' })).toBeDisabled();
+  const requests = (await messages(page)).filter(message => message.type === 'requestResetCredit');
+  expect(requests).toHaveLength(1); expect(requests[0]).toMatchObject({ creditId: 'fake-one', requestId: expect.any(String) });
+  expect((await messages(page)).some(message => String(message.type).includes('consume'))).toBe(false);
+  await receive(page, { type: 'resetCreditResult', requestId: 'stale-response' });
+  await expect(use).toBeDisabled();
+  await receive(page, { type: 'resetCreditResult', requestId: requests[0]!.requestId }); // Simulated cancellation.
+  await expect(use).toBeEnabled();
+  await expect(popup).toContainText('残り2枚');
+  await use.click();
+  const retry = (await messages(page)).findLast(message => message.type === 'requestResetCredit')!;
+  await receive(page, { type: 'resetCreditResult', requestId: retry.requestId, error: 'テスト用の通信エラー' });
+  await expect(popup.getByRole('status')).toHaveText('テスト用の通信エラー');
+  await expect(use).toBeEnabled();
+});
+
+test('ticket popovers support keyboard focus, streaming updates, Escape and refreshed balances', async ({ page }) => {
+  const value = task();
+  const usage = decodeUsage({ rateLimits: { primary: { usedPercent: 80, windowDurationMins: 10_080 } },
+    rateLimitResetCredits: { availableCount: 1, credits: [{ id: 'fake', resetType: 'codexRateLimits', status: 'available', title: '<img src=x onerror=alert(1)>', expiresAt: null }] } });
+  await state(page, value, usage);
+  const weekly = page.getByRole('meter', { name: 'Codex 週次枠の残量' });
+  const popup = page.getByRole('dialog', { name: 'Codex 週次枠' });
+  await weekly.focus();
+  await weekly.press('Tab');
+  const use = popup.getByRole('button');
+  await expect(use).toBeFocused();
+  await expect(popup.locator('img')).toHaveCount(0);
+  await state(page, value, usage);
+  await expect(use).toBeFocused();
+  await expect(popup).toBeVisible();
+  await use.press('Escape');
+  await expect(weekly).toBeFocused();
+  await expect(popup).toHaveCount(0);
+  await page.getByLabel('メッセージ', { exact: true }).focus();
+  await weekly.focus();
+  await weekly.press('Tab');
+  await use.press('Enter');
+  const request = (await messages(page)).findLast(message => message.type === 'requestResetCredit')!;
+  expect(request.creditId).toBe('fake');
+  usage.resetCredits = { availableCount: 0, credits: [] };
+  usage.buckets[0]!.windows[0]!.usedPercent = 0;
+  await state(page, value, usage);
+  await receive(page, { type: 'resetCreditResult', requestId: request.requestId, message: 'テスト用のリセット完了' });
+  await weekly.focus();
+  await expect(popup).toContainText('残り0枚');
+  await expect(popup).toContainText('使用可能なチケットはありません。');
+  await expect(popup.getByRole('button')).toHaveCount(0);
+  await expect(weekly).toHaveAttribute('aria-valuenow', '100');
+  await state(page, value, usage, false);
+  await expect(popup).toHaveCount(0);
+});
+
+test('expired tickets and count-only summaries never offer an unverified use button', async ({ page }) => {
+  const usage = decodeUsage({ rateLimits: { primary: { usedPercent: 90, windowDurationMins: 10_080 } },
+    rateLimitResetCredits: { availableCount: 1, credits: [{ id: 'expired', resetType: 'codexRateLimits', status: 'available', expiresAt: 1 }] } });
+  await state(page, task(), usage);
+  const weekly = page.getByRole('meter', { name: 'Codex 週次枠の残量' });
+  await weekly.hover();
+  const popup = page.getByRole('dialog', { name: 'Codex 週次枠' });
+  await expect(popup).toContainText('残り0枚');
+  await expect(popup.getByRole('button')).toHaveCount(0);
+  usage.resetCredits = { availableCount: 3 };
+  await state(page, task(), usage);
+  await expect(popup).toContainText('残り3枚');
+  await expect(popup).toContainText('チケットの詳細を取得できません');
+  await expect(popup.getByRole('button')).toHaveCount(0);
+  expect((await messages(page)).filter(message => message.type === 'requestResetCredit')).toHaveLength(0);
+});
+
 test('clipboard images appear inside the composer with removable previews and block sends until attached', async ({ page }, info) => {
   const value = task(); await state(page, value);
   const prompt = page.getByLabel('メッセージ', { exact: true });
@@ -879,6 +982,34 @@ test('skill selection inserts a token and sends exact skill paths only while the
   await sendResult(page, 'failure');
   await prompt.fill('スキル指定を取り消した'); await prompt.press('Enter');
   expect((await messages(page)).at(-1)).toMatchObject({ type: 'send', text: 'スキル指定を取り消した', skillPaths: [] });
+});
+
+test('sent skill mentions appear once after server updates and history reloads', async ({ page }, info) => {
+  const value = task();
+  await state(page, value); await catalog(page);
+  const prompt = page.getByLabel('メッセージ', { exact: true });
+  await page.getByRole('button', { name: '$registered-two 登録された二つ目のスキル' }).click();
+  const text = '$registered-two\n前回のPRを取り消して、新しくPRを作成して';
+  await prompt.fill(text); await prompt.press('Enter');
+  const request = (await messages(page)).findLast(message => message.type === 'send')!;
+  expect(request).toMatchObject({ text, skillPaths: ['/skills/two/SKILL.md'] });
+  await expect(page.locator('.pending-send .user-bubble')).toHaveText(text);
+  value.threadId = 'skill-thread';
+  value.turns = [{ id: 'skill-turn', status: 'completed', items: [{ id: 'skill-user', kind: 'userMessage', data: {
+    clientId: request.sendId, content: [{ type: 'text', text }, { type: 'skill', name: 'registered-two', path: '/skills/two/SKILL.md' }],
+  } }] }];
+  await state(page, value); await sendResult(page, 'sent');
+  const message = page.locator('[data-message-id="skill-user"]');
+  await expect(message.locator('.user-bubble')).toHaveText(text);
+  await expect(message.locator('.input-tag')).toHaveCount(0);
+  await page.screenshot({ path: info.outputPath('skill-mention.png') });
+  await page.reload(); await state(page, value);
+  await expect(message.locator('.user-bubble')).toHaveText(text);
+  await expect(message.locator('.input-tag')).toHaveCount(0);
+  // A skill supplied without a mention in the visible text must still be represented.
+  value.turns[0]!.items.push({ id: 'skill-only', kind: 'userMessage', data: { content: [{ type: 'skill', name: 'registered-one', path: '/skills/one/SKILL.md' }] } });
+  await state(page, value);
+  await expect(page.locator('[data-message-id="skill-only"] .input-tag')).toHaveText('$registered-one');
 });
 
 test('slash commands filter locally, use keyboard selection, and skills/mention open inline pickers', async ({ page }) => {

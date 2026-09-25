@@ -1,4 +1,14 @@
-import type { Usage } from './types';
+import type { ResetCredits, Usage } from './types';
+
+export function availableResetCredits(summary?: ResetCredits, now = Date.now()) {
+  return summary?.availableCount ? summary.credits?.filter(credit => credit.expiresAt === null || credit.expiresAt > now) ?? [] : [];
+}
+
+export function resetCreditExpiry(expiresAt: number | null): string {
+  return expiresAt === null ? '有効期限: なし' : `有効期限: ${new Intl.DateTimeFormat('ja-JP', {
+    year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).format(new Date(expiresAt))}`;
+}
 
 /** A reset time only schedules a read. It is never evidence that usage recovered. */
 export function evaluateUsage(usage: Usage, previous: string[] = [], now = Date.now()): {

@@ -1,4 +1,7 @@
-import { array, object, string, Signal, type FileReference, type Gateway, type Input, type Item, type JsonObject, type Model, type PendingRequest, type RequestAnswer, type RunSettings, type ServerEvent, type Skill, type Thread, type Turn, type TurnError, type Usage } from '../core/types';
+import { isAbsolute } from 'node:path';
+import { array, object, string, Signal, type FileReference, type Gateway, type Input, type Item, type JsonObject, type Model, type PendingRequest, type RequestAnswer, type RunSettings, type ServerEvent, type Skill, type Thread, type ThreadReference, type Turn, type TurnError, type Usage } from '../core/types';
+import { threadDeletionOrder } from '../core/threadDeletion';
+import { readRolloutReferences } from './rolloutMetadata';
 import { hasSkillMention, permissionMode } from '../core/composer';
 import { questionAnswers } from '../core/questions';
 import { JsonRpcPeer, requestKey, RpcError, type ServerRequest } from './rpc';
@@ -7,6 +10,7 @@ import type { TitleRequest } from '../core/types';
 import { HF_MODEL_CONFIG, isHuggingFaceModel, isHuggingFaceProvider } from '../core/huggingFace';
 import { canonicalProvider, displayModel, externalModelConfig, isExternalModel, isExternalProvider, modelProvider, modelRequest, parseResponsesModel, providerId, providerModels, responsesModelId, type ResponsesProvider } from '../core/providers';
 import { costSample, type TokenPrice } from '../core/cost';
+import type { ResetCredits, ResetCreditOutcome } from '../core/types';
 
 function requiredString(value: unknown, field: string): string {
   if (typeof value !== 'string' || !value) throw new Error(`App Server応答に${field}がありません。`);
@@ -42,6 +46,7 @@ export function decodeThread(raw: unknown): Thread {
   const status = object(data.status);
   return {
     id: requiredString(data.id, 'thread.id'), title: string(data.name) || string(data.preview).slice(0, 80) || '新規タスク', name: string(data.name) || undefined,
+    forkedFromId: string(data.forkedFromId) || undefined, parentThreadId: string(data.parentThreadId) || undefined,
     cwd: string(data.cwd), status: string(status.type, 'unknown'), activeFlags: array(status.activeFlags).filter((v): v is string => typeof v === 'string'),
     turns: array(data.turns).map(decodeTurn), updatedAt: typeof data.updatedAt === 'number' ? data.updatedAt : undefined,
     model: displayModel(typeof data.model === 'string' ? data.model : undefined, string(data.modelProvider)),
@@ -52,7 +57,22 @@ export function decodeUsage(raw: unknown): Usage {
   const data = object(raw);
   const buckets = object(data.rateLimitsByLimitId);
   const rows = Object.keys(buckets).length ? Object.entries(buckets) : [['default', data.rateLimits]] as [string, unknown][];
-  return { buckets: rows.map(([id, value]) => {
+  const resetSummary = object(data.rateLimitResetCredits);
+  let resetCredits: ResetCredits | undefined;
+  if (typeof resetSummary.availableCount === 'number' && Number.isSafeInteger(resetSummary.availableCount) && resetSummary.availableCount >= 0) {
+    const ids = new Set<string>();
+    resetCredits = { availableCount: resetSummary.availableCount,
+      credits: Array.isArray(resetSummary.credits) ? resetSummary.credits.flatMap(raw => {
+        const credit = object(raw);
+        const id = string(credit.id);
+        const expiresAt = credit.expiresAt === null ? null : typeof credit.expiresAt === 'number' ? credit.expiresAt * 1000 : NaN;
+        if (!id || ids.has(id) || credit.status !== 'available' || credit.resetType !== 'codexRateLimits'
+          || (expiresAt !== null && (!Number.isFinite(expiresAt) || !Number.isFinite(new Date(expiresAt).getTime())))) return [];
+        ids.add(id);
+        return [{ id, title: string(credit.title) || undefined, expiresAt }];
+      }) : undefined };
+  }
+  return { ...(resetCredits ? { resetCredits } : {}), ...(typeof data.accountId === 'string' ? { accountId: data.accountId } : {}), buckets: rows.map(([id, value]) => {
     const bucket = object(value);
     const windows: Usage['buckets'][number]['windows'] = ['primary', 'secondary'].flatMap(key => {
       const window = object(bucket[key]);
@@ -83,6 +103,7 @@ export class AppServerClient implements Gateway {
   readonly events = new Signal<ServerEvent>();
   connected = false;
   private peer?: JsonRpcPeer;
+  private codexHome?: string;
   private pending = new Map<string, { request: PendingRequest; raw: JsonObject; decisions: unknown[]; resolve: (value: unknown) => void; reject: (error: Error) => void }>();
   private subscriptions: (() => void)[] = [];
   private parentThreads = new Map<string, string>();
@@ -133,7 +154,8 @@ export class AppServerClient implements Gateway {
       this.pending.clear();
       this.events.emit({ type: 'connection', connected: false, message: error.message });
     }));
-    await peer.request('initialize', { clientInfo: { name: 'codex_deck', title: 'Codex Deck', version: '0.1.0' }, capabilities: { experimentalApi: true } });
+    const initialized = object(await peer.request('initialize', { clientInfo: { name: 'codex_deck', title: 'Codex Deck', version: '0.1.0' }, capabilities: { experimentalApi: true } }));
+    if (typeof initialized.codexHome === 'string' && isAbsolute(initialized.codexHome)) this.codexHome = initialized.codexHome;
     peer.notify('initialized');
     this.connected = true;
     this.events.emit({ type: 'connection', connected: true });
@@ -151,6 +173,7 @@ export class AppServerClient implements Gateway {
     this.threadDefaults.clear();
     this.modelList = undefined;
     this.peer = undefined;
+    this.codexHome = undefined;
     this.connected = false;
   }
   private async call(method: string, params?: unknown): Promise<JsonObject> {
@@ -222,6 +245,21 @@ export class AppServerClient implements Gateway {
     const result = await this.call('thread/list', { limit: 50, archived, useStateDbOnly: true, ...(cursor ? { cursor } : {}) });
     return { threads: array(result.data).map(decodeThread), cursor: typeof result.nextCursor === 'string' ? result.nextCursor : undefined };
   }
+  async listThreadsForDeletion(root: Thread): Promise<Thread[]> {
+    if (!this.codexHome) throw new Error('チャットの参照関係を確認できません：App Server応答にCodexの保存先がありません。');
+    const references = threadDeletionOrder<ThreadReference>(root, await readRolloutReferences(this.codexHome));
+    const threads: Thread[] = [];
+    // Read current titles and runtime status only for the affected chats, without resuming them.
+    for (const reference of references) {
+      const thread = decodeThread((await this.call('thread/read', { threadId: reference.id, includeTurns: false })).thread);
+      if (thread.id !== reference.id) throw new Error('App Server応答のチャットIDが一致しません。');
+      threads.push({ ...thread,
+        forkedFromId: reference.forkedFromId ?? thread.forkedFromId,
+        parentThreadId: reference.parentThreadId ?? thread.parentThreadId,
+        historyBaseThreadId: reference.historyBaseThreadId });
+    }
+    return threads;
+  }
   async forkThread(threadId: string, options: { cwd?: string; lastTurnId?: string; settings?: RunSettings } = {}): Promise<Thread> {
     const provider = await this.storedProvider(threadId);
     const model = modelRequest(options.settings?.model);
@@ -237,6 +275,7 @@ export class AppServerClient implements Gateway {
     return this.titles.generate(request, signal);
   }
   async archiveThread(threadId: string): Promise<void> { await this.call('thread/archive', { threadId }); }
+  async deleteThread(threadId: string): Promise<void> { await this.call('thread/delete', { threadId }); }
   async unarchiveThread(threadId: string): Promise<void> { await this.call('thread/unarchive', { threadId }); }
   async compactThread(threadId: string): Promise<void> { await this.call('thread/compact/start', { threadId }); }
   private encodeInput(input: Input[]): JsonObject[] {
@@ -276,6 +315,12 @@ export class AppServerClient implements Gateway {
   async interruptTurn(threadId: string, turnId: string): Promise<void> { await this.call('turn/interrupt', { threadId, turnId }); }
   async review(threadId: string, target: JsonObject): Promise<Turn> { return decodeTurn((await this.call('review/start', { threadId, target, delivery: 'inline' })).turn); }
   async readUsage(): Promise<Usage> { return decodeUsage(await this.call('account/rateLimits/read')); }
+  async consumeResetCredit(creditId: string, idempotencyKey: string): Promise<ResetCreditOutcome> {
+    const { outcome } = await this.call('account/rateLimitResetCredit/consume', { creditId, idempotencyKey });
+    if (outcome !== 'reset' && outcome !== 'nothingToReset' && outcome !== 'noCredit' && outcome !== 'alreadyRedeemed')
+      throw new Error('チケットの使用結果を確認できませんでした。残数を確認してください。');
+    return outcome;
+  }
   async listModels(forceReload = false): Promise<Model[]> {
     if (forceReload) this.modelList = undefined;
     const listing = this.modelList ??= this.loadModels();
@@ -428,7 +473,8 @@ export class AppServerClient implements Gateway {
           this.emitCost(threadId, threadId, data.tokenUsage, this.threadPricing.get(threadId), turnId);
         }
         break;
-      case 'thread/archived': case 'thread/deleted': this.events.emit({ type: 'archived', threadId }); break;
+      case 'thread/archived': this.events.emit({ type: 'archived', threadId }); break;
+      case 'thread/deleted': this.events.emit({ type: 'deleted', threadId }); break;
       case 'serverRequest/resolved': {
         if (typeof data.requestId !== 'string' && typeof data.requestId !== 'number') break;
         const id = requestKey(data.requestId);

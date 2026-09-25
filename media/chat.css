@@ -127,6 +127,14 @@ summary { cursor: pointer; font-size: 12px; overflow-wrap: anywhere; }
 .usage-tooltip::after { content: ''; position: absolute; top: 100%; left: 0; right: 0; height: 9px; }
 .usage-tooltip strong { font-weight: 600; }
 .usage-reset { color: var(--muted); }
+.usage-tooltip.has-tickets { width: min(290px, calc(100vw - 96px)); max-width: none; overflow-wrap: anywhere; }
+.usage-tickets { display: flex; flex-direction: column; gap: 6px; margin-top: 5px; padding-top: 7px; border-top: 1px solid var(--border); }
+.usage-ticket-list { display: flex; flex-direction: column; gap: 8px; max-height: min(280px, 40vh); overflow-y: auto; padding: 2px; }
+.usage-ticket { display: flex; align-items: center; gap: 10px; }
+.usage-ticket-details { display: flex; flex: 1; min-width: 0; flex-direction: column; }
+.usage-ticket-expiry, .usage-ticket-note { color: var(--muted); }
+.usage-ticket button { flex-shrink: 0; padding: 3px 8px; }
+.usage-ticket-result { margin-top: 4px; }
 select option { background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground); }
 .attachments { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; padding: 10px 12px 0; max-height: 180px; overflow-y: auto; }
 .attachment, .input-tag { display: inline-flex; align-items: center; border: 1px solid var(--border); padding: 2px 7px; border-radius: 5px; font-size: 11px; margin-bottom: 7px; max-width: 100%; overflow-wrap: anywhere; }

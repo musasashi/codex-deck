@@ -53,7 +53,7 @@ for (const savedSend of array(saved.pendingSends).map(object)) {
     seenUserMessageIds: array(savedSend.seenUserMessageIds).filter((value): value is string => typeof value === 'string') });
 }
 const completion = new Composer(prompt, $('completions'), $('skills'), post, saveDraft, renderPermissions, array(saved.skillPaths).filter((value): value is string => typeof value === 'string'));
-const usageGauges = new UsageGauges($('usage-gauges'));
+const usageGauges = new UsageGauges($('usage-gauges'), post);
 const requests = new Requests($('requests'), post);
 const selectionMenu = new SelectionMenu($('transcript'), () => ({ taskId: task?.id, hasThread: !!task?.threadId, presets: questionPresets }), post, () => render());
 let selectingTranscript = false;
@@ -265,6 +265,7 @@ function render(): void {
 }
 window.addEventListener('message', event => {
   const message = object(event.data);
+  usageGauges.handleMessage(message);
   if (message.type === 'state') {
     task = message.task as Task;
     models = message.models as Model[];

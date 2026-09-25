@@ -34,6 +34,26 @@ test('new tasks are listed immediately and stay listed after completion; closing
   assert.ok(manager.openTasks.includes(task));
 });
 
+test('permanent deletion removes saved task state and ignores late events and hydration', async () => {
+  const { manager, gateway, task, saved } = setup();
+  const other = manager.adoptThread(thread('other'));
+  manager.setAutoResume(task.id, true);
+  task.hydrated = false;
+  const pending = deferred<Thread>();
+  gateway.resumeThread = async () => pending.promise;
+  const restoring = manager.restore(task.id);
+  gateway.events.emit({ type: 'deleted', threadId: task.threadId! });
+  assert.equal(manager.tasks.has(task.id), false);
+  assert.equal(task.autoResume, false);
+  pending.resolve(thread(task.threadId)); await restoring;
+  gateway.events.emit({ type: 'name', threadId: task.threadId!, title: 'late rename' });
+  gateway.events.emit({ type: 'deleted', threadId: task.threadId! });
+  await manager.flush();
+  assert.deepEqual(saved.at(-1)!.map(record => record.id), [other.id]);
+  assert.equal(manager.openThread(task.threadId!).id === task.id, false, 'deleted tasks cannot be reused from the thread index');
+  manager.dispose();
+});
+
 test('plan mode stays scoped to its task and survives settings changes, forks, and reloads', async () => {
   const { manager, gateway, task } = setup();
   let restored: TaskManager | undefined;

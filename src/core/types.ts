@@ -54,8 +54,13 @@ export interface Turn {
   completedAt?: number;
   durationMs?: number;
 }
-export interface Thread {
+export interface ThreadReference {
   id: string;
+  forkedFromId?: string;
+  parentThreadId?: string;
+  historyBaseThreadId?: string;
+}
+export interface Thread extends ThreadReference {
   title: string;
   name?: string;
   cwd: string;
@@ -80,7 +85,10 @@ export interface LimitBucket {
   credits?: { hasCredits: boolean; unlimited: boolean };
   complete: boolean;
 }
-export interface Usage { buckets: LimitBucket[] }
+export interface ResetCredit { id: string; title?: string; expiresAt: number | null }
+export interface ResetCredits { availableCount: number; credits?: ResetCredit[] }
+export type ResetCreditOutcome = 'reset' | 'nothingToReset' | 'noCredit' | 'alreadyRedeemed';
+export interface Usage { buckets: LimitBucket[]; resetCredits?: ResetCredits; accountId?: string }
 export interface PendingRequest {
   id: string;
   threadId: string;
@@ -115,7 +123,7 @@ export type ServerEvent =
   | { type: 'warning'; threadId?: string; message: string }
   | { type: 'tokens'; threadId: string; value: unknown }
   | { type: 'cost'; threadId: string; sample: CostSample }
-  | { type: 'archived'; threadId: string };
+  | { type: 'archived' | 'deleted'; threadId: string };
 
 export interface Gateway {
   readonly connected: boolean;

@@ -33,6 +33,7 @@ export class TaskPanels implements vscode.WebviewPanelSerializer, vscode.Disposa
   private stopping = false;
   constructor(private readonly uri: vscode.Uri, private readonly manager: TaskManager, private readonly host: PanelHost) {
     this.subscriptions = [manager.changed.subscribe(task => {
+      if (task && !manager.tasks.has(task.id)) { void this.close(task.id).catch(error => host.report(error)); return; }
       if (task) this.update(task.id); else for (const id of this.panels.keys()) this.update(id);
     })];
     const configuration = vscode.workspace.onDidChangeConfiguration(event => {
@@ -86,7 +87,7 @@ export class TaskPanels implements vscode.WebviewPanelSerializer, vscode.Disposa
     // A restored tab may not have been deserialized yet.
     const tabs = vscode.window.tabGroups.all.flatMap(group => group.tabs).filter(tab =>
       tab.input instanceof vscode.TabInputWebview && tab.input.viewType === `mainThreadWebview-${taskViewType(id)}`);
-    if (!tabs.length || await vscode.window.tabGroups.close(tabs)) this.manager.close(id);
+    if ((!tabs.length || await vscode.window.tabGroups.close(tabs)) && this.manager.tasks.has(id)) this.manager.close(id);
   }
   private bind(panel: vscode.WebviewPanel, task: Task): void {
     this.panels.set(task.id, panel);
@@ -140,7 +141,7 @@ export class TaskPanels implements vscode.WebviewPanelSerializer, vscode.Disposa
       const timer = this.timers.get(task.id);
       if (timer) clearTimeout(timer);
       this.timers.delete(task.id);
-      if (!this.stopping) this.manager.close(task.id);
+      if (!this.stopping && this.manager.tasks.has(task.id)) this.manager.close(task.id);
     });
     this.post(task.id);
   }
@@ -170,7 +171,7 @@ export class TaskPanels implements vscode.WebviewPanelSerializer, vscode.Disposa
   }
   private post(id: string): void {
     const panel = this.panels.get(id);
-    if (!panel) return;
+    if (!panel || !this.manager.tasks.has(id)) return;
     const task = this.manager.get(id);
     panel.title = task.title;
     panel.iconPath = taskIcon(this.uri, task.status);

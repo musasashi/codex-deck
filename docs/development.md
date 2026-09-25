@@ -16,7 +16,7 @@ VS CodeからWSLに接続してリポジトリを開き、F5でExtension Develop
 | --- | --- |
 | `npm run check` | TypeScriptの型チェック |
 | `npm test` | 単体テスト |
-| `npx playwright test` | チャット・設定画面 |
+| `npx playwright test` | チャット・設定画面・履歴の操作 |
 | `npm run test:extension` | Extension Hostでの拡張機能 |
 | `npm run test:history` | 履歴の操作 |
 | `npm run test:smoke` | インストール済みCLIとの接続とデータ取得。推論は実行しない |

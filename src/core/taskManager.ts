@@ -121,6 +121,17 @@ export class TaskManager {
     this.armTimer();
     // Keep the subscription and running turn alive after the tab closes.
   }
+  removeThread(threadId: string): void {
+    const task = this.byThread.get(threadId);
+    if (!task) return;
+    this.cancel(task); this.cancelTitle(task.id);
+    task.open = false; task.autoResume = false;
+    this.byThread.delete(threadId); this.tasks.delete(task.id);
+    this.hydrations.delete(threadId);
+    this.changed.emit(task);
+    void this.checkpoint().catch(error => this.errors.emit(`タスクの状態を保存できません: ${messageOf(error)}`));
+    this.armTimer();
+  }
   async restore(id: string): Promise<void> {
     const existing = this.loading.get(id);
     if (existing) return existing;
@@ -131,6 +142,7 @@ export class TaskManager {
       this.hydrations.set(threadId, []);
       try {
         const thread = await this.gateway.resumeThread(threadId, task.settings);
+        if (!this.tasks.has(task.id)) return;
         this.applyThread(task, thread);
         const queued = this.hydrations.get(threadId) ?? [];
         this.hydrations.delete(threadId);
@@ -138,6 +150,7 @@ export class TaskManager {
         this.touch(task, true);
         this.armTimer(true);
       } catch (error) {
+        if (!this.tasks.has(task.id)) return;
         const queued = this.hydrations.get(threadId) ?? [];
         this.hydrations.delete(threadId);
         for (const event of queued) this.onEvent(event);
@@ -150,6 +163,7 @@ export class TaskManager {
     try { await run; } finally { this.loading.delete(id); }
   }
   private applyThread(task: Task, thread: Thread): void {
+    if (!this.tasks.has(task.id)) return;
     task.threadId = thread.id;
     this.byThread.set(thread.id, task);
     if (thread.name) {
@@ -243,7 +257,7 @@ export class TaskManager {
   }
   private async writeTitle(task: Task, name: string, source: TitleSource, signal?: AbortSignal): Promise<void> {
     const previous = this.titleWrites.get(task.id);
-    const valid = (): boolean => !this.disposed && !signal?.aborted && (source === 'manual' || task.titleSource === 'provisional' || task.titleSource === 'fork');
+    const valid = (): boolean => !this.disposed && this.tasks.has(task.id) && !signal?.aborted && (source === 'manual' || task.titleSource === 'provisional' || task.titleSource === 'fork');
     const work = (async () => {
       if (previous) await previous.catch(() => undefined);
       if (!valid()) return;
@@ -496,6 +510,7 @@ export class TaskManager {
     if (event.type === 'skills') return;
     const threadId = event.type === 'request' ? event.request.threadId : event.threadId;
     if (!threadId) { if (event.type === 'warning') this.errors.emit(event.message); return; }
+    if (event.type === 'deleted') { this.removeThread(threadId); return; }
     const queue = this.hydrations.get(threadId);
     if (queue) { queue.push(event); return; }
     const task = this.byThread.get(threadId);
@@ -667,6 +682,7 @@ export class TaskManager {
   }
   flush(): Promise<void> { return this.saveTail; }
   private touch(task: Task, persist = false): void {
+    if (!this.tasks.has(task.id)) return;
     this.changed.emit(task);
     if (persist && !this.disposed) void this.checkpoint().catch(error => this.errors.emit(`タスクの状態を保存できません: ${messageOf(error)}`));
   }
