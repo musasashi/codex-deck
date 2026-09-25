@@ -984,6 +984,34 @@ test('skill selection inserts a token and sends exact skill paths only while the
   expect((await messages(page)).at(-1)).toMatchObject({ type: 'send', text: 'スキル指定を取り消した', skillPaths: [] });
 });
 
+test('sent skill mentions appear once after server updates and history reloads', async ({ page }, info) => {
+  const value = task();
+  await state(page, value); await catalog(page);
+  const prompt = page.getByLabel('メッセージ', { exact: true });
+  await page.getByRole('button', { name: '$registered-two 登録された二つ目のスキル' }).click();
+  const text = '$registered-two\n前回のPRを取り消して、新しくPRを作成して';
+  await prompt.fill(text); await prompt.press('Enter');
+  const request = (await messages(page)).findLast(message => message.type === 'send')!;
+  expect(request).toMatchObject({ text, skillPaths: ['/skills/two/SKILL.md'] });
+  await expect(page.locator('.pending-send .user-bubble')).toHaveText(text);
+  value.threadId = 'skill-thread';
+  value.turns = [{ id: 'skill-turn', status: 'completed', items: [{ id: 'skill-user', kind: 'userMessage', data: {
+    clientId: request.sendId, content: [{ type: 'text', text }, { type: 'skill', name: 'registered-two', path: '/skills/two/SKILL.md' }],
+  } }] }];
+  await state(page, value); await sendResult(page, 'sent');
+  const message = page.locator('[data-message-id="skill-user"]');
+  await expect(message.locator('.user-bubble')).toHaveText(text);
+  await expect(message.locator('.input-tag')).toHaveCount(0);
+  await page.screenshot({ path: info.outputPath('skill-mention.png') });
+  await page.reload(); await state(page, value);
+  await expect(message.locator('.user-bubble')).toHaveText(text);
+  await expect(message.locator('.input-tag')).toHaveCount(0);
+  // A skill supplied without a mention in the visible text must still be represented.
+  value.turns[0]!.items.push({ id: 'skill-only', kind: 'userMessage', data: { content: [{ type: 'skill', name: 'registered-one', path: '/skills/one/SKILL.md' }] } });
+  await state(page, value);
+  await expect(page.locator('[data-message-id="skill-only"] .input-tag')).toHaveText('$registered-one');
+});
+
 test('slash commands filter locally, use keyboard selection, and skills/mention open inline pickers', async ({ page }) => {
   await state(page, task()); await catalog(page);
   const prompt = page.getByLabel('メッセージ', { exact: true });

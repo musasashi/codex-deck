@@ -1,6 +1,7 @@
 import { Marked } from 'marked';
 import { array, object, string, type Attachment, type Item, type Task, type Turn } from '../core/types';
 import { isImageDataUrl } from '../core/attachments';
+import { hasSkillMention } from '../core/composer';
 import { taskReferenceBody } from '../core/taskReferenceText';
 import { mathExtensions } from './math';
 
@@ -62,11 +63,14 @@ export function renderItem(item: Item, automatic: boolean, options?: MessageOpti
   switch (item.kind) {
     case 'userMessage': {
       const references: string[] = [];
-      const content = array(d.content).map((value, index) => {
-        const input = object(value);
+      const inputs = array(d.content).map(object);
+      const visibleText = inputs.flatMap((input, index) => input.type === 'text'
+        && (index === 0 || taskReferenceBody(string(input.text)) === undefined) ? [string(input.text)] : []).join('\n');
+      const content = inputs.map((input, index) => {
         // The first input is the user's original text, even if it contains our markers.
         const reference = index > 0 && input.type === 'text' ? taskReferenceBody(string(input.text)) : undefined;
         if (reference !== undefined) { references.push(reference); return ''; }
+        if (input.type === 'skill' && hasSkillMention(visibleText, string(input.name))) return '';
         if (input.type === 'image' && isImageDataUrl(input.url)) return `<img class="user-image" src="${escapeHtml(input.url)}" alt="添付画像" loading="lazy">`;
         return input.type === 'text' ? renderUserText(string(input.text)) : `<span class="input-tag">${escapeHtml(input.type === 'skill' ? `$${string(input.name)}` : string(input.path) || '画像')}</span>`;
       }).join('');
