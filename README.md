@@ -35,5 +35,4 @@ WSL内のCodexのタスクをVS Codeのエディタタブで並行して扱う�
 
 ## ドキュメント
 
-- [使い方](docs/usage.md)：操作・設定・接続のトラブル対応
 - [開発ガイド](docs/development.md)：開発版の起動と検証
