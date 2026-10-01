@@ -291,6 +291,33 @@ test('editor references can be added repeatedly while preserving an existing dra
   await expect(user.locator('script')).toHaveCount(0);
 });
 
+test('references received before a task tab is visible focus the quote continuation when the tab opens', async ({ page }) => {
+  await page.route('http://localhost/editor', route => route.fulfill({ contentType: 'text/html', body: '<input id="editor"><iframe id="chat" src="/" style="display:none;width:900px;height:750px"></iframe>' }));
+  await page.goto('http://localhost/editor');
+  const frame = page.frames().find(frame => frame.parentFrame())!;
+  await expect.poll(() => frame.evaluate(() => (window as unknown as { sent: Record<string, unknown>[] }).sent.some(message => message.type === 'ready'))).toBe(true);
+  await frame.evaluate(data => window.dispatchEvent(new MessageEvent('message', { data })), { type: 'state', task: task(), models, connected: true });
+  await page.locator('#editor').fill('エディタで選択した文章');
+  const quoted = selectionReference('エディタで選択した文章', '/project/notes.md:1:1-1:13');
+  await frame.evaluate(data => window.dispatchEvent(new MessageEvent('message', { data })), { type: 'insertReference', text: quoted });
+  const prompt = frame.locator('#prompt');
+  await expect(prompt).toHaveValue(quoted);
+  await page.locator('#chat').evaluate(element => {
+    element.style.display = 'block';
+    (element as HTMLIFrameElement).contentWindow!.focus();
+  });
+  await expect(prompt).toBeFocused();
+  expect(await prompt.evaluate(element => [(element as HTMLTextAreaElement).selectionStart, (element as HTMLTextAreaElement).selectionEnd])).toEqual([quoted.length, quoted.length]);
+  await page.keyboard.insertText('この続きを入力');
+  await expect(prompt).toHaveValue(quoted + 'この続きを入力');
+
+  // Returning to another control must not move focus back to the quote.
+  await page.locator('#editor').focus();
+  await frame.locator('#attach').focus();
+  await frame.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await expect(frame.locator('#attach')).toBeFocused();
+});
+
 test('empty chat shows only registered skills, dynamic settings, auto-resume toggle and keyboard input', async ({ page }, info) => {
   const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
   await receive(page, { type: 'state', task: task(), models, connected: true });

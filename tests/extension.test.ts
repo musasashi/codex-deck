@@ -69,7 +69,7 @@ function activate(records: TaskRecord[], options: { remoteName?: string; isTrust
       state: { focused: true },
       activeTextEditor: undefined as vscode.TextEditor | undefined,
       tabGroups: { all: [] as { tabs: vscode.Tab[] }[], close: async (_tabs: readonly vscode.Tab[]): Promise<boolean> => true },
-      showQuickPick: async (_items: { label: string; task: Task }[]): Promise<{ label: string; task: Task } | undefined> => undefined,
+      showQuickPick: async (_items: { label: string; task?: Task }[]): Promise<{ label: string; task?: Task } | undefined> => undefined,
       showInputBox: async (): Promise<string | undefined> => undefined,
       showWarningMessage: async (_message: string, _options: vscode.MessageOptions, ..._items: string[]): Promise<string | undefined> => undefined,
       createOutputChannel: () => ({ ...disposable(), append() {}, appendLine() {} }),
@@ -187,9 +187,10 @@ test('editor mentions snapshot unsaved text before choosing a task and wait for 
     selection: { isEmpty: false, start: { line: 4, character: 2 }, end: { line: 6, character: 18 } },
   } as unknown as vscode.TextEditor;
   extension.api.window.showQuickPick = async items => {
+    assert.deepEqual(items.map(item => item.label), ['新規タスク', 'first', 'target']);
     selectedText = '選択後に変更された文章';
     extension.api.window.activeTextEditor = undefined;
-    return items.find(item => item.task.id === 'target');
+    return items.find(item => item.task?.id === 'target');
   };
   try {
     await extension.commands.get('codexDeck.mentionSelection')!();
@@ -200,7 +201,73 @@ test('editor mentions snapshot unsaved text before choosing a task and wait for 
     assert.deepEqual(target.messages.at(-1), { type: 'insertReference', text: '> 参照元: /project/開いている文章.md:5:3-7:19\n>\n> 一行目\n> \n>   <tag>二行目</tag>\n\n' });
     await target.receive({ type: 'ready' });
     assert.equal(target.messages.filter(message => message.type === 'insertReference').length, 1);
+    assert.deepEqual(extension.rows().map(task => task.id), ['first', 'target']);
     assert.ok(extension.rows().every(task => !task.attachments.length && !task.turns.length));
+  } finally { await extension.shutdown(); }
+});
+
+test('editor mentions offer a new task even when the only open conversation is active', async () => {
+  const extension = activate([record('existing', true), record('closed-draft', false, true)]);
+  const existing = panel();
+  extension.api.window.activeTextEditor = {
+    document: { uri: { scheme: 'file', fsPath: '/project/notes.md' }, getText: () => '新しい会話で言及する文章' },
+    selection: { isEmpty: false, start: { line: 0, character: 0 }, end: { line: 0, character: 12 } },
+  } as unknown as vscode.TextEditor;
+  extension.api.window.showQuickPick = async items => {
+    assert.deepEqual(items.map(item => item.label), ['新規タスク', 'existing']);
+    assert.equal(extension.rows().length, 1, 'opening the picker must not create a draft');
+    return items.find(item => item.label === '新規タスク');
+  };
+  try {
+    await extension.serializer.deserializeWebviewPanel(existing, { taskId: 'existing' });
+    await extension.commands.get('codexDeck.mentionSelection')!();
+    assert.equal(extension.rows().length, 2);
+    const draft = extension.rows().find(task => !task.threadId)!;
+    assert.ok(draft);
+    assert.notEqual(draft.id, 'closed-draft');
+    const target = extension.openedPanels[0]!;
+    await target.receive({ type: 'ready' });
+    assert.deepEqual(target.messages.at(-1), { type: 'insertReference', text: '> 参照元: /project/notes.md:1:1-1:13\n>\n> 新しい会話で言及する文章\n\n' });
+    assert.equal(existing.messages.some(message => message.type === 'insertReference'), false);
+  } finally { await extension.shutdown(); }
+});
+
+test('editor mentions reuse an open draft without offering a duplicate new task', async () => {
+  for (const hasConversation of [false, true]) {
+    const extension = activate([...(hasConversation ? [record('existing', true)] : []), record('draft', true, true)]);
+    const draft = panel();
+    extension.api.window.activeTextEditor = {
+      document: { uri: { scheme: 'file', fsPath: '/project/notes.md' }, getText: () => '開いている下書きへの引用' },
+      selection: { isEmpty: false, start: { line: 0, character: 0 }, end: { line: 0, character: 12 } },
+    } as unknown as vscode.TextEditor;
+    let pickCount = 0;
+    extension.api.window.showQuickPick = async items => {
+      pickCount++;
+      assert.deepEqual(items.map(item => item.task?.id), ['existing', 'draft']);
+      return items.find(item => item.task?.id === 'draft');
+    };
+    try {
+      await extension.serializer.deserializeWebviewPanel(draft, { taskId: 'draft' });
+      await draft.receive({ type: 'ready' });
+      await extension.commands.get('codexDeck.mentionSelection')!();
+      assert.equal(pickCount, hasConversation ? 1 : 0);
+      assert.equal(extension.rows().length, hasConversation ? 2 : 1);
+      assert.equal(extension.createdPanels(), 0);
+      assert.deepEqual(draft.messages.at(-1), { type: 'insertReference', text: '> 参照元: /project/notes.md:1:1-1:13\n>\n> 開いている下書きへの引用\n\n' });
+    } finally { await extension.shutdown(); }
+  }
+});
+
+test('cancelling an editor mention leaves tasks and drafts unchanged', async () => {
+  const extension = activate([record('existing', true)]);
+  extension.api.window.activeTextEditor = {
+    document: { uri: { scheme: 'file', fsPath: '/project/notes.md' }, getText: () => '引用しない文章' },
+    selection: { isEmpty: false, start: { line: 0, character: 0 }, end: { line: 0, character: 6 } },
+  } as unknown as vscode.TextEditor;
+  try {
+    await extension.commands.get('codexDeck.mentionSelection')!();
+    assert.deepEqual(extension.rows().map(task => task.id), ['existing']);
+    assert.equal(extension.createdPanels(), 0);
   } finally { await extension.shutdown(); }
 });
 

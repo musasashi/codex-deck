@@ -467,6 +467,15 @@ class DeckExtension implements PanelHost {
     }
     this.panels.open(task);
   }
+  private async chooseMentionTask(): Promise<Task | undefined> {
+    const open = this.manager.openTasks;
+    if (!open.length) return this.newTask();
+    const items: (vscode.QuickPickItem & { task?: Task })[] = open.map(task => ({ label: task.title, description: statusLabel[task.status], task }));
+    if (open.every(task => task.threadId)) items.unshift({ label: '新規タスク' });
+    const selected = items.length === 1 ? items[0] : await vscode.window.showQuickPick(items, { placeHolder: '対象のタスク' });
+    if (!selected) return;
+    return selected.task ?? this.newTask();
+  }
   private async mentionSelection(arg?: unknown): Promise<void> {
     const context = object(arg);
     const taskId = string(context.codexDeckTaskId);
@@ -486,7 +495,8 @@ class DeckExtension implements PanelHost {
     const filename = uri.scheme === 'file' ? uri.fsPath : uri.toString();
     const { start, end } = editor.selection;
     const source = `${filename}:${start.line + 1}:${start.character + 1}-${end.line + 1}:${end.character + 1}`;
-    const task = await this.task();
+    const task = await this.chooseMentionTask();
+    if (!task) return;
     this.panels.open(task);
     this.panels.message(task.id, { type: 'insertReference', text: selectionReference(text, source) });
   }

@@ -20,6 +20,7 @@ export class Composer {
   private selected = 0;
   private loading = false;
   private error = '';
+  private referenceFocusPending = false;
   private selectedSkills = new Map<string, Skill>();
   private restoredPaths: string[];
 
@@ -36,6 +37,8 @@ export class Composer {
     prompt.addEventListener('input', () => this.refresh());
     prompt.addEventListener('click', () => this.refresh());
     prompt.addEventListener('focus', () => this.refresh());
+    window.addEventListener('focus', () => requestAnimationFrame(() => this.focusReference()));
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) this.focusReference(); });
     prompt.addEventListener('keyup', event => {
       if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) this.refresh();
     });
@@ -131,10 +134,21 @@ export class Composer {
     const draft = this.prompt.value;
     const separator = !draft || draft.endsWith('\n\n') ? '' : draft.endsWith('\n') ? '\n' : '\n\n';
     this.prompt.value = draft + separator + text;
-    this.prompt.setSelectionRange(this.prompt.value.length, this.prompt.value.length);
     window.getSelection()?.removeAllRanges();
-    this.close(); this.prompt.focus(); this.changed(); this.refresh();
+    this.close(); this.changed();
+    this.referenceFocusPending = true;
+    this.focusReference();
+    requestAnimationFrame(() => this.focusReference());
+  }
+
+  private focusReference(): void {
+    if (!this.referenceFocusPending) return;
+    this.prompt.focus();
+    this.prompt.setSelectionRange(this.prompt.value.length, this.prompt.value.length);
     this.prompt.scrollTop = this.prompt.scrollHeight;
+    // A retained webview can receive the quote before VS Code has revealed and focused it.
+    this.referenceFocusPending = !document.hasFocus() || document.activeElement !== this.prompt;
+    this.refresh();
   }
 
   private insertSkill(skill: Skill): void {
