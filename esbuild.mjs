@@ -3,6 +3,8 @@ import { copyFile, mkdir } from 'node:fs/promises';
 
 await mkdir('dist', { recursive: true });
 await copyFile('node_modules/katex/LICENSE', 'dist/katex-LICENSE.txt');
+await copyFile('node_modules/mermaid/dist/mermaid.min.js', 'dist/mermaid.js');
+await copyFile('node_modules/mermaid/LICENSE', 'dist/mermaid-LICENSE.txt');
 
 const configurations = [
   { entryPoints: ['src/extension.ts'], outfile: 'dist/extension.js', platform: 'node', format: 'cjs', external: ['vscode'], target: 'node20' },

@@ -70,6 +70,12 @@ code, pre { font-family: var(--vscode-editor-font-family, monospace); font-size:
 .markdown .katex { overflow-wrap: normal; }
 .markdown .katex-display { margin: 12px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; }
 .markdown .katex-display > .katex { width: max-content; min-width: 100%; }
+.diagram-block { margin: 12px 0; }
+.diagram { overflow-x: auto; padding: 12px; border: 1px solid var(--border); border-radius: 5px; background: var(--vscode-editor-background); }
+.diagram > svg { display: block; max-width: none !important; height: auto; margin: 0 auto; overflow-wrap: normal; }
+.diagram-source { margin-top: 6px; }
+.diagram-error { color: var(--muted); font-size: 12px; }
+.diagram-render-target { position: fixed; top: 0; left: -100000px; width: 1200px; visibility: hidden; pointer-events: none; }
 .inline-link { display: inline; color: var(--vscode-textLink-foreground); background: transparent; padding: 0; border: 0; text-align: left; overflow-wrap: anywhere; }
 .inline-link:hover { color: var(--vscode-textLink-activeForeground); background: transparent; text-decoration: underline; }
 details { margin: 10px 0; color: var(--muted); }

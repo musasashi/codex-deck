@@ -12,9 +12,13 @@ markdown.use({ renderer: {
   html({ text }) { return escapeHtml(text); },
   link({ href, tokens }) { return `<button class="inline-link" data-link="${escapeHtml(href)}">${this.parser.parseInline(tokens)}</button>`; },
   image({ href, text }) { return `<button class="inline-link" data-link="${escapeHtml(href)}">画像: ${escapeHtml(text || '開く')}</button>`; },
-  code({ text, lang }) {
+  code({ text, lang, raw }) {
     const language = (lang ?? '').match(/^\S+/)?.[0];
-    return `<div class="code-block"><pre><code${language ? ` class="language-${escapeHtml(language)}"` : ''}>${escapeHtml(text)}</code></pre><button type="button" class="code-copy" data-code-action="copy" aria-label="コードをコピー" title="コードをコピー">${copyIcon}</button></div>`;
+    const code = `<div class="code-block"><pre><code${language ? ` class="language-${escapeHtml(language)}"` : ''}>${escapeHtml(text)}</code></pre><button type="button" class="code-copy" data-code-action="copy" aria-label="コードをコピー" title="コードをコピー">${copyIcon}</button></div>`;
+    const fence = raw.match(/^ {0,3}(`{3,}|~{3,})[^\n]*\n/)?.[1];
+    const closed = fence && new RegExp(`\n {0,3}${fence[0]}{${fence.length},}[ \\t]*\\n*$`).test(raw);
+    if (language?.toLowerCase() !== 'mermaid' || !closed) return code;
+    return `<div class="diagram-block"><div class="diagram" role="img" aria-label="Mermaid図" hidden></div><p class="diagram-error" role="status" hidden>図を描画できませんでした。コードを表示しています。</p><details class="diagram-source" data-item="diagram-source" open><summary>図のコード</summary>${code}</details></div>`;
   },
 } });
 export function renderMarkdown(text: string): string { return markdown.parse(text, { async: false }); }

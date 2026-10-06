@@ -14,6 +14,7 @@ import { emptyTaskCost } from '../../src/core/cost';
 import { withHuggingFaceModels } from '../../src/core/huggingFace';
 import { providerModels, validateProviders } from '../../src/core/providers';
 import { inducedVoltageAnswer } from '../fixtures/math';
+import { carrierDiagram, diagramExamples } from '../fixtures/diagrams';
 
 test('Responses tasks only offer their own provider and declared efforts, including the provider default', async ({ page }) => {
   const catalog = providerModels(validateProviders([
@@ -138,6 +139,7 @@ test.beforeEach(async ({ page }) => {
   await page.route('http://localhost/**', async route => {
     const url = route.request().url();
     if (url.endsWith('/webview.js')) await route.fulfill({ contentType: 'text/javascript', body: await readFile('dist/webview.js', 'utf8') });
+    else if (url.endsWith('/mermaid.js')) await route.fulfill({ contentType: 'text/javascript', body: await readFile('dist/mermaid.js', 'utf8') });
     else if (url.endsWith('/chat.css')) await route.fulfill({ contentType: 'text/css', body: theme + await readFile('dist/chat.css', 'utf8') });
     else if (/\/fonts\/[\w.-]+\.(woff2?|ttf)$/.test(url)) await route.fulfill({ contentType: `font/${url.split('.').at(-1)}`, body: await readFile(`dist${new URL(url).pathname}`) });
     else await route.fulfill({ contentType: 'text/html', body: html });
@@ -150,6 +152,170 @@ async function openSelectionMenu(page: Page, selector: string, point?: { x: numb
   if (point) await page.mouse.click(point.x, point.y, { button: 'right' });
   else await page.locator(selector).click({ button: 'right' });
 }
+
+test('the reference Mermaid diagram renders locally under CSP, with multiline labels and copyable source', async ({ page }, info) => {
+  const errors: string[] = [];
+  const requests: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  page.on('request', request => requests.push(request.url()));
+  await page.evaluate(() => {
+    const violations: string[] = [];
+    Object.assign(window, { diagramCspViolations: violations });
+    document.addEventListener('securitypolicyviolation', event => violations.push(event.violatedDirective));
+  });
+  expect(await page.locator('script[src$="/mermaid.js"]').count()).toBe(0);
+  const value = task();
+  value.turns = [{ id: 'diagram', status: 'completed', items: [{ id: 'reply', kind: 'agentMessage', data: {
+    text: `構成は以下になります。\n\n\`\`\`mermaid\n${carrierDiagram}\n\`\`\`\n\nCN0584は各CN0585に直接取り付けます。`,
+  } }] }];
+  await state(page, value);
+  const diagram = page.locator('.diagram');
+  await expect(diagram.locator('svg')).toBeVisible();
+  await expect(diagram).toContainText('中央の専用キャリアボード');
+  await expect(diagram).toContainText('USB-C PD給電');
+  await expect(diagram).not.toContainText('<br/>');
+  await expect(page.locator('.diagram-error')).toBeHidden();
+  await expect(page.locator('.diagram-source')).not.toHaveAttribute('open');
+  await page.screenshot({ path: info.outputPath('reference-diagram-dark.png'), fullPage: true });
+  await page.getByText('図のコード', { exact: true }).click();
+  await page.locator('.diagram-source .code-copy').focus();
+  await page.locator('.diagram-source .code-copy').click();
+  expect((await messages(page)).at(-1)).toEqual({ type: 'copyCode', requestId: 1, text: carrierDiagram });
+  const id = await diagram.locator('svg').getAttribute('id');
+  value.turns[0]!.items[0]!.data.text += '\n\n追加の説明です。';
+  await state(page, value);
+  await expect(diagram.locator('svg')).toHaveAttribute('id', id!);
+  await expect(page.locator('.diagram-source')).toHaveAttribute('open');
+  await page.setViewportSize({ width: 380, height: 850 });
+  await page.getByText('図のコード', { exact: true }).click();
+  const bounds = await diagram.evaluate(element => ({ width: element.clientWidth, scrollWidth: element.scrollWidth }));
+  expect(bounds.scrollWidth).toBeGreaterThan(bounds.width);
+  expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
+  expect(await page.locator('#conversation').evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.screenshot({ path: info.outputPath('reference-diagram-narrow.png'), fullPage: true });
+  await page.evaluate(() => {
+    document.body.classList.add('vscode-light');
+    document.body.style.setProperty('--vscode-editor-background', '#ffffff');
+    document.body.style.setProperty('--vscode-foreground', '#202020');
+  });
+  await expect(diagram.locator('svg')).not.toHaveAttribute('id', id!);
+  await expect(diagram.locator('svg')).toBeVisible();
+  await page.screenshot({ path: info.outputPath('reference-diagram-light.png'), fullPage: true });
+  expect(requests.every(url => url.startsWith('http://localhost/'))).toBe(true);
+  expect(requests.filter(url => url.endsWith('/mermaid.js'))).toHaveLength(1);
+  expect(await page.evaluate(() => (window as unknown as { diagramCspViolations: string[] }).diagramCspViolations)).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+for (const [name, example] of Object.entries(diagramExamples)) {
+  test(`Mermaid ${name} diagrams render as SVG`, async ({ page }) => {
+    const value = task();
+    value.turns = [{ id: 'diagram', status: 'completed', items: [{ id: 'reply', kind: 'agentMessage', data: { text: `\`\`\`mermaid\n${example}\n\`\`\`` } }] }];
+    await state(page, value);
+    await expect(page.locator('.diagram > svg')).toBeVisible();
+    await expect(page.locator('.diagram-error')).toBeHidden();
+    await expect(page.locator('.diagram-source code')).toHaveText(example);
+    expect(await page.locator('.diagram > svg').evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThan(20);
+  });
+}
+
+test('streaming and invalid Mermaid keep their source and recover when completed or corrected', async ({ page }) => {
+  const value = task();
+  const reply = { id: 'reply', kind: 'agentMessage', data: { text: '```mermaid\nflowchart TB\nA["開始"] --> B["完了"]' } };
+  value.status = 'running';
+  value.activeTurnId = 'diagram';
+  value.turns = [{ id: 'diagram', status: 'inProgress', items: [reply] }];
+  await state(page, value);
+  await expect(page.locator('.diagram-block')).toHaveCount(0);
+  await expect(page.locator('.code-block code')).toContainText('開始');
+  await expect(page.locator('script[src$="/mermaid.js"]')).toHaveCount(0);
+  reply.data.text += '\n```';
+  await state(page, value);
+  await expect(page.locator('.diagram > svg')).toBeVisible();
+  reply.data.text = '```mermaid\nflowchart TB\nA["unfinished\n```\n\n**後続の説明**';
+  await state(page, value);
+  await expect(page.locator('.diagram-error')).toBeVisible();
+  await expect(page.locator('.diagram-source code')).toBeVisible();
+  await expect(page.getByText('後続の説明', { exact: true })).toBeVisible();
+  await expect(page.locator('.diagram-render-target')).toHaveCount(0);
+  reply.data.text = `\`\`\`mermaid\n${carrierDiagram}\n\`\`\``;
+  value.status = 'idle';
+  value.activeTurnId = undefined;
+  value.turns[0]!.status = 'completed';
+  await state(page, value);
+  await expect(page.locator('.diagram > svg')).toBeVisible();
+  await expect(page.locator('.diagram-error')).toBeHidden();
+});
+
+test('multiple Mermaid blocks retain independent source toggles and SVG identifiers after updates', async ({ page }) => {
+  const value = task();
+  const text = '```mermaid\nflowchart LR\nA --> B\n```';
+  const sequence = `\`\`\`mermaid\n${diagramExamples.sequence}\n\`\`\``;
+  const classes = `\`\`\`mermaid\n${diagramExamples.class}\n\`\`\``;
+  value.turns = [{ id: 'diagram', status: 'completed', items: [
+    { id: 'reply', kind: 'agentMessage', data: { text: [text, text, sequence, sequence, classes, classes].join('\n\n') } },
+  ] }];
+  await state(page, value);
+  await expect(page.locator('.diagram > svg')).toHaveCount(6);
+  await page.locator('.diagram-source summary').first().click();
+  value.turns[0]!.items[0]!.data.text += '\n\n追加の説明';
+  await state(page, value);
+  await expect(page.locator('.diagram-source').first()).toHaveAttribute('open');
+  await expect(page.locator('.diagram-source').last()).not.toHaveAttribute('open');
+  const ids = await page.locator('.diagram [id]').evaluateAll(elements => elements.map(element => element.id));
+  expect(new Set(ids).size).toBe(ids.length);
+});
+
+test('cached tall diagrams preserve the reading position when later message text arrives', async ({ page }) => {
+  const value = task();
+  const diagram = `flowchart TB\n${Array.from({ length: 20 }, (_, index) => `N${index}["処理 ${index}"]`).join(' --> ')}`;
+  const reply = { id: 'reply', kind: 'agentMessage', data: { text: `\`\`\`mermaid\n${diagram}\n\`\`\`` } };
+  value.turns = [{ id: 'diagram', status: 'completed', items: [reply] }];
+  await state(page, value);
+  await expect(page.locator('.diagram > svg')).toBeVisible();
+  await page.locator('#conversation').evaluate(element => { element.scrollTop = 0; });
+  const id = await page.locator('.diagram > svg').getAttribute('id');
+  reply.data.text += '\n\n追加の説明';
+  await state(page, value);
+  await expect(page.locator('.diagram > svg')).toHaveAttribute('id', id!);
+  expect(await page.locator('#conversation').evaluate(element => element.scrollTop)).toBe(0);
+});
+
+test('a newer diagram supersedes a pending render without loading Mermaid again', async ({ page }) => {
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  await page.route('http://localhost/mermaid.js', async route => {
+    await pending;
+    await route.fulfill({ contentType: 'text/javascript', body: await readFile('dist/mermaid.js', 'utf8') });
+  });
+  const value = task();
+  const reply = { id: 'reply', kind: 'agentMessage', data: { text: '```mermaid\nflowchart TB\nA["以前の図"] --> B\n```' } };
+  value.turns = [{ id: 'diagram', status: 'completed', items: [reply] }];
+  await state(page, value);
+  await expect(page.locator('script[src$="/mermaid.js"]')).toHaveCount(1);
+  reply.data.text = '```mermaid\nflowchart TB\nA["最新の図"] --> B\n```';
+  await state(page, value);
+  release();
+  await expect(page.locator('.diagram > svg')).toBeVisible();
+  await expect(page.locator('.diagram')).toContainText('最新の図');
+  await expect(page.locator('.diagram')).not.toContainText('以前の図');
+  await expect(page.locator('script[src$="/mermaid.js"]')).toHaveCount(1);
+  await expect(page.locator('.diagram-render-target')).toHaveCount(0);
+});
+
+test('Mermaid directives cannot enable executable labels, callbacks or diagram navigation', async ({ page }) => {
+  const value = task();
+  const diagram = `%%{init: {"securityLevel":"loose", "htmlLabels":true}}%%
+flowchart TB
+    A["<img src='https://example.com/attack' onerror='window.diagramAttack=true'>"] --> B["安全なラベル"]
+    click B href "https://example.com/attack"`;
+  value.turns = [{ id: 'diagram', status: 'completed', items: [{ id: 'reply', kind: 'agentMessage', data: { text: `\`\`\`mermaid\n${diagram}\n\`\`\`` } }] }];
+  await state(page, value);
+  await expect(page.locator('.diagram > svg')).toBeVisible();
+  await expect(page.locator('.diagram')).toContainText('安全なラベル');
+  await expect(page.locator('.diagram a, .diagram img, .diagram script, .diagram foreignObject, .diagram [onclick], .diagram [onerror]')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as unknown as { diagramAttack?: boolean }).diagramAttack)).toBeUndefined();
+});
 
 test('reference equations render with bundled fonts and styles under the webview CSP', async ({ page }, info) => {
   const errors: string[] = [];

@@ -10,6 +10,7 @@ import { SelectionMenu, selectedTranscriptText } from './selection';
 import type { QuestionPresetMenuItem } from '../core/questionPresets';
 import { UsageGauges } from './usage';
 import { Requests } from './requests';
+import { Diagrams } from './diagrams';
 import { pendingSubmission, reconcilePendingSends, submissionContent, type PendingSend, type Submission } from './submissions';
 
 declare function acquireVsCodeApi(): { postMessage(value: unknown): void; setState(value: unknown): void; getState(): unknown };
@@ -56,6 +57,8 @@ const completion = new Composer(prompt, $('completions'), $('skills'), post, sav
 const usageGauges = new UsageGauges($('usage-gauges'), post);
 const requests = new Requests($('requests'), post);
 const selectionMenu = new SelectionMenu($('transcript'), () => ({ taskId: task?.id, hasThread: !!task?.threadId, presets: questionPresets }), post, () => render());
+const diagrams = new Diagrams($('transcript'), $('conversation'), document.currentScript as HTMLScriptElement,
+  () => !selectionMenu.opened && !selectedTranscriptText($('transcript')));
 let selectingTranscript = false;
 document.addEventListener('selectionchange', () => {
   const selected = !!selectedTranscriptText($('transcript'));
@@ -133,7 +136,9 @@ function renderPermissions(): void {
   options($<HTMLSelectElement>('mode'), values, task.settings.mode);
 }
 function detailKey(details: HTMLDetailsElement): string {
-  return JSON.stringify([details.closest<HTMLElement>('.turn')?.dataset.turn, details.dataset.item]);
+  const message = details.closest<HTMLElement>('.message');
+  return JSON.stringify([details.closest<HTMLElement>('.turn')?.dataset.turn, message?.dataset.messageId, details.dataset.item,
+    details.classList.contains('diagram-source') ? [...(message?.querySelectorAll('.diagram-source') ?? [])].indexOf(details) : undefined]);
 }
 function messageActionKey(button: HTMLElement): string {
   return JSON.stringify([button.closest<HTMLElement>('.turn')?.dataset.turn, button.closest<HTMLElement>('.message')?.dataset.messageId, button.dataset.messageAction]);
@@ -212,23 +217,25 @@ function render(): void {
   const html = renderTranscript(task) + pendingSends.map(renderPendingSend).join('');
   if (transcriptHtml !== html && !selected) {
     const detailStates = new Map([...transcript.querySelectorAll<HTMLDetailsElement>('details[data-item]')].map(details => [
-      detailKey(details), { open: details.open, status: details.closest<HTMLElement>('.turn')?.dataset.status },
+      detailKey(details), { open: details.open, status: details.closest<HTMLElement>('.turn')?.dataset.status, diagramRendered: details.dataset.diagramRendered },
     ]));
     const activeDetails = document.activeElement?.matches('summary') && transcript.contains(document.activeElement) ? document.activeElement.parentElement as HTMLDetailsElement : undefined;
     const focused = activeDetails ? detailKey(activeDetails) : undefined;
     const activeAction = document.activeElement instanceof HTMLElement && document.activeElement.matches('[data-message-action]') && transcript.contains(document.activeElement) ? messageActionKey(document.activeElement) : undefined;
     transcript.innerHTML = html;
     transcriptHtml = html;
+    diagrams.render(atBottom);
     for (const details of transcript.querySelectorAll<HTMLDetailsElement>('details[data-item]')) {
       const key = detailKey(details);
       const previous = detailStates.get(key);
       const status = details.closest<HTMLElement>('.turn')?.dataset.status;
       if (previous && (!details.classList.contains('turn-progress') || previous.status === status)) details.open = previous.open;
+      if (previous?.diagramRendered) details.dataset.diagramRendered = previous.diagramRendered;
       if (focused === key) details.querySelector('summary')?.focus({ preventScroll: true });
     }
     if (activeAction) [...transcript.querySelectorAll<HTMLButtonElement>('[data-message-action]')].find(button => messageActionKey(button) === activeAction)?.focus({ preventScroll: true });
     renderCopyFeedback();
-  }
+  } else if (!selected) diagrams.render(atBottom);
   const plan = task.plan;
   $('plan-mode').hidden = task.settings.collaborationMode !== 'plan';
   $('plan').innerHTML = plan ? `<details class="plan"><summary>作業計画</summary><p>${escapeHtml(plan.explanation)}</p><ol>${plan.steps.map(step => `<li>${step.status === 'completed' ? '✓' : step.status === 'inProgress' ? '◉' : '○'} ${escapeHtml(step.step)}</li>`).join('')}</ol></details>` : '';

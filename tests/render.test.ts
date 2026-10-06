@@ -4,6 +4,32 @@ import { renderAttachments, renderItem, renderMarkdown } from '../src/webview/re
 import { chatHtml } from '../src/ui/html';
 import { taskReferenceText } from '../src/core/taskReferenceText';
 import { inducedVoltageAnswer } from './fixtures/math';
+import { carrierDiagram, diagramExamples } from './fixtures/diagrams';
+
+test('closed Mermaid fences prepare all diagram types while preserving escaped, copyable source', () => {
+  for (const diagram of [carrierDiagram, ...Object.values(diagramExamples)]) {
+    const html = renderMarkdown(`構成です。\n\n\`\`\`mermaid\n${diagram}\n\`\`\`\n\n**説明**`);
+    assert.match(html, /class="diagram-block"/);
+    assert.match(html, /role="img" aria-label="Mermaid図" hidden/);
+    assert.match(html, /class="diagram-source" data-item="diagram-source" open/);
+    assert.match(html, /class="language-mermaid"/);
+    assert.match(html, /data-code-action="copy"/);
+    assert.match(html, /<strong>説明<\/strong>/);
+    assert.doesNotMatch(html, /<br\/>|<svg[^>]*id=/);
+  }
+  assert.match(renderMarkdown(`~~~~MERMAID\n${carrierDiagram}\n~~~~`), /class="diagram-block"/);
+  assert.match(renderMarkdown('```mermaid\nA["<img src=x onerror=alert(1)>"]\n```'), /&lt;img/);
+});
+
+test('streaming fences and ordinary code stay literal until a matching Mermaid closing fence arrives', () => {
+  for (const text of [
+    `\`\`\`mermaid\n${carrierDiagram}`, `\`\`\`\`mermaid\n${carrierDiagram}\n\`\`\``,
+    `~~~~mermaid\n${carrierDiagram}\n~~~`, `\`\`\`text\n${carrierDiagram}\n\`\`\``,
+    '`mermaid`', '    flowchart TB\n    A --> B',
+  ]) assert.doesNotMatch(renderMarkdown(text), /class="diagram-block"/);
+  const user = renderItem({ id: 'user', kind: 'userMessage', data: { content: [{ type: 'text', text: `\`\`\`mermaid\n${carrierDiagram}\n\`\`\`` }] } }, false);
+  assert.doesNotMatch(user, /class="diagram-block"/);
+});
 
 test('the reported induced-voltage answer renders fractions and all three aligned equations', () => {
   const html = renderMarkdown(inducedVoltageAnswer);
@@ -106,6 +132,7 @@ test('webview CSP disables network, raw HTML scripts and command execution', () 
   assert.ok(html.includes("default-src 'none'"));
   assert.ok(html.includes("script-src 'nonce-nonce'"));
   assert.ok(html.includes('style-src test:;'));
+  assert.ok(html.includes("style-src-elem test: 'unsafe-inline';"));
   assert.ok(html.includes("style-src-attr 'unsafe-inline';"));
   assert.ok(html.includes('font-src test:;'));
   assert.ok(html.includes('使用量回復後に自動継続'));
