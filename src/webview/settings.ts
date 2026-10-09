@@ -1,5 +1,5 @@
-import { DEFAULT_PRESET, DEFAULT_TITLE_EFFORT, presetEffortOptions, presetPermissionOptions, latestModel, readPresets, readTitleEffort, readTitleModel, selectedModel, titleEffortOptions } from '../core/settings';
-import { array, object, string, type ExecutionMode, type Model, type SettingsPreset } from '../core/types';
+import { DEFAULT_PRESET, DEFAULT_TITLE_EFFORT, presetEffortOptions, presetPermissionOptions, latestModel, readPresets, readTitleEffort, readTitleModel, selectedModel, serviceTierOptions, titleEffortOptions } from '../core/settings';
+import { array, object, string, type ExecutionMode, type Model, type ServiceTier, type SettingsPreset } from '../core/types';
 import { HF_MODEL_PREFIX, isHuggingFaceModel } from '../core/huggingFace';
 import { readTokenPrice } from '../core/cost';
 import { providerCheckKey, type ProviderCheck, type ProviderCheckPurpose } from '../core/providerCheck';
@@ -124,7 +124,7 @@ function renderPresetList(questions: boolean): void {
         <div class="preset-fields"><div><label for="${prefix}-input-price-${index}">入力単価（USD／100万トークン）</label><input id="${prefix}-input-price-${index}" data-field="input-price" type="number" min="0" step="any"></div><div><label for="${prefix}-output-price-${index}">出力単価（USD／100万トークン）</label><input id="${prefix}-output-price-${index}" data-field="output-price" type="number" min="0" step="any"></div></div>
         <div class="hf-check"><button type="button" class="secondary" data-action="check">利用可否を確認</button><p data-field="hf-check" class="hint" aria-live="polite"></p></div>
       </div>
-      <div class="preset-fields"><div><label for="${prefix}-effort-${index}">推論強度</label><select id="${prefix}-effort-${index}" data-field="effort"></select></div><div><label for="${prefix}-mode-${index}">権限</label><select id="${prefix}-mode-${index}" data-field="mode" aria-describedby="${prefix}-permission-description-${index}"></select></div></div><p id="${prefix}-permission-description-${index}" class="hint"></p>`;
+      <div class="preset-fields preset-run-settings"><div><label for="${prefix}-effort-${index}">推論強度</label><select id="${prefix}-effort-${index}" data-field="effort"></select></div><div><label for="${prefix}-service-tier-${index}">速度</label><select id="${prefix}-service-tier-${index}" data-field="service-tier"></select></div><div><label for="${prefix}-mode-${index}">権限</label><select id="${prefix}-mode-${index}" data-field="mode" aria-describedby="${prefix}-permission-description-${index}"></select></div></div><p id="${prefix}-permission-description-${index}" class="hint"></p>`;
     if (questions) {
       const question = questionPresets[index]!;
       const name = card.querySelector<HTMLInputElement>(`#question-name-${index}`)!;
@@ -143,6 +143,12 @@ function renderPresetList(questions: boolean): void {
     const updatePrice = (): void => { preset.pricing = isExternalModel(preset.model) ? price(inputPrice, outputPrice) : undefined; };
     for (const price of [inputPrice, outputPrice]) price.addEventListener('input', () => { updatePrice(); changed(); });
     const effort = card.querySelector<HTMLSelectElement>('[data-field=effort]')!;
+    const serviceTier = card.querySelector<HTMLSelectElement>('[data-field=service-tier]')!;
+    const renderSpeed = (): void => {
+      const external = isExternalModel(preset.model);
+      options(serviceTier, external ? [{ id: 'default', label: 'Standard' }] : serviceTierOptions, external ? 'default' : preset.serviceTier ?? '');
+      serviceTier.disabled = external;
+    };
     card.querySelector<HTMLButtonElement>('[data-action=check]')!.addEventListener('click', () => checkModel(preset.model, 'task'));
     const permissions = card.querySelector<HTMLSelectElement>('[data-field=mode]')!;
     const describeModel = (): void => {
@@ -163,10 +169,13 @@ function renderPresetList(questions: boolean): void {
     };
     showExternal();
     options(effort, presetEffortOptions(selectedModel(models, preset.model)), preset.effort);
+    renderSpeed();
     options(permissions, presetPermissionOptions, preset.mode);
     describeModel(); describePermissions();
     model.addEventListener('change', () => {
       preset.model = model.value === 'huggingface' ? `${HF_MODEL_PREFIX}${hfModel.value.trim()}` : model.value;
+      if (isExternalModel(preset.model)) delete preset.serviceTier;
+      renderSpeed();
       showExternal();
       inputPrice.value = ''; outputPrice.value = '';
       updatePrice();
@@ -180,6 +189,11 @@ function renderPresetList(questions: boolean): void {
       describeModel(); changed();
     });
     effort.addEventListener('change', () => { preset.effort = effort.value; changed(); });
+    serviceTier.addEventListener('change', () => {
+      if (serviceTier.value) preset.serviceTier = serviceTier.value as ServiceTier;
+      else delete preset.serviceTier;
+      changed();
+    });
     permissions.addEventListener('change', () => { preset.mode = permissions.value as ExecutionMode; describePermissions(); changed(); });
     for (const action of ['up', 'down', 'remove'] as const) {
       const button = card.querySelector<HTMLButtonElement>(`[data-action=${action}]`)!;

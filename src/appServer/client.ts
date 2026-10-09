@@ -1,5 +1,5 @@
 import { isAbsolute } from 'node:path';
-import { array, object, string, Signal, type FileReference, type Gateway, type Input, type Item, type JsonObject, type Model, type PendingRequest, type RequestAnswer, type RunSettings, type ServerEvent, type Skill, type Thread, type ThreadReference, type Turn, type TurnError, type Usage } from '../core/types';
+import { array, object, string, Signal, type FileReference, type Gateway, type Input, type Item, type JsonObject, type Model, type PendingRequest, type RequestAnswer, type RunSettings, type ServerEvent, type ServiceTier, type Skill, type Thread, type ThreadReference, type Turn, type TurnError, type Usage } from '../core/types';
 import { threadDeletionOrder } from '../core/threadDeletion';
 import { readRolloutReferences } from './rolloutMetadata';
 import { hasSkillMention, permissionMode } from '../core/composer';
@@ -15,6 +15,9 @@ import type { ResetCredits, ResetCreditOutcome } from '../core/types';
 function requiredString(value: unknown, field: string): string {
   if (typeof value !== 'string' || !value) throw new Error(`App Server応答に${field}がありません。`);
   return value;
+}
+function serviceTierOverride(tier?: ServiceTier, external = false): JsonObject {
+  return external || tier === 'default' ? { serviceTier: null } : tier === 'fast' ? { serviceTier: 'fast' } : {};
 }
 export function decodeItem(raw: unknown): Item {
   const data = object(raw);
@@ -117,7 +120,7 @@ export class AppServerClient implements Gateway {
   constructor(private readonly providers: () => ResponsesProvider[] = () => [],
     private readonly connectionConfig: (model: string, effort?: string) => Promise<JsonObject> = async () => ({})) {}
 
-  private async runConfig(model?: string, effort?: string, provider?: string): Promise<JsonObject> {
+  private async runConfig(model?: string, effort?: string, provider?: string, serviceTier?: ServiceTier): Promise<JsonObject> {
     if ((!model || model === 'latest') && isExternalProvider(provider)) {
       if (isHuggingFaceProvider(provider)) return { serviceTier: null, config: HF_MODEL_CONFIG };
       const entry = this.providers().find(p => providerId(p.id) === provider);
@@ -125,7 +128,7 @@ export class AppServerClient implements Gateway {
       return { serviceTier: null, config: { web_search: 'disabled', model_supports_reasoning_summaries: false, model_reasoning_summary: 'none',
         ...await this.connectionConfig(responsesModelId(entry.id, entry.models[0].id), effort) } };
     }
-    if (!model || !isExternalModel(model)) return effort ? { config: { model_reasoning_effort: effort } } : {};
+    if (!model || !isExternalModel(model)) return { ...serviceTierOverride(serviceTier), ...(effort ? { config: { model_reasoning_effort: effort } } : {}) };
     return { serviceTier: null, config: { ...externalModelConfig(model, this.providers(), effort),
       ...(!isHuggingFaceModel(model) ? await this.connectionConfig(model, effort) : {}) } };
   }
@@ -185,7 +188,7 @@ export class AppServerClient implements Gateway {
     // New threads have no stored history until the first user message.
     const thread = await this.threadResult(await this.call('thread/start', {
       ...(cwd ? { cwd } : {}), ...modelRequest(settings.model),
-      ...await this.runConfig(settings.model, settings.effort),
+      ...await this.runConfig(settings.model, settings.effort, undefined, settings.serviceTier),
       ...(settings.mode !== 'default' ? {
         sandbox: settings.mode === 'auto-review' ? 'workspace-write' : settings.mode,
         approvalPolicy: settings.mode === 'danger-full-access' ? 'never' : 'on-request',
@@ -218,7 +221,7 @@ export class AppServerClient implements Gateway {
     const thread = await this.threadResult(await this.call('thread/resume', { threadId,
       ...(provider ? { modelProvider: provider } : model.modelProvider ? { modelProvider: model.modelProvider } : {}),
       ...(model.model && model.model !== 'latest' ? { model: model.model } : {}),
-      ...await this.runConfig(selectedModel, effort, provider),
+      ...await this.runConfig(selectedModel, effort, provider, settings?.serviceTier),
     }));
     this.threadSettings.set(threadId, JSON.stringify([selectedModel, effort]));
     return thread;
@@ -231,6 +234,7 @@ export class AppServerClient implements Gateway {
     thread.instructionSources = array(result.instructionSources).filter((v): v is string => typeof v === 'string');
     if (typeof result.model === 'string') thread.model = displayModel(result.model, thread.modelProvider);
     if (typeof result.reasoningEffort === 'string') thread.effort = result.reasoningEffort;
+    if (result.serviceTier === null || typeof result.serviceTier === 'string') thread.serviceTier = result.serviceTier;
     if (isHuggingFaceProvider(thread.modelProvider)) thread.effort = undefined;
     this.threadDefaults.set(thread.id, { model: modelRequest(thread.model).model, effort: thread.effort });
     thread.permissionMode = permissionMode(object(result.sandbox).type, result.approvalsReviewer, result.approvalPolicy);
@@ -266,7 +270,7 @@ export class AppServerClient implements Gateway {
     this.assertProvider(provider, options.settings?.model);
     return this.threadResult(await this.call('thread/fork', { threadId, ...(provider ? { modelProvider: provider } : {}),
       ...(model.model && model.model !== 'latest' ? { model: model.model } : {}),
-      ...await this.runConfig(options.settings?.model, options.settings?.effort, provider),
+      ...await this.runConfig(options.settings?.model, options.settings?.effort, provider, options.settings?.serviceTier),
       ...(options.cwd ? { cwd: options.cwd } : {}), ...(options.lastTurnId ? { lastTurnId: options.lastTurnId } : {}) }));
   }
   async renameThread(threadId: string, name: string): Promise<void> { await this.call('thread/name/set', { threadId, name }); }
@@ -303,6 +307,7 @@ export class AppServerClient implements Gateway {
       : { type: 'dangerFullAccess' };
     const result = await this.call('turn/start', {
       threadId, input: this.encodeInput(input), clientUserMessageId: clientId,
+      ...serviceTierOverride(settings.serviceTier, isExternalProvider(provider) || isExternalModel(settings.model)),
       ...(model ? { model } : {}), ...(parseResponsesModel(settings.model) ? { effort: settings.effort ?? null }
         : settings.effort && !isHuggingFaceProvider(provider) && !isHuggingFaceModel(settings.model) ? { effort: settings.effort } : {}),
       ...(sandbox ? { sandboxPolicy: sandbox, approvalPolicy: settings.mode === 'danger-full-access' ? 'never' : 'on-request', approvalsReviewer: settings.mode === 'auto-review' ? 'auto_review' : 'user' } : {}),

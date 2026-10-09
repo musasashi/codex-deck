@@ -3,10 +3,13 @@ import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import { AppServerClient, decodeThread } from '../src/appServer/client';
 import { JsonRpcPeer, RpcError } from '../src/appServer/rpc';
+import { MAX_MESSAGE_BYTES } from '../src/appServer/limits';
 import { TaskManager } from '../src/core/taskManager';
 import { DEFAULT_PRESET } from '../src/core/settings';
 import { object } from '../src/core/types';
 import { deferred } from './helpers';
+import { validateProviders } from '../src/core/providers';
+import type { RunSettings } from '../src/core/types';
 
 function harness() {
   const input = new PassThrough(); const output = new PassThrough();
@@ -17,6 +20,91 @@ function harness() {
   const tick = () => new Promise<void>(resolve => setImmediate(resolve));
   return { peer, input, output, messages, send, tick };
 }
+
+test('large image messages survive fragmented UTF-8 framing above the former 32MiB limit', async () => {
+  const h = harness();
+  const image = `data:image/png;base64,${'A'.repeat(33 * 1024 * 1024)}`;
+  const request = h.peer.request('turn/start', { input: [{ type: 'image', url: image }] });
+  assert.equal((object(h.messages[0]!.params).input as { url: string }[])[0]?.url, image);
+  const response = Buffer.from(JSON.stringify({ id: h.messages[0]!.id, result: { image, text: '日本語' } }) + '\n');
+  for (let offset = 0; offset < response.length; offset += 65537) h.input.write(response.subarray(offset, offset + 65537));
+  assert.deepEqual(await request, { image, text: '日本語' });
+  h.send({ method: 'next', params: {} });
+  h.peer.close();
+});
+
+test('oversized outgoing messages reject before writing without disconnecting RPC', async () => {
+  const h = harness();
+  await assert.rejects(h.peer.request('turn/start', { text: 'a'.repeat(MAX_MESSAGE_BYTES) }), /128MiB/);
+  assert.equal(h.messages.length, 0);
+  const next = h.peer.request('next');
+  h.send({ id: h.messages[0]!.id, result: 'still connected' });
+  assert.equal(await next, 'still connected');
+  h.peer.close();
+});
+
+test('Fast and Standard overrides follow new, resumed, forked and subsequent turns without changing effort', async () => {
+  const h = harness(), client = new AppServerClient();
+  const server = new JsonRpcPeer(h.output, h.input);
+  let tier: string | null = 'priority';
+  server.handleRequest = async ({ method, params: raw }) => {
+    const params = object(raw);
+    if (method === 'turn/start') return { turn: { id: 'turn', status: 'completed' } };
+    if (method.startsWith('thread/')) {
+      if (Object.hasOwn(params, 'serviceTier')) tier = params.serviceTier === 'fast' ? 'priority' : null;
+      return { thread: { id: 'thread', cwd: '/project', modelProvider: 'openai', turns: [] }, model: 'test-model', reasoningEffort: 'high', serviceTier: tier };
+    }
+    return {};
+  };
+  const assertTier = (settings: RunSettings): void => {
+    const params = object(h.messages.at(-1)!.params);
+    if (settings.serviceTier) assert.equal(params.serviceTier, settings.serviceTier === 'fast' ? 'fast' : null);
+    else assert.equal(Object.hasOwn(params, 'serviceTier'), false, 'an unspecified speed inherits Codex settings');
+  };
+  try {
+    await client.connect(h.peer);
+    for (const serviceTier of ['fast', 'default', undefined] as const) {
+      const settings: RunSettings = { model: 'test-model', effort: 'high', mode: 'read-only', ...(serviceTier ? { serviceTier } : {}) };
+      const started = await client.startThread('/project', settings); assertTier(settings);
+      assert.equal(started.serviceTier, serviceTier === 'fast' ? 'priority' : null);
+      assert.equal(object(object(h.messages.at(-1)!.params).config).model_reasoning_effort, 'high');
+      await client.startTurn('thread', [{ type: 'text', text: 'test' }], settings, 'message'); assertTier(settings);
+      assert.equal(object(h.messages.at(-1)!.params).effort, 'high');
+      await client.resumeThread('thread', settings); assertTier(settings);
+      await client.forkThread('thread', { settings }); assertTier(settings);
+    }
+    await client.startTurn('thread', [], { model: 'test-model', mode: 'default', serviceTier: 'fast' }, 'fast');
+    assert.equal(object(h.messages.at(-1)!.params).serviceTier, 'fast');
+    await client.startTurn('thread', [], { model: 'test-model', mode: 'default', serviceTier: 'default' }, 'standard');
+    assert.equal(object(h.messages.at(-1)!.params).serviceTier, null, 'Standard must clear the previous Fast override');
+  } finally { client.detach(); h.peer.close(); server.close(); }
+});
+
+test('Codex Fast overrides are cleared for HF and external Responses API threads and turns', async () => {
+  const h = harness();
+  const providers = validateProviders([{ id: 'local', name: 'Local API', baseUrl: 'http://localhost/v1', models: [{ id: 'model' }] }]);
+  const client = new AppServerClient(() => providers), server = new JsonRpcPeer(h.output, h.input);
+  let modelProvider: unknown;
+  server.handleRequest = async ({ method, params: raw }) => {
+    const params = object(raw);
+    if (method === 'thread/start') {
+      modelProvider = params.modelProvider;
+      return { thread: { id: 'external', modelProvider }, model: params.model, serviceTier: null };
+    }
+    if (method === 'turn/start') return { turn: { id: 'turn', status: 'completed' } };
+    return {};
+  };
+  try {
+    await client.connect(h.peer);
+    for (const model of ['hf:org/model', 'responses:local:model']) {
+      const settings: RunSettings = { model, mode: 'default', serviceTier: 'fast' };
+      await client.startThread('/project', settings);
+      assert.equal(object(h.messages.at(-1)!.params).serviceTier, null);
+      await client.startTurn('external', [], settings, 'message');
+      assert.equal(object(h.messages.at(-1)!.params).serviceTier, null);
+    }
+  } finally { client.detach(); h.peer.close(); server.close(); }
+});
 
 test('reset credit redemption uses only the explicitly selected ID and preserves its idempotency key over in-memory RPC', async () => {
   // PassThrough streams cannot contact Codex or an account; no real ticket can be consumed.

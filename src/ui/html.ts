@@ -4,14 +4,14 @@ export function chatHtml(options: { cspSource: string; script: string; css: stri
     '使用量の上限で作業が停止した場合、利用枠の回復を確認してから自動で作業を再開します。',
     '待機中は、VS Codeを起動し、接続した状態にしておいてください。',
   ].join('\n');
-    return `<!doctype html><html lang="ja"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource}; style-src-attr 'unsafe-inline'; font-src ${cspSource}; img-src ${cspSource} data:; script-src 'nonce-${nonce}';"><link href="${css}" rel="stylesheet"><title>Codex Deck</title></head><body>
+    return `<!doctype html><html lang="ja"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource}; style-src-elem ${cspSource} 'unsafe-inline'; style-src-attr 'unsafe-inline'; font-src ${cspSource}; img-src ${cspSource} data:; script-src 'nonce-${nonce}';"><link href="${css}" rel="stylesheet"><title>Codex Deck</title></head><body>
       <header class="topbar"><div class="connection"><span id="status-dot" class="dot"></span><span id="status">接続中</span></div><label class="auto-resume" title="${autoResumeDescription}"><input id="auto-resume" type="checkbox">使用量回復後に自動継続</label><button id="menu" class="icon-button" aria-label="コマンドメニュー" title="コマンドメニュー">•••</button></header>
       <div id="notice" role="status" hidden><span id="notice-text"></span><button type="button" id="dismiss-notice" aria-label="メッセージを閉じる" title="メッセージを閉じる">×</button></div>
       <main id="conversation" tabindex="0" aria-label="会話"><section id="skills" aria-label="登録されたスキル" hidden></section><div id="transcript" role="log" aria-label="チャット履歴"></div><div id="plan"></div></main>
       <section id="requests" aria-label="承認と質問" hidden></section>
       <footer class="composer-area"><form id="composer">
         <div id="completions" hidden></div><div id="attachments" class="attachments" role="list" aria-label="添付ファイル" hidden></div>
-        <div id="plan-mode" role="status" hidden>プランモード · /plan で通常モードに戻る</div>
+        <div id="plan-mode" role="status" hidden><span>プランモード · /plan で通常モードに戻る</span><button type="button" id="exit-plan-mode" class="icon-button" aria-label="通常モードに戻る" title="通常モードに戻る">×</button></div>
         <label class="sr-only" for="prompt">メッセージ</label><textarea id="prompt" rows="2" placeholder="作業内容を入力。 / コマンド · @ ファイル · $ スキル" aria-autocomplete="list" aria-controls="completion-list" aria-expanded="false" autofocus></textarea>
         <div id="image-status" role="status" hidden></div>
         <div class="composer-tools">
@@ -23,6 +23,7 @@ export function chatHtml(options: { cspSource: string; script: string; css: stri
               <label><span class="sr-only">モデル</span><select id="model" aria-label="モデル" title="モデル"></select></label>
             </div>
             <label><span class="sr-only">推論の強さ</span><select id="effort" aria-label="推論の強さ" title="推論の強さ"></select></label>
+            <label><span class="sr-only">速度</span><select id="service-tier" aria-label="速度" title="速度"></select></label>
             <label><span class="sr-only">Permissions</span><select id="mode" aria-label="Permissions" title="Permissions"></select></label>
           </div>
           <div class="composer-actions">
@@ -32,5 +33,11 @@ export function chatHtml(options: { cspSource: string; script: string; css: stri
           </div>
         </div>
       </form></footer>
+      <dialog id="image-annotation" aria-labelledby="annotation-title">
+        <div class="annotation-toolbar"><h2 id="annotation-title">画像に描き込む</h2><span class="annotation-pen"><span aria-hidden="true"></span>赤ペン</span><div class="annotation-tools"><button type="button" id="annotation-scale" class="secondary">実寸表示</button><button type="button" id="annotation-undo" class="secondary" title="取り消し (Ctrl+Z)">取り消し</button><button type="button" id="annotation-clear" class="secondary">全消去</button></div></div>
+        <div id="annotation-stage"><canvas id="annotation-canvas" role="img" aria-label="描き込み用の画像" tabindex="0" hidden></canvas></div>
+        <div id="annotation-status" role="status" hidden></div>
+        <div class="annotation-actions"><button type="button" id="annotation-cancel" class="secondary">キャンセル</button><button type="button" id="annotation-apply">反映</button></div>
+      </dialog>
       <script nonce="${nonce}" src="${script}"></script></body></html>`;
 }

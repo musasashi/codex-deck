@@ -7,7 +7,7 @@ import * as path from 'node:path';
 import { buildSync } from 'esbuild';
 import type * as vscode from 'vscode';
 import type { JsonObject, Task, TaskRecord } from '../src/core/types';
-import type { TaskManager } from '../src/core/taskManager';
+import { TaskManager } from '../src/core/taskManager';
 import type { PanelHost } from '../src/ui/panels';
 import { deferred, FakeGateway, thread } from './helpers';
 import type { AppServerClient } from '../src/appServer/client';
@@ -69,7 +69,7 @@ function activate(records: TaskRecord[], options: { remoteName?: string; isTrust
       state: { focused: true },
       activeTextEditor: undefined as vscode.TextEditor | undefined,
       tabGroups: { all: [] as { tabs: vscode.Tab[] }[], close: async (_tabs: readonly vscode.Tab[]): Promise<boolean> => true },
-      showQuickPick: async (_items: { label: string; task: Task }[]): Promise<{ label: string; task: Task } | undefined> => undefined,
+      showQuickPick: async (_items: { label: string; task?: Task }[]): Promise<{ label: string; task?: Task } | undefined> => undefined,
       showInputBox: async (): Promise<string | undefined> => undefined,
       showWarningMessage: async (_message: string, _options: vscode.MessageOptions, ..._items: string[]): Promise<string | undefined> => undefined,
       createOutputChannel: () => ({ ...disposable(), append() {}, appendLine() {} }),
@@ -158,6 +158,29 @@ test('code block copy requests write the exact code and acknowledge their reques
   } finally { await extension.shutdown(); }
 });
 
+test('speed changes persist independently and survive other composer settings and task restoration', async () => {
+  const extension = activate([record('draft', true, true)]);
+  const { host, manager } = extension.serializer as unknown as { host: PanelHost; manager: TaskManager };
+  try {
+    host.models = await new FakeGateway().listModels();
+    const task = manager.get('draft');
+    await host.command(task, { type: 'settings', model: 'test-model', effort: 'high', mode: 'read-only', serviceTier: 'fast' });
+    assert.equal(task.settings.serviceTier, 'fast');
+    await host.command(task, { type: 'settings', model: 'test-model', effort: 'high', mode: 'workspace-write' });
+    assert.equal(task.settings.serviceTier, 'fast');
+    await manager.flush();
+    const restored = new TaskManager(new FakeGateway(), { async save() {} }, extension.records(), { schedule: false });
+    try { assert.equal(restored.get('draft').settings.serviceTier, 'fast'); }
+    finally { restored.dispose(); await restored.flush(); }
+    await host.command(task, { type: 'settings', model: 'test-model', effort: 'high', mode: 'workspace-write', serviceTier: 'default' });
+    assert.equal(task.settings.serviceTier, 'default');
+    await assert.rejects(host.command(task, { type: 'settings', model: 'test-model', effort: 'high', mode: 'workspace-write', serviceTier: 'invalid' }), /速度/);
+    assert.equal(task.settings.serviceTier, 'default');
+    await host.command(task, { type: 'settings', model: 'test-model', effort: 'high', mode: 'workspace-write', serviceTier: '' });
+    assert.equal(task.settings.serviceTier, undefined);
+  } finally { await extension.shutdown(); }
+});
+
 test('selection mentions replace the old command and use the source chat instead of another active task', async () => {
   const extension = activate([record('first', true), record('source', true)]);
   const first = panel(), source = panel();
@@ -187,9 +210,10 @@ test('editor mentions snapshot unsaved text before choosing a task and wait for 
     selection: { isEmpty: false, start: { line: 4, character: 2 }, end: { line: 6, character: 18 } },
   } as unknown as vscode.TextEditor;
   extension.api.window.showQuickPick = async items => {
+    assert.deepEqual(items.map(item => item.label), ['新規タスク', 'first', 'target']);
     selectedText = '選択後に変更された文章';
     extension.api.window.activeTextEditor = undefined;
-    return items.find(item => item.task.id === 'target');
+    return items.find(item => item.task?.id === 'target');
   };
   try {
     await extension.commands.get('codexDeck.mentionSelection')!();
@@ -200,7 +224,73 @@ test('editor mentions snapshot unsaved text before choosing a task and wait for 
     assert.deepEqual(target.messages.at(-1), { type: 'insertReference', text: '> 参照元: /project/開いている文章.md:5:3-7:19\n>\n> 一行目\n> \n>   <tag>二行目</tag>\n\n' });
     await target.receive({ type: 'ready' });
     assert.equal(target.messages.filter(message => message.type === 'insertReference').length, 1);
+    assert.deepEqual(extension.rows().map(task => task.id), ['first', 'target']);
     assert.ok(extension.rows().every(task => !task.attachments.length && !task.turns.length));
+  } finally { await extension.shutdown(); }
+});
+
+test('editor mentions offer a new task even when the only open conversation is active', async () => {
+  const extension = activate([record('existing', true), record('closed-draft', false, true)]);
+  const existing = panel();
+  extension.api.window.activeTextEditor = {
+    document: { uri: { scheme: 'file', fsPath: '/project/notes.md' }, getText: () => '新しい会話で言及する文章' },
+    selection: { isEmpty: false, start: { line: 0, character: 0 }, end: { line: 0, character: 12 } },
+  } as unknown as vscode.TextEditor;
+  extension.api.window.showQuickPick = async items => {
+    assert.deepEqual(items.map(item => item.label), ['新規タスク', 'existing']);
+    assert.equal(extension.rows().length, 1, 'opening the picker must not create a draft');
+    return items.find(item => item.label === '新規タスク');
+  };
+  try {
+    await extension.serializer.deserializeWebviewPanel(existing, { taskId: 'existing' });
+    await extension.commands.get('codexDeck.mentionSelection')!();
+    assert.equal(extension.rows().length, 2);
+    const draft = extension.rows().find(task => !task.threadId)!;
+    assert.ok(draft);
+    assert.notEqual(draft.id, 'closed-draft');
+    const target = extension.openedPanels[0]!;
+    await target.receive({ type: 'ready' });
+    assert.deepEqual(target.messages.at(-1), { type: 'insertReference', text: '> 参照元: /project/notes.md:1:1-1:13\n>\n> 新しい会話で言及する文章\n\n' });
+    assert.equal(existing.messages.some(message => message.type === 'insertReference'), false);
+  } finally { await extension.shutdown(); }
+});
+
+test('editor mentions reuse an open draft without offering a duplicate new task', async () => {
+  for (const hasConversation of [false, true]) {
+    const extension = activate([...(hasConversation ? [record('existing', true)] : []), record('draft', true, true)]);
+    const draft = panel();
+    extension.api.window.activeTextEditor = {
+      document: { uri: { scheme: 'file', fsPath: '/project/notes.md' }, getText: () => '開いている下書きへの引用' },
+      selection: { isEmpty: false, start: { line: 0, character: 0 }, end: { line: 0, character: 12 } },
+    } as unknown as vscode.TextEditor;
+    let pickCount = 0;
+    extension.api.window.showQuickPick = async items => {
+      pickCount++;
+      assert.deepEqual(items.map(item => item.task?.id), ['existing', 'draft']);
+      return items.find(item => item.task?.id === 'draft');
+    };
+    try {
+      await extension.serializer.deserializeWebviewPanel(draft, { taskId: 'draft' });
+      await draft.receive({ type: 'ready' });
+      await extension.commands.get('codexDeck.mentionSelection')!();
+      assert.equal(pickCount, hasConversation ? 1 : 0);
+      assert.equal(extension.rows().length, hasConversation ? 2 : 1);
+      assert.equal(extension.createdPanels(), 0);
+      assert.deepEqual(draft.messages.at(-1), { type: 'insertReference', text: '> 参照元: /project/notes.md:1:1-1:13\n>\n> 開いている下書きへの引用\n\n' });
+    } finally { await extension.shutdown(); }
+  }
+});
+
+test('cancelling an editor mention leaves tasks and drafts unchanged', async () => {
+  const extension = activate([record('existing', true)]);
+  extension.api.window.activeTextEditor = {
+    document: { uri: { scheme: 'file', fsPath: '/project/notes.md' }, getText: () => '引用しない文章' },
+    selection: { isEmpty: false, start: { line: 0, character: 0 }, end: { line: 0, character: 6 } },
+  } as unknown as vscode.TextEditor;
+  try {
+    await extension.commands.get('codexDeck.mentionSelection')!();
+    assert.deepEqual(extension.rows().map(task => task.id), ['existing']);
+    assert.equal(extension.createdPanels(), 0);
   } finally { await extension.shutdown(); }
 });
 
@@ -287,6 +377,25 @@ function connectedExtension(records: TaskRecord[] = [], options: Parameters<type
   host.connect = async () => {};
   return { ...extension, host, manager, gateway, resetRequests };
 }
+
+test('new tasks receive their workspace speed setting before starting a conversation', async () => {
+  for (const tier of [undefined, null, 'default', 'fast']) {
+    const extension = connectedExtension();
+    const reads: (string | undefined)[] = [];
+    const client = extension.manager.gateway as AppServerClient;
+    client.readConfig = async cwd => { reads.push(cwd); return { config: { service_tier: tier } }; };
+    try {
+      const task = await extension.commands.get('codexDeck.newTask')!() as Task;
+      const catalog = await extension.host.command(task, { type: 'composerCatalog', requestId: 7 });
+      assert.equal(catalog?.serviceTier, tier ?? null);
+      assert.deepEqual(reads, [task.cwd]);
+      assert.equal(task.threadId, undefined);
+      assert.equal(task.settings.serviceTier, undefined);
+      assert.equal(extension.gateway.threads.size, 0);
+      assert.equal(extension.gateway.sent.length, 0);
+    } finally { await extension.shutdown(); }
+  }
+});
 
 function resetCreditExtension() {
   const extension = connectedExtension([record('reset', true, true)]);
@@ -487,6 +596,30 @@ test('deleted chats close visible and hidden tabs and cannot restore saved task 
   } finally { await extension.shutdown(); }
 });
 
+test('image updates acknowledge the request and leave the original attachment intact on rejection', async () => {
+  const extension = connectedExtension();
+  const { host, manager } = extension;
+  try {
+    const task = manager.create('/project');
+    await host.command(task, { type: 'pasteImages', requestId: 1, urls: ['data:image/png;base64,YQ=='] });
+    const original = task.attachments[0]!;
+    const strokes = [{ width: 3, points: [{ x: 10, y: 20 }] }];
+    const updated = await host.command(task, { type: 'updateImageAttachment', requestId: 'edit', id: original.id,
+      url: 'data:image/png;base64,Yg==', strokes });
+    assert.deepEqual(updated, { type: 'imageAttachmentUpdated', requestId: 'edit', attachment: task.attachments[0] });
+    assert.equal(task.attachments[0]?.annotation?.originalUrl, original.input.url);
+    const retained = task.attachments[0];
+    for (const changes of [{ url: 'invalid' }, { strokes: [{ width: 0, points: [] }] }, { id: 'missing' }]) {
+      const result = await host.command(task, { type: 'updateImageAttachment', requestId: 'invalid', id: original.id,
+        url: 'data:image/png;base64,Yg==', strokes, ...changes });
+      assert.equal(result?.type, 'imageAttachmentUpdated');
+      assert.equal(result?.requestId, 'invalid');
+      assert.equal(typeof result?.error, 'string');
+      assert.equal(task.attachments[0], retained);
+    }
+  } finally { await extension.shutdown(); }
+});
+
 test('/plan toggles without a turn and inline instructions use the normal send path with images and skills', async () => {
   const extension = connectedExtension();
   const { host, manager, gateway } = extension;
@@ -509,6 +642,7 @@ test('/plan toggles without a turn and inline instructions use the normal send p
     assert.deepEqual(gateway.sent[0]?.settings, { model: 'test-model', effort: 'high', mode: 'auto-review', collaborationMode: 'plan' });
     assert.deepEqual(task.attachments.map(attachment => attachment.id), ['later']);
     await assert.rejects(host.command(task, { type: 'send', text: '/plan' }), /実行が完了/);
+    await assert.rejects(host.command(task, { type: 'exitPlanMode' }), /実行が完了/);
     assert.equal(task.settings.collaborationMode, 'plan');
     gateway.finish(task.threadId!, task.activeTurnId!, 'completed');
     await host.command(task, { type: 'send', text: '/plan 計画を調整してください', attachmentIds: [] });
@@ -520,6 +654,14 @@ test('/plan toggles without a turn and inline instructions use the normal send p
     assert.equal(task.settings.collaborationMode, 'plan', 'settings and presets must preserve the conversation mode');
     await host.command(task, { type: 'send', text: '/plan' });
     assert.equal(task.settings.collaborationMode, 'default');
+    await host.command(task, { type: 'send', text: '/plan' });
+    assert.equal(task.settings.collaborationMode, 'plan');
+    const settings = { ...task.settings, collaborationMode: 'default' };
+    await host.command(task, { type: 'exitPlanMode' });
+    await host.command(task, { type: 'exitPlanMode' });
+    assert.deepEqual(task.settings, settings);
+    assert.deepEqual(task.attachments.map(attachment => attachment.id), ['later']);
+    assert.equal(gateway.sent.length, 2);
     await host.command(task, { type: 'send', text: '実装してください', attachmentIds: [] });
     assert.equal(gateway.sent.at(-1)?.settings.collaborationMode, 'default');
     assert.equal(gateway.sent.length, 3);
@@ -541,6 +683,7 @@ test('/plan restores a saved task before checking for an active turn and rejects
     const draft = manager.create('/project');
     draft.busy = true;
     await assert.rejects(host.command(draft, { type: 'send', text: '/plan' }), /実行が完了/);
+    await assert.rejects(host.command(draft, { type: 'exitPlanMode' }), /実行が完了/);
     assert.equal(draft.settings.collaborationMode, undefined);
   } finally { await extension.shutdown(); }
 });

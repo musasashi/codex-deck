@@ -14,14 +14,14 @@ import { messageMarkdown, taskMarkdown } from './core/taskCopy';
 import { linkedThreadId, taskDeepLink } from './core/taskReferences';
 import { selectionReference } from './core/selectionReference';
 import { questionPresetMessage, readQuestionPresets, validateQuestionPreset } from './core/questionPresets';
-import { IMAGE_FORMAT_ERROR, isImageDataUrl, MAX_ATTACHMENT_BYTES } from './core/attachments';
+import { IMAGE_FORMAT_ERROR, isImageDataUrl, isImageStrokes, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TEXT_ATTACHMENT_BYTES } from './core/attachments';
 import { configPermissionMode, parseSlashCommand, permissionOptions, permissionPresets, resolveSkillMentions, slashCommands } from './core/composer';
 import { workingDiff } from './core/gitDiff';
 import { isHuggingFaceModel, withHuggingFaceModels } from './core/huggingFace';
 import { isExternalModel, parseResponsesModel, providerModels, readProviders, sameTaskProvider, type ResponsesProvider } from './core/providers';
 import { readTokenPrice } from './core/cost';
 import { availableResetCredits, resetCreditExpiry } from './core/usage';
-import { nextPresetIndex, readPresets, readTitleEffort, readTitleModel, resolveRunSettings, selectedModel, taskPresets, validatePreset } from './core/settings';
+import { nextPresetIndex, readPresets, readTitleEffort, readTitleModel, resolveRunSettings, selectedModel, taskPresets, validatePreset, validateServiceTier } from './core/settings';
 import { array, object, string, messageOf, statusLabel, isTaskRunning, type ComposerCatalog, type ExecutionMode, type JsonObject, type Model, type Task } from './core/types';
 import { TaskPanels, TaskTree, type PanelHost } from './ui/panels';
 import { SettingsPanel } from './ui/settingsPanel';
@@ -192,7 +192,7 @@ class DeckExtension implements PanelHost {
     const existing = this.composerLoads.get(cwd);
     if (existing) return existing;
     const work = Promise.all([this.client.listSkills(cwd), this.client.readConfig(cwd)]).then(([skills, config]) => {
-      const catalog = { skills, permissionMode: configPermissionMode(config) };
+      const catalog = { skills, permissionMode: configPermissionMode(config), serviceTier: string(object(config.config).service_tier) || null };
       if (this.composerLoads.get(cwd) === work) this.composerCatalogs.set(cwd, catalog);
       return catalog;
     });
@@ -301,9 +301,20 @@ class DeckExtension implements PanelHost {
         for (const url of urls) this.manager.attach(task.id, { id: randomUUID(), label: '貼り付けた画像', input: { type: 'image', url } });
         return { type: 'imagesPasted', requestId: message.requestId, attachments: task.attachments };
       }
+      case 'updateImageAttachment': {
+        try {
+          if (!isImageStrokes(message.strokes)) throw new Error('画像の描き込みを確認してください。');
+          const attachment = this.manager.updateImageAttachment(task.id, string(message.id), string(message.url), message.strokes);
+          return { type: 'imageAttachmentUpdated', requestId: message.requestId, attachment };
+        } catch (error) { return { type: 'imageAttachmentUpdated', requestId: message.requestId, error: messageOf(error) }; }
+      }
       case 'invalidJson': throw new Error('JSON形式の回答を確認してください。');
       case 'openLink': await this.openLink(task, string(message.url)); return;
       case 'settings': await this.updateSettings(task, message); return;
+      case 'exitPlanMode':
+        if (isTaskRunning(task) || task.busy) throw new Error('実行が完了してからプランモードを切り替えてください。');
+        await this.connect(); await this.manager.restore(task.id);
+        this.manager.setCollaborationMode(task.id, 'default'); return;
       case 'cyclePreset': this.cyclePreset(task); return;
       case 'menu': await this.menu(task); return;
       case 'account': await this.accountMenu(); return;
@@ -374,12 +385,14 @@ class DeckExtension implements PanelHost {
     if (task.activeTurnId || task.busy) throw new Error('実行が完了してから設定を変更してください。');
     const model = string(message.model);
     const effort = string(message.effort);
+    const serviceTier = validateServiceTier(message.serviceTier ?? task.settings.serviceTier);
     const selected = selectedModel(this.models, model || task.effectiveModel || 'latest');
     if (model && model !== 'latest' && !selected) throw new Error('モデル一覧を再取得してください。');
     if (effort && effort !== 'default' && (selected || model !== 'latest') && !selected?.efforts.some(candidate => candidate.id === effort)) throw new Error('このモデルで利用できる推論の強さを選択してください。');
     const pricing = !model || model === task.settings.model ? task.settings.pricing
       : readPresets(vscode.workspace.getConfiguration('codexDeck', vscode.Uri.file(task.cwd)).get('presets')).find(preset => preset.model === model)?.pricing;
     this.manager.updateSettings(task.id, { model: model || undefined, effort: effort === 'default' ? selected?.defaultEffort || undefined : effort || (model && model !== task.settings.model ? selected?.defaultEffort || undefined : undefined), mode,
+      ...(serviceTier && !isExternalModel(model || task.effectiveModel) ? { serviceTier } : {}),
       ...(pricing && isExternalModel(model || task.effectiveModel) ? { pricing } : {}) });
     this.presetSelections.delete(task);
   }
@@ -457,15 +470,24 @@ class DeckExtension implements PanelHost {
     const ext = path.extname(source.fsPath).toLowerCase();
     if (['.png', '.jpg', '.jpeg', '.webp', '.gif'].includes(ext)) {
       const stat = await vscode.workspace.fs.stat(source);
-      if (stat.size > MAX_ATTACHMENT_BYTES) throw new Error('画像は8MB以下にしてください。');
+      if (stat.size > MAX_IMAGE_ATTACHMENT_BYTES) throw new Error(IMAGE_FORMAT_ERROR);
       this.manager.attach(task.id, { id: randomUUID(), label: path.basename(source.fsPath), input: { type: 'localImage', path: source.fsPath } });
     } else {
       const document = await vscode.workspace.openTextDocument(source);
       const text = document.getText();
-      if (Buffer.byteLength(text) > MAX_ATTACHMENT_BYTES) throw new Error('ファイルは8MB以下にしてください。');
+      if (Buffer.byteLength(text) > MAX_TEXT_ATTACHMENT_BYTES) throw new Error('ファイルは8MiB以下にしてください。');
       this.manager.attach(task.id, { id: randomUUID(), label: path.basename(source.fsPath), input: { type: 'text', text: `ファイル: ${source.fsPath}\n\n${text}` } });
     }
     this.panels.open(task);
+  }
+  private async chooseMentionTask(): Promise<Task | undefined> {
+    const open = this.manager.openTasks;
+    if (!open.length) return this.newTask();
+    const items: (vscode.QuickPickItem & { task?: Task })[] = open.map(task => ({ label: task.title, description: statusLabel[task.status], task }));
+    if (open.every(task => task.threadId)) items.unshift({ label: '新規タスク' });
+    const selected = items.length === 1 ? items[0] : await vscode.window.showQuickPick(items, { placeHolder: '対象のタスク' });
+    if (!selected) return;
+    return selected.task ?? this.newTask();
   }
   private async mentionSelection(arg?: unknown): Promise<void> {
     const context = object(arg);
@@ -486,7 +508,8 @@ class DeckExtension implements PanelHost {
     const filename = uri.scheme === 'file' ? uri.fsPath : uri.toString();
     const { start, end } = editor.selection;
     const source = `${filename}:${start.line + 1}:${start.character + 1}-${end.line + 1}:${end.character + 1}`;
-    const task = await this.task();
+    const task = await this.chooseMentionTask();
+    if (!task) return;
     this.panels.open(task);
     this.panels.message(task.id, { type: 'insertReference', text: selectionReference(text, source) });
   }

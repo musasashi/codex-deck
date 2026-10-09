@@ -199,6 +199,49 @@ test('sending a captured attachment selection leaves later attachments for the n
   manager.dispose();
 });
 
+test('image annotations preserve identity and originals across edits and only send the composite image', async () => {
+  const { manager, gateway, task } = setup();
+  const originalUrl = 'data:image/png;base64,YQ==', markedUrl = 'data:image/png;base64,Yg==', revisedUrl = 'data:image/png;base64,Yw==';
+  const original = { id: 'image', label: '貼り付けた画像', input: { type: 'image' as const, url: originalUrl } };
+  const other = { ...original, id: 'other' };
+  const strokes = [{ width: 3, points: [{ x: 20, y: 40 }, { x: 60, y: 40 }] }];
+  manager.attach(task.id, original); manager.attach(task.id, other);
+  const marked = manager.updateImageAttachment(task.id, original.id, markedUrl, strokes);
+  assert.deepEqual(task.attachments.map(attachment => attachment.id), ['image', 'other']);
+  assert.equal(marked.annotation?.originalUrl, originalUrl);
+  assert.equal(original.input.url, originalUrl, 'captured attachments remain immutable');
+  strokes[0]!.points[0]!.x = 100;
+  assert.equal(marked.annotation?.strokes[0]?.points[0]?.x, 20);
+  manager.updateImageAttachment(task.id, original.id, revisedUrl, marked.annotation!.strokes);
+  assert.equal(task.attachments[0]?.annotation?.originalUrl, originalUrl);
+  const cleared = manager.updateImageAttachment(task.id, original.id, revisedUrl, []);
+  assert.deepEqual(cleared, original);
+  manager.updateImageAttachment(task.id, original.id, markedUrl, marked.annotation!.strokes);
+  await manager.send(task.id, 'ここを修正', [], { attachmentIds: [original.id] });
+  assert.deepEqual(gateway.sent.at(-1)?.input, [{ type: 'text', text: 'ここを修正' }, { type: 'image', url: markedUrl }]);
+  assert.deepEqual(task.attachments, [other]);
+  manager.dispose();
+});
+
+test('invalid image edits and failed sends retain the annotated draft', async () => {
+  const { manager, gateway, task } = setup();
+  const original = { id: 'image', label: '画像', input: { type: 'image' as const, url: 'data:image/png;base64,YQ==' } };
+  const strokes = [{ width: 3, points: [{ x: 1, y: 2 }] }];
+  manager.attach(task.id, original);
+  assert.throws(() => manager.updateImageAttachment(task.id, 'missing', original.input.url, strokes), /見つかりません/);
+  assert.throws(() => manager.updateImageAttachment(task.id, original.id, 'https://example.com/image.png', strokes), /32MiB/);
+  assert.throws(() => manager.updateImageAttachment(task.id, original.id, original.input.url, [{ width: 0, points: [] }]), /描き込み/);
+  task.busy = true;
+  assert.throws(() => manager.updateImageAttachment(task.id, original.id, original.input.url, strokes), /送信が完了/);
+  task.busy = false;
+  assert.deepEqual(task.attachments, [original]);
+  const marked = manager.updateImageAttachment(task.id, original.id, 'data:image/png;base64,Yg==', strokes);
+  gateway.turnStarter = async () => { throw new Error('send failed'); };
+  await assert.rejects(manager.send(task.id, ''), /send failed/);
+  assert.deepEqual(task.attachments, [marked]);
+  manager.dispose();
+});
+
 test('failed image sends keep attachments and successful sends keep images pasted during the request', async () => {
   const { manager, gateway, task } = setup();
   const first = { id: 'first', label: '貼り付けた画像', input: { type: 'image' as const, url: 'data:image/png;base64,YQ==' } };

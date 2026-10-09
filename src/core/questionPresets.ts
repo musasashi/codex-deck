@@ -10,6 +10,7 @@ export function readQuestionPresets(value: unknown): QuestionPreset[] {
     const row = object(value), settings = object(row.settings);
     return { id: string(row.id), name: string(row.name), prompt: string(row.prompt), settings: {
       model: string(settings.model), effort: string(settings.effort), mode: string(settings.mode) as ExecutionMode,
+      ...(settings.serviceTier !== undefined ? { serviceTier: settings.serviceTier as SettingsPreset['serviceTier'] } : {}),
       ...(settings.pricing !== undefined ? { pricing: settings.pricing as SettingsPreset['pricing'] } : {}),
     } };
   });

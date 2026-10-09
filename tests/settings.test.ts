@@ -92,6 +92,26 @@ test('presets retain their order and reject invalid entries and an empty list be
   assert.throws(() => validatePresets([DEFAULT_PRESET, { ...DEFAULT_PRESET, effort: 'unsupported' }], models), /プリセット2.*推論強度/);
 });
 
+test('speed presets retain their selection and cycle independently of reasoning and permissions', () => {
+  const models = [model('recommended', { isDefault: true })];
+  const presets: SettingsPreset[] = [
+    { ...DEFAULT_PRESET, serviceTier: 'default' },
+    { ...DEFAULT_PRESET, serviceTier: 'fast' },
+    { ...DEFAULT_PRESET },
+  ];
+  assert.deepEqual(readPresets(presets), presets);
+  assert.deepEqual(validatePresets(presets, models), presets);
+  for (const [index, preset] of presets.entries()) {
+    const settings = resolveRunSettings(preset, models);
+    assert.equal(settings.serviceTier, preset.serviceTier);
+    assert.equal(nextPresetIndex(settings, presets, models), (index + 1) % presets.length);
+  }
+  assert.throws(() => validatePreset({ ...DEFAULT_PRESET, serviceTier: 'unsupported' }, models), /速度/);
+  assert.deepEqual(validatePreset({ ...DEFAULT_PRESET, serviceTier: '' }, models), DEFAULT_PRESET);
+  assert.deepEqual(validatePreset({ model: 'hf:org/model', effort: 'default', serviceTier: 'fast', mode: 'read-only' }, models),
+    { model: 'hf:org/model', effort: 'default', mode: 'read-only' });
+});
+
 test('three presets cycle together, wrap around, and start at the first after unmatched manual settings', () => {
   const models = [model('recommended', { isDefault: true }), model('specialized')];
   const presets: SettingsPreset[] = [DEFAULT_PRESET, { model: 'specialized', effort: 'low', mode: 'read-only' }, { model: 'recommended', effort: 'default', mode: 'workspace-write' }];

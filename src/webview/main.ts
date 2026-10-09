@@ -1,8 +1,8 @@
 import { array, object, string, statusLabel, isTaskRunning, type Attachment, type Model, type Task, type Usage } from '../core/types';
 import { escapeHtml, renderAttachments, renderItem, renderTranscript } from './render';
-import { IMAGE_FORMAT_ERROR, IMAGE_TYPES, MAX_ATTACHMENT_BYTES } from '../core/attachments';
+import { IMAGE_FORMAT_ERROR, IMAGE_TYPES, MAX_IMAGE_ATTACHMENT_BYTES } from '../core/attachments';
 import { parseSlashCommand, permissionOptions, slashCommands } from '../core/composer';
-import { latestModel, presetEffortOptions, selectedModel } from '../core/settings';
+import { latestModel, presetEffortOptions, selectedModel, serviceTierOptions } from '../core/settings';
 import { isExternalTask, sameTaskProvider } from '../core/providers';
 import { costLabel } from '../core/cost';
 import { Composer } from './composer';
@@ -10,6 +10,8 @@ import { SelectionMenu, selectedTranscriptText } from './selection';
 import type { QuestionPresetMenuItem } from '../core/questionPresets';
 import { UsageGauges } from './usage';
 import { Requests } from './requests';
+import { Diagrams } from './diagrams';
+import { ImageAnnotationEditor } from './imageAnnotation';
 import { pendingSubmission, reconcilePendingSends, submissionContent, type PendingSend, type Submission } from './submissions';
 
 declare function acquireVsCodeApi(): { postMessage(value: unknown): void; setState(value: unknown): void; getState(): unknown };
@@ -52,10 +54,17 @@ for (const savedSend of array(saved.pendingSends).map(object)) {
     turnId: typeof savedSend.turnId === 'string' ? savedSend.turnId : undefined,
     seenUserMessageIds: array(savedSend.seenUserMessageIds).filter((value): value is string => typeof value === 'string') });
 }
-const completion = new Composer(prompt, $('completions'), $('skills'), post, saveDraft, renderPermissions, array(saved.skillPaths).filter((value): value is string => typeof value === 'string'));
+const completion = new Composer(prompt, $('completions'), $('skills'), post, saveDraft, () => { renderSpeed(); renderPermissions(); }, array(saved.skillPaths).filter((value): value is string => typeof value === 'string'));
 const usageGauges = new UsageGauges($('usage-gauges'), post);
 const requests = new Requests($('requests'), post);
 const selectionMenu = new SelectionMenu($('transcript'), () => ({ taskId: task?.id, hasThread: !!task?.threadId, presets: questionPresets }), post, () => render());
+const imageAnnotation = new ImageAnnotationEditor($<HTMLDialogElement>('image-annotation'), post, updateSendButton, attachment => {
+  if (!task) return;
+  task.attachments = task.attachments.map(current => current.id === attachment.id ? attachment : current);
+  updateAttachments();
+});
+const diagrams = new Diagrams($('transcript'), $('conversation'), document.currentScript as HTMLScriptElement,
+  () => !selectionMenu.opened && !selectedTranscriptText($('transcript')));
 let selectingTranscript = false;
 document.addEventListener('selectionchange', () => {
   const selected = !!selectedTranscriptText($('transcript'));
@@ -68,7 +77,7 @@ function saveDraft(): void {
   if (task) vscode.setState({ taskId: task.id, draft: prompt.value, skillPaths: completion.skillPaths(), pendingSends, dismissedNotice, initialQuestionId });
 }
 function updateSendButton(): void {
-  $<HTMLButtonElement>('send').disabled = !!sending || !!task?.busy || pendingPastes.size > 0;
+  $<HTMLButtonElement>('send').disabled = !!sending || !!task?.busy || pendingPastes.size > 0 || imageAnnotation.opened;
 }
 function draftAttachments(): Attachment[] {
   const submitted = [...pendingSends.flatMap(submission => submission.attachments), ...(sending?.optimistic ? sending.attachments : [])];
@@ -76,6 +85,7 @@ function draftAttachments(): Attachment[] {
 }
 function updateAttachments(): void {
   const attachments = draftAttachments();
+  imageAnnotation.sync(attachments);
   const html = renderAttachments(attachments);
   if (html !== attachmentsHtml) { $('attachments').innerHTML = html; attachmentsHtml = html; }
   $('attachments').hidden = !attachments.length;
@@ -89,7 +99,7 @@ function updateImageStatus(): void {
 }
 async function pasteImages(files: File[]): Promise<void> {
   imageError = '';
-  if (files.some(file => !IMAGE_TYPES.has(file.type) || !file.size || file.size > MAX_ATTACHMENT_BYTES)) {
+  if (files.some(file => !IMAGE_TYPES.has(file.type) || !file.size || file.size > MAX_IMAGE_ATTACHMENT_BYTES)) {
     imageError = IMAGE_FORMAT_ERROR; updateImageStatus(); return;
   }
   const requestId = ++pasteSequence;
@@ -118,7 +128,7 @@ function options(select: HTMLSelectElement, values: { id: string; label: string 
   if (select.dataset.options !== signature) {
     select.replaceChildren(...values.map(value => {
       const option = new Option(value.label, value.id);
-      option.hidden = value.id === '';
+      option.hidden = value.id === '' && select.id !== 'service-tier';
       return option;
     }));
     select.dataset.options = signature;
@@ -132,8 +142,23 @@ function renderPermissions(): void {
   if (!completion.catalog && !task.effectivePermissionMode && task.settings.mode === 'default') values[0]!.label = 'Permissions';
   options($<HTMLSelectElement>('mode'), values, task.settings.mode);
 }
+function renderSpeed(): void {
+  if (!task) return;
+  const external = isExternalTask(task);
+  const selectedTier = task.settings.serviceTier;
+  const inheritedTier = task.effectiveServiceTier !== undefined ? task.effectiveServiceTier : completion.catalog?.serviceTier;
+  const inheritedId = inheritedTier === null || inheritedTier === 'default' ? 'default'
+    : inheritedTier === 'fast' || inheritedTier === 'priority' ? 'fast' : undefined;
+  const values = serviceTierOptions.filter(option => option.id).map(option =>
+    !selectedTier && option.id === inheritedId ? { ...option, id: '' } : option);
+  const speed = $<HTMLSelectElement>('service-tier');
+  options(speed, external ? [{ id: 'default', label: 'Standard' }] : values, external ? 'default' : selectedTier ?? '');
+  speed.disabled = external || isTaskRunning(task) || !!sending || task.busy;
+}
 function detailKey(details: HTMLDetailsElement): string {
-  return JSON.stringify([details.closest<HTMLElement>('.turn')?.dataset.turn, details.dataset.item]);
+  const message = details.closest<HTMLElement>('.message');
+  return JSON.stringify([details.closest<HTMLElement>('.turn')?.dataset.turn, message?.dataset.messageId, details.dataset.item,
+    details.classList.contains('diagram-source') ? [...(message?.querySelectorAll('.diagram-source') ?? [])].indexOf(details) : undefined]);
 }
 function messageActionKey(button: HTMLElement): string {
   return JSON.stringify([button.closest<HTMLElement>('.turn')?.dataset.turn, button.closest<HTMLElement>('.message')?.dataset.messageId, button.dataset.messageAction]);
@@ -212,23 +237,25 @@ function render(): void {
   const html = renderTranscript(task) + pendingSends.map(renderPendingSend).join('');
   if (transcriptHtml !== html && !selected) {
     const detailStates = new Map([...transcript.querySelectorAll<HTMLDetailsElement>('details[data-item]')].map(details => [
-      detailKey(details), { open: details.open, status: details.closest<HTMLElement>('.turn')?.dataset.status },
+      detailKey(details), { open: details.open, status: details.closest<HTMLElement>('.turn')?.dataset.status, diagramRendered: details.dataset.diagramRendered },
     ]));
     const activeDetails = document.activeElement?.matches('summary') && transcript.contains(document.activeElement) ? document.activeElement.parentElement as HTMLDetailsElement : undefined;
     const focused = activeDetails ? detailKey(activeDetails) : undefined;
     const activeAction = document.activeElement instanceof HTMLElement && document.activeElement.matches('[data-message-action]') && transcript.contains(document.activeElement) ? messageActionKey(document.activeElement) : undefined;
     transcript.innerHTML = html;
     transcriptHtml = html;
+    diagrams.render(atBottom);
     for (const details of transcript.querySelectorAll<HTMLDetailsElement>('details[data-item]')) {
       const key = detailKey(details);
       const previous = detailStates.get(key);
       const status = details.closest<HTMLElement>('.turn')?.dataset.status;
       if (previous && (!details.classList.contains('turn-progress') || previous.status === status)) details.open = previous.open;
+      if (previous?.diagramRendered) details.dataset.diagramRendered = previous.diagramRendered;
       if (focused === key) details.querySelector('summary')?.focus({ preventScroll: true });
     }
     if (activeAction) [...transcript.querySelectorAll<HTMLButtonElement>('[data-message-action]')].find(button => messageActionKey(button) === activeAction)?.focus({ preventScroll: true });
     renderCopyFeedback();
-  }
+  } else if (!selected) diagrams.render(atBottom);
   const plan = task.plan;
   $('plan-mode').hidden = task.settings.collaborationMode !== 'plan';
   $('plan').innerHTML = plan ? `<details class="plan"><summary>作業計画</summary><p>${escapeHtml(plan.explanation)}</p><ol>${plan.steps.map(step => `<li>${step.status === 'completed' ? '✓' : step.status === 'inProgress' ? '◉' : '○'} ${escapeHtml(step.step)}</li>`).join('')}</ol></details>` : '';
@@ -236,6 +263,7 @@ function render(): void {
   requests.render(task.requests, busy, connected);
   updateAttachments();
   const running = isTaskRunning(task);
+  $<HTMLButtonElement>('exit-plan-mode').disabled = running || busy;
   $('stop').hidden = !running && !waiting && !task.busy;
   const send = $<HTMLButtonElement>('send');
   updateSendButton();
@@ -253,6 +281,7 @@ function render(): void {
     ...(task.settings.effort === 'default' ? [{ id: 'default', label: model?.defaultEffort || 'モデルの既定値' }] : []),
     ...(model?.efforts ?? []).map(effort => ({ id: effort.id, label: effort.id })),
   ], external ? task.settings.effort ?? 'default' : task.settings.effort ?? '');
+  renderSpeed();
   renderPermissions();
   for (const id of ['model', 'effort', 'mode']) $<HTMLSelectElement>(id).disabled = running || busy;
   if (external && !model?.efforts.length) $<HTMLSelectElement>('effort').disabled = true;
@@ -265,6 +294,7 @@ function render(): void {
 }
 window.addEventListener('message', event => {
   const message = object(event.data);
+  if (imageAnnotation.handleMessage(message)) return;
   usageGauges.handleMessage(message);
   if (message.type === 'state') {
     task = message.task as Task;
@@ -282,7 +312,7 @@ window.addEventListener('message', event => {
     selectionMenu.finished(string(message.requestId));
   } else if (message.type === 'initialQuestion') {
     const id = string(message.sendId), text = string(message.text);
-    if (!task || !id || id === initialQuestionId || task.threadId || sending || pendingSends.length) return;
+    if (!task || !id || id === initialQuestionId || task.threadId || sending || pendingSends.length || imageAnnotation.opened) return;
     initialQuestionId = id;
     completion.restore(text, []);
     sendSubmission({ id, text, skillPaths: [], attachments: [], optimistic: true }, true);
@@ -339,9 +369,9 @@ function sendSubmission(submission: Submission, clearDraft: boolean, retryId?: s
 }
 $('composer').addEventListener('submit', event => {
   event.preventDefault();
-  if (!task || sending || task.busy || pendingPastes.size || (!prompt.value.trim() && !draftAttachments().length)) return;
+  if (!task || sending || task.busy || pendingPastes.size || imageAnnotation.opened || (!prompt.value.trim() && !draftAttachments().length)) return;
   if (completion.beforeSubmit()) return;
-  sendSubmission({ id: crypto.randomUUID(), text: prompt.value, skillPaths: completion.skillPaths(), attachments: draftAttachments(),
+  sendSubmission({ id: crypto.randomUUID(), text: prompt.value, skillPaths: completion.skillPaths(), attachments: draftAttachments().map(({ id, label, input }) => ({ id, label, input })),
     optimistic: !parseSlashCommand(prompt.value) }, true);
 });
 prompt.addEventListener('keydown', event => {
@@ -368,20 +398,30 @@ $('dismiss-notice').addEventListener('click', () => {
   saveDraft();
   prompt.focus();
 });
+$('exit-plan-mode').addEventListener('click', () => {
+  if (!task || task.settings.collaborationMode !== 'plan' || sending || task.busy || isTaskRunning(task)) return;
+  post('exitPlanMode');
+  prompt.focus();
+});
 for (const [id, type] of [['menu', 'menu'], ['attach', 'attach'], ['stop', 'stop']]) $(id!).addEventListener('click', () => post(type!));
 $('cycle-preset').addEventListener('click', () => post('cyclePreset'));
 for (const event of ['mouseenter', 'focus']) $('cycle-preset').addEventListener(event, () => post('keybindings'));
-for (const id of ['model', 'effort', 'mode']) $(id).addEventListener('change', () => post('settings', {
+for (const id of ['model', 'effort', 'service-tier', 'mode']) $(id).addEventListener('change', () => post('settings', {
   model: $<HTMLSelectElement>('model').value, effort: id === 'model' ? '' : $<HTMLSelectElement>('effort').value, mode: $<HTMLSelectElement>('mode').value,
+  serviceTier: $<HTMLSelectElement>('service-tier').value,
 }));
 document.addEventListener('click', event => {
-  const target = (event.target as Element).closest<HTMLElement>('[data-link], [data-remove], [data-retry-send], [data-message-action], [data-code-action]');
+  const target = (event.target as Element).closest<HTMLElement>('[data-link], [data-remove], [data-annotate], [data-retry-send], [data-message-action], [data-code-action]');
   if (!target) return;
   if (target.dataset.retrySend) {
     const pendingSend = pendingSends.find(submission => submission.id === target.dataset.retrySend);
-    if (task && !sending && !task.busy && !isTaskRunning(task) && pendingSend && (pendingSend.state === 'failed' || pendingSend.state === 'unknown' && task.hydrated)) {
+    if (task && !sending && !task.busy && !imageAnnotation.opened && !isTaskRunning(task) && pendingSend && (pendingSend.state === 'failed' || pendingSend.state === 'unknown' && task.hydrated)) {
       sendSubmission({ ...pendingSend, id: crypto.randomUUID() }, false, pendingSend.id);
     }
+  }
+  else if (target.dataset.annotate && task && !sending && !task.busy) {
+    const attachment = draftAttachments().find(attachment => attachment.id === target.dataset.annotate);
+    if (attachment) void imageAnnotation.open(attachment);
   }
   else if (target.dataset.link) { event.preventDefault(); post('openLink', { url: target.dataset.link }); }
   else if (target.dataset.remove) { post('removeAttachment', { id: target.dataset.remove }); prompt.focus(); }

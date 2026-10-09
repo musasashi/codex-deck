@@ -369,7 +369,7 @@
           ],
           "minItems": 1,
           "scope": "resource",
-          "markdownDescription": "モデル・推論強度・権限のプリセット。先頭を新規タスクの初期設定に使用し、タスク内のボタンで順番に切り替えます。コマンド「Codex Deck: 設定」の専用タブで追加・編集・削除・並べ替えができます。",
+          "markdownDescription": "モデル・推論強度・速度・権限のプリセット。先頭を新規タスクの初期設定に使用し、タスク内のボタンで順番に切り替えます。コマンド「Codex Deck: 設定」の専用タブで追加・編集・削除・並べ替えができます。",
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -390,6 +390,12 @@
                 "minLength": 1,
                 "default": "high",
                 "markdownDescription": "推論強度。`default`はモデルの既定値を使用します。"
+              },
+              "serviceTier": {
+                "type": "string",
+                "enum": ["default", "fast"],
+                "enumItemLabels": ["Standard", "Fast"],
+                "markdownDescription": "Codexの速度。`default`はStandard、`fast`はFast。未指定ならCodex設定を引き継ぎます。外部APIでは使用しません。"
               },
               "pricing": {
                 "type": "object",
@@ -563,7 +569,7 @@
           "type": "array",
           "default": [],
           "scope": "resource",
-          "description": "選択した文章について新規タスクで質問するプリセット。Codex Deck設定画面で質問文・モデル・推論強度・権限を設定します。",
+          "description": "選択した文章について新規タスクで質問するプリセット。Codex Deck設定画面で質問文・モデル・推論強度・速度・権限を設定します。",
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -609,6 +615,12 @@
                     "minLength": 1,
                     "default": "high",
                     "markdownDescription": "推論強度。`default`はモデルの既定値を使用します。"
+                  },
+                  "serviceTier": {
+                    "type": "string",
+                    "enum": ["default", "fast"],
+                    "enumItemLabels": ["Standard", "Fast"],
+                    "markdownDescription": "Codexの速度。`default`はStandard、`fast`はFast。未指定ならCodex設定を引き継ぎます。外部APIでは使用しません。"
                   },
                   "pricing": {
                     "type": "object",
@@ -680,7 +692,8 @@
   },
   "dependencies": {
     "katex": "^0.18.7",
-    "marked": "^16.3.0"
+    "marked": "^16.3.0",
+    "mermaid": "^12.0.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",

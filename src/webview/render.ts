@@ -12,9 +12,13 @@ markdown.use({ renderer: {
   html({ text }) { return escapeHtml(text); },
   link({ href, tokens }) { return `<button class="inline-link" data-link="${escapeHtml(href)}">${this.parser.parseInline(tokens)}</button>`; },
   image({ href, text }) { return `<button class="inline-link" data-link="${escapeHtml(href)}">画像: ${escapeHtml(text || '開く')}</button>`; },
-  code({ text, lang }) {
+  code({ text, lang, raw }) {
     const language = (lang ?? '').match(/^\S+/)?.[0];
-    return `<div class="code-block"><pre><code${language ? ` class="language-${escapeHtml(language)}"` : ''}>${escapeHtml(text)}</code></pre><button type="button" class="code-copy" data-code-action="copy" aria-label="コードをコピー" title="コードをコピー">${copyIcon}</button></div>`;
+    const code = `<div class="code-block"><pre><code${language ? ` class="language-${escapeHtml(language)}"` : ''}>${escapeHtml(text)}</code></pre><button type="button" class="code-copy" data-code-action="copy" aria-label="コードをコピー" title="コードをコピー">${copyIcon}</button></div>`;
+    const fence = raw.match(/^ {0,3}(`{3,}|~{3,})[^\n]*\n/)?.[1];
+    const closed = fence && new RegExp(`\n {0,3}${fence[0]}{${fence.length},}[ \\t]*\\n*$`).test(raw);
+    if (language?.toLowerCase() !== 'mermaid' || !closed) return code;
+    return `<div class="diagram-block"><div class="diagram" role="img" aria-label="Mermaid図" hidden></div><p class="diagram-error" role="status" hidden>図を描画できませんでした。コードを表示しています。</p><details class="diagram-source" data-item="diagram-source" open><summary>図のコード</summary>${code}</details></div>`;
   },
 } });
 export function renderMarkdown(text: string): string { return markdown.parse(text, { async: false }); }
@@ -37,7 +41,7 @@ function renderUserText(text: string): string {
 export function renderAttachments(attachments: Attachment[]): string {
   return attachments.map(({ id, label, input }) => {
     const preview = input.type === 'image' && isImageDataUrl(input.url);
-    return `<span class="attachment${preview ? ' attachment-image' : ''}" role="listitem" title="${escapeHtml(label)}">${preview ? `<img src="${escapeHtml(input.url!)}" alt="${escapeHtml(label)}">` : escapeHtml(label)}<button type="button" data-remove="${escapeHtml(id)}" aria-label="${escapeHtml(label)}を削除" title="添付を削除">×</button></span>`;
+    return `<span class="attachment${preview ? ' attachment-image' : ''}" role="listitem" title="${escapeHtml(label)}">${preview ? `<button type="button" class="attachment-preview" data-annotate="${escapeHtml(id)}" aria-label="${escapeHtml(label)}に描き込む" title="画像に描き込む"><img src="${escapeHtml(input.url!)}" alt="${escapeHtml(label)}"></button>` : escapeHtml(label)}<button type="button" data-remove="${escapeHtml(id)}" aria-label="${escapeHtml(label)}を削除" title="添付を削除">×</button></span>`;
   }).join('');
 }
 function detail(title: string, content: string, id: string): string { return `<details data-item="${escapeHtml(id)}"><summary>${escapeHtml(title)}</summary>${content}</details>`; }

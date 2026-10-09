@@ -9,11 +9,12 @@ import { questionAnswerText } from '../../src/core/questions';
 import { taskReferenceBody } from '../../src/core/taskReferenceText';
 import { selectionReference } from '../../src/core/selectionReference';
 import { FakeGateway, thread } from '../helpers';
-import type { Skill, Task, Usage } from '../../src/core/types';
+import type { Attachment, ImageStroke, Skill, Task, Usage } from '../../src/core/types';
 import { emptyTaskCost } from '../../src/core/cost';
 import { withHuggingFaceModels } from '../../src/core/huggingFace';
 import { providerModels, validateProviders } from '../../src/core/providers';
 import { inducedVoltageAnswer } from '../fixtures/math';
+import { carrierDiagram, diagramExamples } from '../fixtures/diagrams';
 
 test('Responses tasks only offer their own provider and declared efforts, including the provider default', async ({ page }) => {
   const catalog = providerModels(validateProviders([
@@ -30,6 +31,8 @@ test('Responses tasks only offer their own provider and declared efforts, includ
   await expect(page.locator('#model option[value="responses:two:model"]')).toHaveCount(0);
   await expect(page.locator('#model option[value="catalog-model"]')).toHaveCount(0);
   await expect(page.locator('#effort option')).toHaveText(['モデルの既定値', 'low', 'high']);
+  await expect(page.getByLabel('速度', { exact: true })).toBeDisabled();
+  await expect(page.locator('#service-tier option')).toHaveText(['Standard']);
   await page.locator('#effort').selectOption('default');
   expect((await messages(page)).at(-1)).toMatchObject({ type: 'settings', model: 'responses:one:model', effort: 'default' });
   await expect(page.locator('#task-cost')).toBeVisible();
@@ -42,6 +45,7 @@ test('Responses tasks only offer their own provider and declared efforts, includ
   await expect(page.locator('#effort')).toHaveValue('default');
   await expect(page.locator('#effort')).toBeDisabled();
   await expect(page.locator('#effort option')).toHaveText(['モデルの既定値']);
+  await expect(page.getByLabel('速度', { exact: true })).toBeDisabled();
 });
 
 test('HF task cost replaces quota gauges, updates live, and stays visible after disconnecting', async ({ page }, info) => {
@@ -87,10 +91,10 @@ const skills: Skill[] = [
   { name: 'registered-one', path: '/skills/one/SKILL.md', description: '登録された最初のスキル', scope: 'system' },
   { name: 'registered-two', path: '/skills/two/SKILL.md', description: '登録された二つ目のスキル', scope: 'user' },
 ];
-async function catalog(page: Page, entries = skills, permissionMode = 'workspace-write') {
+async function catalog(page: Page, entries = skills, permissionMode = 'workspace-write', serviceTier: string | null = null) {
   const request = (await messages(page)).findLast(message => message.type === 'composerCatalog');
   expect(request).toBeTruthy();
-  await receive(page, { type: 'composerCatalog', requestId: request!.requestId, skills: entries, permissionMode });
+  await receive(page, { type: 'composerCatalog', requestId: request!.requestId, skills: entries, permissionMode, serviceTier });
 }
 async function fileRequest(page: Page, query: string) {
   await expect.poll(async () => (await messages(page)).findLast(message => message.type === 'fileSearch')?.query).toBe(query);
@@ -119,12 +123,44 @@ async function pasteClipboardImages(page: Page, files: { type?: string; size?: n
   }, { files, filesOnly, submitImmediately });
 }
 async function imageRequest(page: Page, count = 1) {
-  await expect.poll(async () => (await messages(page)).filter(message => message.type === 'pasteImages').length).toBe(count);
-  return (await messages(page)).filter(message => message.type === 'pasteImages')[count - 1]!;
+  await expect.poll(() => page.evaluate(() => (window as unknown as { sent: Record<string, unknown>[] }).sent.filter(message => message.type === 'pasteImages').length)).toBe(count);
+  return page.evaluate(count => (window as unknown as { sent: Record<string, unknown>[] }).sent.filter(message => message.type === 'pasteImages')[count - 1]!, count);
 }
 async function acceptImages(page: Page, value: Task, request: Record<string, unknown>) {
   value.attachments.push(...(request.urls as string[]).map((url, index) => ({ id: `image-${request.requestId}-${index}`, label: '貼り付けた画像', input: { type: 'image' as const, url } })));
   await receive(page, { type: 'imagesPasted', requestId: request.requestId, attachments: value.attachments });
+}
+
+async function drawAnnotation(page: Page, y = 105.5 / 150) {
+  const rect = (await page.locator('#annotation-canvas').boundingBox())!;
+  await page.mouse.move(rect.x + rect.width * .2, rect.y + rect.height * y);
+  await page.mouse.down();
+  await page.mouse.move(rect.x + rect.width * .8, rect.y + rect.height * y, { steps: 6 });
+  await page.mouse.up();
+}
+
+async function annotationRequest(page: Page, count = 1) {
+  await expect.poll(() => page.evaluate(() => (window as unknown as { sent: Record<string, unknown>[] }).sent.filter(message => message.type === 'updateImageAttachment').length)).toBe(count);
+  return page.evaluate(count => (window as unknown as { sent: Record<string, unknown>[] }).sent.filter(message => message.type === 'updateImageAttachment')[count - 1]!, count);
+}
+
+async function acceptAnnotation(page: Page, value: Task, request: Record<string, unknown>) {
+  const current = value.attachments.find(attachment => attachment.id === request.id)!;
+  const { annotation, ...original } = current;
+  const strokes = request.strokes as ImageStroke[];
+  const updated: Attachment = { ...original, input: { type: 'image', url: request.url as string },
+    ...(strokes.length ? { annotation: { originalUrl: annotation?.originalUrl ?? current.input.url!, strokes } } : {}) };
+  value.attachments = value.attachments.map(attachment => attachment.id === updated.id ? updated : attachment);
+  await receive(page, { type: 'imageAttachmentUpdated', requestId: request.requestId, attachment: updated });
+}
+
+async function imagePixels(page: Page, url: string, points: { x: number; y: number }[]) {
+  return page.evaluate(async ({ url, points }) => {
+    const image = new Image(); image.src = url; await image.decode();
+    const canvas = document.createElement('canvas'); canvas.width = image.naturalWidth; canvas.height = image.naturalHeight;
+    const context = canvas.getContext('2d')!; context.drawImage(image, 0, 0);
+    return { width: canvas.width, height: canvas.height, pixels: points.map(point => [...context.getImageData(point.x, point.y, 1, 1).data]) };
+  }, { url, points });
 }
 
 test.beforeEach(async ({ page }) => {
@@ -138,6 +174,7 @@ test.beforeEach(async ({ page }) => {
   await page.route('http://localhost/**', async route => {
     const url = route.request().url();
     if (url.endsWith('/webview.js')) await route.fulfill({ contentType: 'text/javascript', body: await readFile('dist/webview.js', 'utf8') });
+    else if (url.endsWith('/mermaid.js')) await route.fulfill({ contentType: 'text/javascript', body: await readFile('dist/mermaid.js', 'utf8') });
     else if (url.endsWith('/chat.css')) await route.fulfill({ contentType: 'text/css', body: theme + await readFile('dist/chat.css', 'utf8') });
     else if (/\/fonts\/[\w.-]+\.(woff2?|ttf)$/.test(url)) await route.fulfill({ contentType: `font/${url.split('.').at(-1)}`, body: await readFile(`dist${new URL(url).pathname}`) });
     else await route.fulfill({ contentType: 'text/html', body: html });
@@ -150,6 +187,170 @@ async function openSelectionMenu(page: Page, selector: string, point?: { x: numb
   if (point) await page.mouse.click(point.x, point.y, { button: 'right' });
   else await page.locator(selector).click({ button: 'right' });
 }
+
+test('the reference Mermaid diagram renders locally under CSP, with multiline labels and copyable source', async ({ page }, info) => {
+  const errors: string[] = [];
+  const requests: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  page.on('request', request => requests.push(request.url()));
+  await page.evaluate(() => {
+    const violations: string[] = [];
+    Object.assign(window, { diagramCspViolations: violations });
+    document.addEventListener('securitypolicyviolation', event => violations.push(event.violatedDirective));
+  });
+  expect(await page.locator('script[src$="/mermaid.js"]').count()).toBe(0);
+  const value = task();
+  value.turns = [{ id: 'diagram', status: 'completed', items: [{ id: 'reply', kind: 'agentMessage', data: {
+    text: `構成は以下になります。\n\n\`\`\`mermaid\n${carrierDiagram}\n\`\`\`\n\nCN0584は各CN0585に直接取り付けます。`,
+  } }] }];
+  await state(page, value);
+  const diagram = page.locator('.diagram');
+  await expect(diagram.locator('svg')).toBeVisible();
+  await expect(diagram).toContainText('中央の専用キャリアボード');
+  await expect(diagram).toContainText('USB-C PD給電');
+  await expect(diagram).not.toContainText('<br/>');
+  await expect(page.locator('.diagram-error')).toBeHidden();
+  await expect(page.locator('.diagram-source')).not.toHaveAttribute('open');
+  await page.screenshot({ path: info.outputPath('reference-diagram-dark.png'), fullPage: true });
+  await page.getByText('図のコード', { exact: true }).click();
+  await page.locator('.diagram-source .code-copy').focus();
+  await page.locator('.diagram-source .code-copy').click();
+  expect((await messages(page)).at(-1)).toEqual({ type: 'copyCode', requestId: 1, text: carrierDiagram });
+  const id = await diagram.locator('svg').getAttribute('id');
+  value.turns[0]!.items[0]!.data.text += '\n\n追加の説明です。';
+  await state(page, value);
+  await expect(diagram.locator('svg')).toHaveAttribute('id', id!);
+  await expect(page.locator('.diagram-source')).toHaveAttribute('open');
+  await page.setViewportSize({ width: 380, height: 850 });
+  await page.getByText('図のコード', { exact: true }).click();
+  const bounds = await diagram.evaluate(element => ({ width: element.clientWidth, scrollWidth: element.scrollWidth }));
+  expect(bounds.scrollWidth).toBeGreaterThan(bounds.width);
+  expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
+  expect(await page.locator('#conversation').evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.screenshot({ path: info.outputPath('reference-diagram-narrow.png'), fullPage: true });
+  await page.evaluate(() => {
+    document.body.classList.add('vscode-light');
+    document.body.style.setProperty('--vscode-editor-background', '#ffffff');
+    document.body.style.setProperty('--vscode-foreground', '#202020');
+  });
+  await expect(diagram.locator('svg')).not.toHaveAttribute('id', id!);
+  await expect(diagram.locator('svg')).toBeVisible();
+  await page.screenshot({ path: info.outputPath('reference-diagram-light.png'), fullPage: true });
+  expect(requests.every(url => url.startsWith('http://localhost/'))).toBe(true);
+  expect(requests.filter(url => url.endsWith('/mermaid.js'))).toHaveLength(1);
+  expect(await page.evaluate(() => (window as unknown as { diagramCspViolations: string[] }).diagramCspViolations)).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+for (const [name, example] of Object.entries(diagramExamples)) {
+  test(`Mermaid ${name} diagrams render as SVG`, async ({ page }) => {
+    const value = task();
+    value.turns = [{ id: 'diagram', status: 'completed', items: [{ id: 'reply', kind: 'agentMessage', data: { text: `\`\`\`mermaid\n${example}\n\`\`\`` } }] }];
+    await state(page, value);
+    await expect(page.locator('.diagram > svg')).toBeVisible();
+    await expect(page.locator('.diagram-error')).toBeHidden();
+    await expect(page.locator('.diagram-source code')).toHaveText(example);
+    expect(await page.locator('.diagram > svg').evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThan(20);
+  });
+}
+
+test('streaming and invalid Mermaid keep their source and recover when completed or corrected', async ({ page }) => {
+  const value = task();
+  const reply = { id: 'reply', kind: 'agentMessage', data: { text: '```mermaid\nflowchart TB\nA["開始"] --> B["完了"]' } };
+  value.status = 'running';
+  value.activeTurnId = 'diagram';
+  value.turns = [{ id: 'diagram', status: 'inProgress', items: [reply] }];
+  await state(page, value);
+  await expect(page.locator('.diagram-block')).toHaveCount(0);
+  await expect(page.locator('.code-block code')).toContainText('開始');
+  await expect(page.locator('script[src$="/mermaid.js"]')).toHaveCount(0);
+  reply.data.text += '\n```';
+  await state(page, value);
+  await expect(page.locator('.diagram > svg')).toBeVisible();
+  reply.data.text = '```mermaid\nflowchart TB\nA["unfinished\n```\n\n**後続の説明**';
+  await state(page, value);
+  await expect(page.locator('.diagram-error')).toBeVisible();
+  await expect(page.locator('.diagram-source code')).toBeVisible();
+  await expect(page.getByText('後続の説明', { exact: true })).toBeVisible();
+  await expect(page.locator('.diagram-render-target')).toHaveCount(0);
+  reply.data.text = `\`\`\`mermaid\n${carrierDiagram}\n\`\`\``;
+  value.status = 'idle';
+  value.activeTurnId = undefined;
+  value.turns[0]!.status = 'completed';
+  await state(page, value);
+  await expect(page.locator('.diagram > svg')).toBeVisible();
+  await expect(page.locator('.diagram-error')).toBeHidden();
+});
+
+test('multiple Mermaid blocks retain independent source toggles and SVG identifiers after updates', async ({ page }) => {
+  const value = task();
+  const text = '```mermaid\nflowchart LR\nA --> B\n```';
+  const sequence = `\`\`\`mermaid\n${diagramExamples.sequence}\n\`\`\``;
+  const classes = `\`\`\`mermaid\n${diagramExamples.class}\n\`\`\``;
+  value.turns = [{ id: 'diagram', status: 'completed', items: [
+    { id: 'reply', kind: 'agentMessage', data: { text: [text, text, sequence, sequence, classes, classes].join('\n\n') } },
+  ] }];
+  await state(page, value);
+  await expect(page.locator('.diagram > svg')).toHaveCount(6);
+  await page.locator('.diagram-source summary').first().click();
+  value.turns[0]!.items[0]!.data.text += '\n\n追加の説明';
+  await state(page, value);
+  await expect(page.locator('.diagram-source').first()).toHaveAttribute('open');
+  await expect(page.locator('.diagram-source').last()).not.toHaveAttribute('open');
+  const ids = await page.locator('.diagram [id]').evaluateAll(elements => elements.map(element => element.id));
+  expect(new Set(ids).size).toBe(ids.length);
+});
+
+test('cached tall diagrams preserve the reading position when later message text arrives', async ({ page }) => {
+  const value = task();
+  const diagram = `flowchart TB\n${Array.from({ length: 20 }, (_, index) => `N${index}["処理 ${index}"]`).join(' --> ')}`;
+  const reply = { id: 'reply', kind: 'agentMessage', data: { text: `\`\`\`mermaid\n${diagram}\n\`\`\`` } };
+  value.turns = [{ id: 'diagram', status: 'completed', items: [reply] }];
+  await state(page, value);
+  await expect(page.locator('.diagram > svg')).toBeVisible();
+  await page.locator('#conversation').evaluate(element => { element.scrollTop = 0; });
+  const id = await page.locator('.diagram > svg').getAttribute('id');
+  reply.data.text += '\n\n追加の説明';
+  await state(page, value);
+  await expect(page.locator('.diagram > svg')).toHaveAttribute('id', id!);
+  expect(await page.locator('#conversation').evaluate(element => element.scrollTop)).toBe(0);
+});
+
+test('a newer diagram supersedes a pending render without loading Mermaid again', async ({ page }) => {
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  await page.route('http://localhost/mermaid.js', async route => {
+    await pending;
+    await route.fulfill({ contentType: 'text/javascript', body: await readFile('dist/mermaid.js', 'utf8') });
+  });
+  const value = task();
+  const reply = { id: 'reply', kind: 'agentMessage', data: { text: '```mermaid\nflowchart TB\nA["以前の図"] --> B\n```' } };
+  value.turns = [{ id: 'diagram', status: 'completed', items: [reply] }];
+  await state(page, value);
+  await expect(page.locator('script[src$="/mermaid.js"]')).toHaveCount(1);
+  reply.data.text = '```mermaid\nflowchart TB\nA["最新の図"] --> B\n```';
+  await state(page, value);
+  release();
+  await expect(page.locator('.diagram > svg')).toBeVisible();
+  await expect(page.locator('.diagram')).toContainText('最新の図');
+  await expect(page.locator('.diagram')).not.toContainText('以前の図');
+  await expect(page.locator('script[src$="/mermaid.js"]')).toHaveCount(1);
+  await expect(page.locator('.diagram-render-target')).toHaveCount(0);
+});
+
+test('Mermaid directives cannot enable executable labels, callbacks or diagram navigation', async ({ page }) => {
+  const value = task();
+  const diagram = `%%{init: {"securityLevel":"loose", "htmlLabels":true}}%%
+flowchart TB
+    A["<img src='https://example.com/attack' onerror='window.diagramAttack=true'>"] --> B["安全なラベル"]
+    click B href "https://example.com/attack"`;
+  value.turns = [{ id: 'diagram', status: 'completed', items: [{ id: 'reply', kind: 'agentMessage', data: { text: `\`\`\`mermaid\n${diagram}\n\`\`\`` } }] }];
+  await state(page, value);
+  await expect(page.locator('.diagram > svg')).toBeVisible();
+  await expect(page.locator('.diagram')).toContainText('安全なラベル');
+  await expect(page.locator('.diagram a, .diagram img, .diagram script, .diagram foreignObject, .diagram [onclick], .diagram [onerror]')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as unknown as { diagramAttack?: boolean }).diagramAttack)).toBeUndefined();
+});
 
 test('reference equations render with bundled fonts and styles under the webview CSP', async ({ page }, info) => {
   const errors: string[] = [];
@@ -289,6 +490,33 @@ test('editor references can be added repeatedly while preserving an existing dra
   await expect(user.locator('.user-quote')).toHaveCount(2);
   await expect(user.locator('.user-quote').first()).toContainText('<script>選択文</script>');
   await expect(user.locator('script')).toHaveCount(0);
+});
+
+test('references received before a task tab is visible focus the quote continuation when the tab opens', async ({ page }) => {
+  await page.route('http://localhost/editor', route => route.fulfill({ contentType: 'text/html', body: '<input id="editor"><iframe id="chat" src="/" style="display:none;width:900px;height:750px"></iframe>' }));
+  await page.goto('http://localhost/editor');
+  const frame = page.frames().find(frame => frame.parentFrame())!;
+  await expect.poll(() => frame.evaluate(() => (window as unknown as { sent: Record<string, unknown>[] }).sent.some(message => message.type === 'ready'))).toBe(true);
+  await frame.evaluate(data => window.dispatchEvent(new MessageEvent('message', { data })), { type: 'state', task: task(), models, connected: true });
+  await page.locator('#editor').fill('エディタで選択した文章');
+  const quoted = selectionReference('エディタで選択した文章', '/project/notes.md:1:1-1:13');
+  await frame.evaluate(data => window.dispatchEvent(new MessageEvent('message', { data })), { type: 'insertReference', text: quoted });
+  const prompt = frame.locator('#prompt');
+  await expect(prompt).toHaveValue(quoted);
+  await page.locator('#chat').evaluate(element => {
+    element.style.display = 'block';
+    (element as HTMLIFrameElement).contentWindow!.focus();
+  });
+  await expect(prompt).toBeFocused();
+  expect(await prompt.evaluate(element => [(element as HTMLTextAreaElement).selectionStart, (element as HTMLTextAreaElement).selectionEnd])).toEqual([quoted.length, quoted.length]);
+  await page.keyboard.insertText('この続きを入力');
+  await expect(prompt).toHaveValue(quoted + 'この続きを入力');
+
+  // Returning to another control must not move focus back to the quote.
+  await page.locator('#editor').focus();
+  await frame.locator('#attach').focus();
+  await frame.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await expect(frame.locator('#attach')).toBeFocused();
 });
 
 test('empty chat shows only registered skills, dynamic settings, auto-resume toggle and keyboard input', async ({ page }, info) => {
@@ -844,9 +1072,9 @@ test('image-only drafts survive send failures and show the sent image in the con
 test('invalid images and read failures show errors and allow a subsequent paste', async ({ page }) => {
   const value = task(); await state(page, value);
   const status = page.locator('#image-status');
-  for (const file of [{ size: 8 * 1024 * 1024 + 1 }, { type: 'image/svg+xml' }, { size: 0 }]) {
+  for (const file of [{ size: 32 * 1024 * 1024 + 1 }, { type: 'image/svg+xml' }, { size: 0 }]) {
     expect(await pasteClipboardImages(page, [file])).toBe(true);
-    await expect(status).toHaveText('8MB以下のPNG・JPEG・WebP・GIF画像を使用してください。');
+    await expect(status).toHaveText('32MiB以下のPNG・JPEG・WebP・GIF画像を使用してください。');
   }
   await page.evaluate(() => {
     const read = FileReader.prototype.readAsDataURL;
@@ -868,6 +1096,201 @@ test('invalid images and read failures show errors and allow a subsequent paste'
   await acceptImages(page, value, await imageRequest(page, 2));
   await expect(status).toBeHidden();
   await expect(page.locator('#attachments img')).toHaveCount(1);
+});
+
+test('image annotations are composited at the original size and survive a failed send', async ({ page }) => {
+  const value = task(); await state(page, value);
+  await pasteClipboardImages(page, [{}, {}]); await acceptImages(page, value, await imageRequest(page));
+  const original = value.attachments[0]!.input.url!, other = value.attachments[1]!.input.url!;
+  const preview = page.getByRole('button', { name: '貼り付けた画像に描き込む', exact: true }).first();
+  await preview.focus(); await preview.press('Enter');
+  const editor = page.getByRole('dialog', { name: '画像に描き込む' });
+  await expect(editor).toBeVisible(); await expect(page.locator('#annotation-canvas')).toBeVisible();
+  await expect(page.getByRole('button', { name: '送信', exact: true })).toBeDisabled();
+  await state(page, value);
+  await page.evaluate(() => (document.getElementById('composer') as HTMLFormElement).requestSubmit());
+  expect((await messages(page)).some(message => message.type === 'send')).toBe(false);
+  await drawAnnotation(page);
+  await editor.getByRole('button', { name: '反映', exact: true }).click();
+  const request = await annotationRequest(page);
+  expect(request.id).toBe(value.attachments[0]!.id);
+  expect((request.strokes as ImageStroke[])[0]!.width).toBe(3);
+  expect(request.url).not.toBe(original);
+  const pixels = await imagePixels(page, request.url as string, [{ x: 120, y: 105 }, { x: 120, y: 107 }, { x: 120, y: 108 }]);
+  expect(pixels).toEqual({ width: 240, height: 150, pixels: [[255, 59, 48, 255], [255, 255, 255, 255], [0, 0, 0, 255]] });
+  await receive(page, { type: 'imageAttachmentUpdated', requestId: 'older-request', error: '古い失敗' });
+  await expect(editor).toBeVisible(); await expect(editor.getByRole('button', { name: 'キャンセル' })).toBeDisabled();
+  await acceptAnnotation(page, value, request);
+  await expect(editor).not.toBeVisible();
+  await expect(page.locator('#attachments img').first()).toHaveAttribute('src', request.url as string);
+  await expect(page.locator('#attachments img').nth(1)).toHaveAttribute('src', other);
+  expect(value.attachments[0]!.annotation?.originalUrl).toBe(original);
+  await page.getByLabel('メッセージ', { exact: true }).fill('マークした箇所を修正してください。');
+  await page.getByLabel('メッセージ', { exact: true }).press('Enter');
+  await expect(page.locator('#transcript .user-image').first()).toHaveAttribute('src', request.url as string);
+  await sendResult(page, 'failure');
+  await preview.click(); await expect(page.locator('#annotation-canvas')).toBeVisible();
+  await expect(editor.getByRole('button', { name: '取り消し', exact: true })).toBeEnabled();
+  await editor.getByRole('button', { name: 'キャンセル' }).click();
+});
+
+test('reopening annotations supports undo and full restoration, while Escape discards changes', async ({ page }) => {
+  const value = task(); await state(page, value);
+  await pasteClipboardImages(page); await acceptImages(page, value, await imageRequest(page));
+  const original = value.attachments[0]!.input.url!;
+  const preview = page.getByRole('button', { name: '貼り付けた画像に描き込む', exact: true });
+  const editor = page.getByRole('dialog', { name: '画像に描き込む' });
+  await preview.click(); await expect(page.locator('#annotation-canvas')).toBeVisible();
+  await drawAnnotation(page, .3); await drawAnnotation(page, .7);
+  await editor.getByRole('button', { name: '反映', exact: true }).click();
+  const first = await annotationRequest(page); expect(first.strokes).toHaveLength(2);
+  await acceptAnnotation(page, value, first);
+  await preview.click(); await expect(page.locator('#annotation-canvas')).toBeVisible();
+  await page.keyboard.press('Control+z');
+  await editor.getByRole('button', { name: '反映', exact: true }).click();
+  const second = await annotationRequest(page, 2); expect(second.strokes).toHaveLength(1);
+  await acceptAnnotation(page, value, second);
+  expect(value.attachments[0]!.annotation?.originalUrl).toBe(original);
+  await preview.click(); await expect(page.locator('#annotation-canvas')).toBeVisible();
+  await drawAnnotation(page, .8); await page.keyboard.press('Escape');
+  await expect(editor).not.toBeVisible();
+  await expect(page.locator('#attachments img')).toHaveAttribute('src', second.url as string);
+  await preview.click(); await expect(page.locator('#annotation-canvas')).toBeVisible();
+  await editor.getByRole('button', { name: '全消去', exact: true }).click();
+  await editor.getByRole('button', { name: '反映', exact: true }).click();
+  const cleared = await annotationRequest(page, 3);
+  expect(cleared.strokes).toEqual([]); expect(cleared.url).toBe(original);
+  await acceptAnnotation(page, value, cleared);
+  await expect(page.locator('#attachments img')).toHaveAttribute('src', original);
+  await expect(page.getByRole('button', { name: '送信', exact: true })).toBeEnabled();
+});
+
+for (const background of ['#ff3b30', '#ffffff', '#000000', 'transparent']) test(`outlined annotations remain visible on ${background} images`, async ({ page }, info) => {
+  const value = task();
+  const url = await page.evaluate(background => {
+    const canvas = document.createElement('canvas'); canvas.width = 240; canvas.height = 150;
+    const context = canvas.getContext('2d')!; context.fillStyle = background; context.fillRect(0, 0, 240, 150);
+    return canvas.toDataURL();
+  }, background);
+  value.attachments = [{ id: 'image', label: 'テスト画像', input: { type: 'image', url } }];
+  await state(page, value);
+  await page.getByRole('button', { name: 'テスト画像に描き込む', exact: true }).click();
+  await expect(page.locator('#annotation-canvas')).toBeVisible();
+  await drawAnnotation(page);
+  if (background === '#ff3b30') await page.screenshot({ path: info.outputPath('image-annotation-red-background.png') });
+  await page.getByRole('button', { name: '反映', exact: true }).click();
+  const request = await annotationRequest(page);
+  const result = await imagePixels(page, request.url as string, [{ x: 120, y: 105 }, { x: 120, y: 107 }, { x: 120, y: 108 }, { x: 0, y: 0 }]);
+  expect(result.pixels.slice(0, 3)).toEqual([[255, 59, 48, 255], [255, 255, 255, 255], [0, 0, 0, 255]]);
+  if (background === 'transparent') expect(result.pixels[3]).toEqual([0, 0, 0, 0]);
+  await acceptAnnotation(page, value, request);
+});
+
+test('a real PNG above 8MiB covering three Full HD monitors keeps its size and drawing coordinates', async ({ page }, info) => {
+  test.setTimeout(90000);
+  const value = task(); await state(page, value);
+  const size = await page.evaluate(async () => {
+    const canvas = document.createElement('canvas'); canvas.width = 5760; canvas.height = 1080;
+    const context = canvas.getContext('2d')!, image = context.createImageData(canvas.width, canvas.height);
+    let random = 123456;
+    for (let index = 0; index < image.data.length; index += 4) {
+      random ^= random << 13; random ^= random >>> 17; random ^= random << 5;
+      image.data[index] = random & 255; image.data[index + 1] = random >>> 8 & 255;
+      image.data[index + 2] = random >>> 16 & 255; image.data[index + 3] = 255;
+    }
+    context.putImageData(image, 0, 0);
+    const blob = await new Promise<Blob>(resolve => canvas.toBlob(blob => resolve(blob!), 'image/png'));
+    const data = new DataTransfer(); data.items.add(new File([blob], 'three-monitors.png', { type: 'image/png' }));
+    document.getElementById('prompt')!.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+    return blob.size;
+  });
+  expect(size).toBeGreaterThan(8 * 1024 * 1024); expect(size).toBeLessThan(32 * 1024 * 1024);
+  await acceptImages(page, value, await imageRequest(page));
+  await page.getByRole('button', { name: '貼り付けた画像に描き込む', exact: true }).click();
+  const canvas = page.locator('#annotation-canvas'); await expect(canvas).toBeVisible();
+  await expect(canvas).toHaveAttribute('width', '5760'); await expect(canvas).toHaveAttribute('height', '1080');
+  const firstWidth = (await canvas.boundingBox())!.width;
+  await drawAnnotation(page, .5);
+  await page.setViewportSize({ width: 380, height: 800 });
+  await expect.poll(async () => (await canvas.boundingBox())!.width).toBeLessThan(350);
+  const secondWidth = (await canvas.boundingBox())!.width;
+  await drawAnnotation(page, .25);
+  expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
+  await page.screenshot({ path: info.outputPath('image-annotation-three-monitors.png') });
+  await page.getByRole('button', { name: '実寸表示', exact: true }).click();
+  await expect.poll(async () => (await canvas.boundingBox())!.width).toBe(5760);
+  await page.locator('#annotation-stage').evaluate(stage => stage.scrollTo(1800, 300));
+  const stage = (await page.locator('#annotation-stage').boundingBox())!;
+  const imageRect = (await canvas.boundingBox())!;
+  const start = { x: stage.x + 100, y: stage.y + 80 };
+  await page.mouse.move(start.x, start.y); await page.mouse.down();
+  await page.mouse.move(start.x + 100, start.y, { steps: 4 }); await page.mouse.up();
+  await page.screenshot({ path: info.outputPath('image-annotation-three-monitors-actual-size.png') });
+  await page.getByRole('button', { name: '全体表示', exact: true }).click();
+  await expect.poll(async () => (await canvas.boundingBox())!.width).toBeLessThan(350);
+  expect(await page.locator('#annotation-stage').evaluate(stage => [stage.scrollLeft, stage.scrollTop])).toEqual([0, 0]);
+  await page.getByRole('button', { name: '反映', exact: true }).click();
+  const request = await annotationRequest(page);
+  const strokes = request.strokes as ImageStroke[];
+  expect(strokes).toHaveLength(3);
+  expect(strokes[0]!.width).toBeCloseTo(3 * 5760 / firstWidth);
+  expect(strokes[1]!.width).toBeCloseTo(3 * 5760 / secondWidth);
+  expect(strokes[0]!.points[0]!.x).toBeCloseTo(5760 * .2);
+  expect(strokes[1]!.points[0]!.y).toBeCloseTo(1080 * .25);
+  expect(strokes[2]!.width).toBe(3);
+  expect(strokes[2]!.points[0]!.x).toBeCloseTo(start.x - imageRect.x);
+  expect(strokes[2]!.points[0]!.y).toBeCloseTo(start.y - imageRect.y);
+  const result = await imagePixels(page, request.url as string, [{ x: 2880, y: 540 }]);
+  expect(result).toEqual({ width: 5760, height: 1080, pixels: [[255, 59, 48, 255]] });
+  await acceptAnnotation(page, value, request);
+  await page.getByLabel('メッセージ', { exact: true }).fill('マークした箇所を修正');
+  await page.getByLabel('メッセージ', { exact: true }).press('Enter');
+  expect(await page.locator('#transcript .user-image').evaluate(image => image.getAttribute('src') ===
+    (window as unknown as { sent: Record<string, unknown>[] }).sent.findLast(message => message.type === 'updateImageAttachment')!.url)).toBe(true);
+});
+
+test('encoding and update failures retain the original image and allow another apply attempt', async ({ page }) => {
+  const value = task(); await state(page, value);
+  await pasteClipboardImages(page); await acceptImages(page, value, await imageRequest(page));
+  const original = value.attachments[0]!.input.url!;
+  await page.getByRole('button', { name: '貼り付けた画像に描き込む', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: '画像に描き込む' });
+  await expect(page.locator('#annotation-canvas')).toBeVisible(); await drawAnnotation(page);
+  await page.evaluate(() => {
+    const original = HTMLCanvasElement.prototype.toBlob;
+    HTMLCanvasElement.prototype.toBlob = function (callback) { HTMLCanvasElement.prototype.toBlob = original; callback(null); };
+  });
+  await editor.getByRole('button', { name: '反映', exact: true }).click();
+  await expect(editor.getByRole('status')).toHaveText('画像を作成できませんでした。');
+  await expect(page.locator('#attachments img')).toHaveAttribute('src', original);
+  await editor.getByRole('button', { name: '反映', exact: true }).click();
+  const first = await annotationRequest(page);
+  await receive(page, { type: 'imageAttachmentUpdated', requestId: first.requestId, error: '画像を更新できませんでした。' });
+  await expect(editor.getByRole('status')).toHaveText('画像を更新できませんでした。');
+  await expect(page.locator('#attachments img')).toHaveAttribute('src', original);
+  await expect(page.getByRole('button', { name: '送信', exact: true })).toBeDisabled();
+  await editor.getByRole('button', { name: '反映', exact: true }).click();
+  const retry = await annotationRequest(page, 2);
+  expect(retry.strokes).toEqual(first.strokes);
+  await acceptAnnotation(page, value, retry);
+  await expect(editor).not.toBeVisible();
+  await expect(page.locator('#attachments img')).toHaveAttribute('src', retry.url as string);
+});
+
+test('unreadable or removed image attachments close safely and later images can still be edited', async ({ page }) => {
+  const value = task(); value.attachments = [{ id: 'broken', label: '壊れた画像', input: { type: 'image', url: 'data:image/png;base64,YQ==' } }];
+  await state(page, value);
+  await page.getByRole('button', { name: '壊れた画像に描き込む', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: '画像に描き込む' });
+  await expect(editor.getByRole('status')).toHaveText('画像を読み込めませんでした。');
+  await expect(editor.getByRole('button', { name: '反映', exact: true })).toBeDisabled();
+  await page.keyboard.press('Escape'); await expect(editor).not.toBeVisible();
+  value.attachments = []; await state(page, value);
+  await pasteClipboardImages(page); await acceptImages(page, value, await imageRequest(page));
+  await page.getByRole('button', { name: '貼り付けた画像に描き込む', exact: true }).click();
+  await expect(page.locator('#annotation-canvas')).toBeVisible();
+  value.attachments = []; await state(page, value);
+  await expect(editor).not.toBeVisible(); await expect(page.getByRole('button', { name: '送信', exact: true })).toBeEnabled();
 });
 
 test('successive pastes keep sending disabled until every image batch is acknowledged', async ({ page }) => {
@@ -1091,7 +1514,7 @@ test('plan commands complete and submit with attachments while the current mode 
   value.settings.collaborationMode = 'plan';
   await state(page, value); await sendResult(page, 'sent');
   await expect(prompt).toHaveValue('');
-  await expect(page.locator('#plan-mode')).toHaveText('プランモード · /plan で通常モードに戻る');
+  await expect(page.locator('#plan-mode > span')).toHaveText('プランモード · /plan で通常モードに戻る');
   await pasteClipboardImages(page); await acceptImages(page, value, await imageRequest(page));
   await prompt.fill('/plan $registered-one この画像の画面を設計してください');
   await prompt.press('Enter');
@@ -1102,9 +1525,27 @@ test('plan commands complete and submit with attachments while the current mode 
   await page.setViewportSize({ width: 380, height: 850 });
   expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
   await page.screenshot({ path: info.outputPath('plan-mode.png'), fullPage: true });
+  const exit = page.getByRole('button', { name: '通常モードに戻る', exact: true });
+  for (const status of ['running', 'approval', 'input'] as const) {
+    value.status = status;
+    await state(page, value);
+    await expect(exit).toBeDisabled();
+  }
+  value.status = 'idle'; value.busy = true;
+  await state(page, value);
+  await expect(exit).toBeDisabled();
+  value.busy = false;
+  await state(page, value);
+  await expect(exit).toBeEnabled();
+  await exit.click();
+  expect((await messages(page)).at(-1)).toEqual({ type: 'exitPlanMode' });
+  expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(2);
+  await expect(prompt).toBeFocused();
   value.settings.collaborationMode = 'default';
   await state(page, value);
   await expect(page.locator('#plan-mode')).toBeHidden();
+  await expect(prompt).toHaveValue('/plan $registered-one この画像の画面を設計してください');
+  await expect(page.locator('#attachments .attachment-image')).toHaveCount(value.attachments.length);
 });
 
 test('file lookup inserts a quoted path on Enter without submitting, and ignores stale responses after edits or Escape', async ({ page }, info) => {
@@ -1173,6 +1614,82 @@ test('CLI permission names reflect inherited settings and rendering does not cha
   await mode.selectOption('auto-review');
   expect((await messages(page)).at(-1)).toMatchObject({ type: 'settings', mode: 'auto-review' });
 });
+
+test('speed sits between reasoning and permissions, restores Fast and locks during a turn', async ({ page }, info) => {
+  const value = task();
+  value.settings = { model: 'catalog-model', effort: 'high', serviceTier: 'fast', mode: 'workspace-write' };
+  await state(page, value);
+  const speed = page.getByLabel('速度', { exact: true });
+  await expect(speed).toHaveValue('fast');
+  await expect(speed.locator('option')).toHaveText(['Standard', 'Fast']);
+  expect(await page.locator('.composer-settings select').evaluateAll(selects => selects.map(select => select.id)))
+    .toEqual(['model', 'effort', 'service-tier', 'mode']);
+  expect((await messages(page)).filter(message => message.type === 'settings')).toHaveLength(0);
+  await speed.selectOption('default');
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'settings', model: 'catalog-model', effort: 'high', serviceTier: 'default', mode: 'workspace-write' });
+  value.settings.serviceTier = 'default'; await state(page, value);
+  await speed.selectOption('fast');
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'settings', effort: 'high', serviceTier: 'fast' });
+  value.settings.serviceTier = 'fast'; value.busy = true; await state(page, value);
+  await expect(speed).toBeDisabled();
+  value.busy = false; value.activeTurnId = 'running'; value.status = 'running'; await state(page, value);
+  await expect(speed).toBeDisabled();
+  value.activeTurnId = undefined; value.status = 'idle'; await state(page, value);
+  await expect(speed).toBeEnabled();
+  await expect(speed).toHaveValue('fast');
+  await page.setViewportSize({ width: 380, height: 850 });
+  expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
+  await page.screenshot({ path: info.outputPath('fast-mode.png'), fullPage: true });
+});
+
+test('inherited Standard and Fast share single choices without saving a selection on render', async ({ page }) => {
+  const value = task();
+  const speed = page.getByLabel('速度', { exact: true });
+  for (const tier of [null, 'default', 'fast', 'priority']) {
+    value.effectiveServiceTier = tier; await state(page, value);
+    await expect(speed).toHaveValue('');
+    await expect(speed.locator('option')).toHaveText(['Standard', 'Fast']);
+    await expect(speed.locator('option:checked')).toHaveText(tier === 'fast' || tier === 'priority' ? 'Fast' : 'Standard');
+  }
+  expect((await messages(page)).filter(message => message.type === 'settings')).toHaveLength(0);
+  await speed.selectOption('default');
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'settings', serviceTier: 'default' });
+  value.settings.serviceTier = 'default'; await state(page, value);
+  await expect(speed.locator('option')).toHaveText(['Standard', 'Fast']);
+  await expect(speed.locator('option:checked')).toHaveText('Standard');
+  delete value.settings.serviceTier;
+  value.effectiveServiceTier = null; await state(page, value);
+  await speed.selectOption('fast');
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'settings', serviceTier: 'fast' });
+  value.settings.serviceTier = 'fast'; await state(page, value);
+  await expect(speed.locator('option')).toHaveText(['Standard', 'Fast']);
+  await expect(speed.locator('option:checked')).toHaveText('Fast');
+});
+
+for (const tier of [null, 'fast']) {
+  test(`new tasks display ${tier === 'fast' ? 'Fast' : 'Standard'} from Codex settings before the first message`, async ({ page }) => {
+    const value = task();
+    delete value.threadId;
+    await state(page, value);
+    const speed = page.getByLabel('速度', { exact: true });
+    await expect(speed.locator('option')).toHaveText(['Standard', 'Fast']);
+    await catalog(page, skills, 'workspace-write', tier);
+    await expect(speed.locator('option')).toHaveText(['Standard', 'Fast']);
+    await expect(speed.locator('option:checked')).toHaveText(tier === 'fast' ? 'Fast' : 'Standard');
+    await expect(speed).toHaveValue('');
+    expect((await messages(page)).filter(message => message.type === 'settings')).toHaveLength(0);
+    await page.getByLabel('推論の強さ', { exact: true }).selectOption('high');
+    expect((await messages(page)).at(-1)).toMatchObject({ type: 'settings', serviceTier: '' });
+    value.threadId = 'thread-1';
+    value.effectiveServiceTier = tier === 'fast' ? null : 'priority';
+    await state(page, value);
+    await expect(speed.locator('option:checked')).toHaveText(tier === 'fast' ? 'Standard' : 'Fast');
+    value.settings.serviceTier = tier === 'fast' ? 'fast' : 'default';
+    await state(page, value);
+    await expect(speed.locator('option:checked')).toHaveText(tier === 'fast' ? 'Fast' : 'Standard');
+    await expect(speed.locator('option')).toHaveText(['Standard', 'Fast']);
+  });
+}
 
 test('unset CLI defaults are not mislabeled Custom and resolve when the server returns thread permissions', async ({ page }) => {
   const value = task(); await state(page, value); await catalog(page, skills, 'default');

@@ -23,10 +23,13 @@ export interface Input {
   url?: string;
   name?: string;
 }
-export interface Attachment { id: string; label: string; input: Input }
+export interface ImagePoint { x: number; y: number }
+export interface ImageStroke { width: number; points: ImagePoint[] }
+export interface ImageAnnotation { originalUrl: string; strokes: ImageStroke[] }
+export interface Attachment { id: string; label: string; input: Input; annotation?: ImageAnnotation }
 export interface Skill { name: string; description: string; path: string; scope: string }
 export interface FileReference { path: string; kind: 'file' | 'directory' }
-export interface ComposerCatalog { skills: Skill[]; permissionMode?: ExecutionMode }
+export interface ComposerCatalog { skills: Skill[]; permissionMode?: ExecutionMode; serviceTier?: string | null }
 export interface Model {
   id: string;
   label: string;
@@ -40,7 +43,8 @@ export interface Model {
 }
 export type ExecutionMode = 'default' | 'read-only' | 'workspace-write' | 'auto-review' | 'danger-full-access';
 export type CollaborationMode = 'default' | 'plan';
-export interface RunSettings { model?: string; effort?: string; mode: ExecutionMode; collaborationMode?: CollaborationMode; pricing?: TokenPrice }
+export type ServiceTier = 'default' | 'fast';
+export interface RunSettings { model?: string; effort?: string; serviceTier?: ServiceTier; mode: ExecutionMode; collaborationMode?: CollaborationMode; pricing?: TokenPrice }
 export interface SettingsPreset extends RunSettings { model: string; effort: string }
 export interface TurnError { message: string; kind?: string }
 export interface Item { id: string; kind: string; data: JsonObject }
@@ -71,6 +75,7 @@ export interface Thread extends ThreadReference {
   model?: string;
   modelProvider?: string;
   effort?: string;
+  serviceTier?: string | null;
   instructionSources?: string[];
   permissionMode?: ExecutionMode;
 }
@@ -187,6 +192,7 @@ export interface Task extends TaskRecord {
   instructionSources: string[];
   effectiveModel?: string;
   effectiveEffort?: string;
+  effectiveServiceTier?: string | null;
   effectivePermissionMode?: ExecutionMode;
 }
 

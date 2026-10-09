@@ -7,7 +7,7 @@ import { withHuggingFaceModels } from '../core/huggingFace';
 import { chatHtml } from './html';
 import { readQuestionPresets } from '../core/questionPresets';
 
-function taskIcon(uri: vscode.Uri, status: TaskStatus): { light: vscode.Uri; dark: vscode.Uri } {
+function taskIcon(uri: vscode.Uri, status: TaskStatus | 'unread'): { light: vscode.Uri; dark: vscode.Uri } {
   return {
     light: vscode.Uri.joinPath(uri, 'media', 'task-status', 'light', `${status}.svg`),
     dark: vscode.Uri.joinPath(uri, 'media', 'task-status', 'dark', `${status}.svg`),
@@ -174,7 +174,7 @@ export class TaskPanels implements vscode.WebviewPanelSerializer, vscode.Disposa
     if (!panel || !this.manager.tasks.has(id)) return;
     const task = this.manager.get(id);
     panel.title = task.title;
-    panel.iconPath = taskIcon(this.uri, task.status);
+    panel.iconPath = taskIcon(this.uri, task.unreadTurnId ? 'unread' : task.status);
     const config = vscode.workspace.getConfiguration('codexDeck', vscode.Uri.file(task.cwd));
     const models = withHuggingFaceModels(this.host.models, [...readPresets(config.get('presets')).map(preset => preset.model), task.settings.model, task.effectiveModel]);
     void panel.webview.postMessage({ type: 'state', task, models, connected: this.manager.gateway.connected,
