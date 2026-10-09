@@ -29,6 +29,7 @@ export async function testHistory(): Promise<void> {
   const page = await app.firstWindow();
   try {
     await page.locator('.monaco-workbench').waitFor();
+    await expect(page.getByText('開いているタスク', { exact: true })).toBeVisible();
     const picker = page.locator('.quick-input-widget');
     const input = picker.locator('input');
     const row = (title: string) => picker.getByRole('option', { name: new RegExp(`^${title}, `) });
