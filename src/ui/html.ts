@@ -33,5 +33,11 @@ export function chatHtml(options: { cspSource: string; script: string; css: stri
           </div>
         </div>
       </form></footer>
+      <dialog id="image-annotation" aria-labelledby="annotation-title">
+        <div class="annotation-toolbar"><h2 id="annotation-title">画像に描き込む</h2><span class="annotation-pen"><span aria-hidden="true"></span>赤ペン</span><div class="annotation-tools"><button type="button" id="annotation-scale" class="secondary">実寸表示</button><button type="button" id="annotation-undo" class="secondary" title="取り消し (Ctrl+Z)">取り消し</button><button type="button" id="annotation-clear" class="secondary">全消去</button></div></div>
+        <div id="annotation-stage"><canvas id="annotation-canvas" role="img" aria-label="描き込み用の画像" tabindex="0" hidden></canvas></div>
+        <div id="annotation-status" role="status" hidden></div>
+        <div class="annotation-actions"><button type="button" id="annotation-cancel" class="secondary">キャンセル</button><button type="button" id="annotation-apply">反映</button></div>
+      </dialog>
       <script nonce="${nonce}" src="${script}"></script></body></html>`;
 }

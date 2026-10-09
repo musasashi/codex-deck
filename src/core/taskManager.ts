@@ -7,7 +7,8 @@ import { addTaskCost, emptyTaskCost, type TokenPrice } from './cost';
 import { messageQuestions, questionAnswerText } from './questions';
 import { referencedTaskInput } from './taskReferences';
 import { FORK_TITLE, provisionalTitle, titleInput } from './taskTitle';
-import { array, object, string, messageOf, isTaskRunning, Signal, type Attachment, type CollaborationMode, type Gateway, type Input, type PendingRequest, type RequestAnswer, type RunSettings, type ServerEvent, type Task, type TaskRecord, type Thread, type TitleSource, type Turn, type Usage } from './types';
+import { IMAGE_FORMAT_ERROR, isImageDataUrl, isImageStrokes } from './attachments';
+import { array, object, string, messageOf, isTaskRunning, Signal, type Attachment, type CollaborationMode, type Gateway, type ImageStroke, type Input, type PendingRequest, type RequestAnswer, type RunSettings, type ServerEvent, type Task, type TaskRecord, type Thread, type TitleSource, type Turn, type Usage } from './types';
 
 export const CONTINUE_MESSAGE = '使用量上限で中断した作業を直前の状態から続行してください。';
 const POLL_MS = 10 * 60 * 1000;
@@ -295,6 +296,21 @@ export class TaskManager {
   }
   attach(id: string, attachment: Attachment): void { const task = this.get(id); task.attachments.push(attachment); this.touch(task); }
   removeAttachment(id: string, attachmentId: string): void { const task = this.get(id); task.attachments = task.attachments.filter(a => a.id !== attachmentId); this.touch(task); }
+  updateImageAttachment(id: string, attachmentId: string, url: string, strokes: ImageStroke[]): Attachment {
+    const task = this.get(id);
+    if (task.busy) throw new Error('送信が完了してから画像を編集してください。');
+    const attachment = task.attachments.find(attachment => attachment.id === attachmentId);
+    if (!attachment || attachment.input.type !== 'image' || !isImageDataUrl(attachment.input.url)) throw new Error('添付画像が見つかりません。追加し直してください。');
+    if (!isImageDataUrl(url)) throw new Error(IMAGE_FORMAT_ERROR);
+    if (!isImageStrokes(strokes)) throw new Error('画像の描き込みを確認してください。');
+    const originalUrl = attachment.annotation?.originalUrl ?? attachment.input.url;
+    const { annotation: _annotation, ...original } = attachment;
+    const updated: Attachment = { ...original, input: { type: 'image', url: strokes.length ? url : originalUrl },
+      ...(strokes.length ? { annotation: { originalUrl, strokes: structuredClone(strokes) } } : {}) };
+    task.attachments = task.attachments.map(attachment => attachment.id === attachmentId ? updated : attachment);
+    this.touch(task);
+    return updated;
+  }
   private async withOperation<T>(task: Task, action: () => Promise<T>): Promise<T> {
     const previous = this.operations.get(task.id);
     const work = (async () => {

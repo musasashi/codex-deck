@@ -9,7 +9,7 @@ import { questionAnswerText } from '../../src/core/questions';
 import { taskReferenceBody } from '../../src/core/taskReferenceText';
 import { selectionReference } from '../../src/core/selectionReference';
 import { FakeGateway, thread } from '../helpers';
-import type { Skill, Task, Usage } from '../../src/core/types';
+import type { Attachment, ImageStroke, Skill, Task, Usage } from '../../src/core/types';
 import { emptyTaskCost } from '../../src/core/cost';
 import { withHuggingFaceModels } from '../../src/core/huggingFace';
 import { providerModels, validateProviders } from '../../src/core/providers';
@@ -123,12 +123,44 @@ async function pasteClipboardImages(page: Page, files: { type?: string; size?: n
   }, { files, filesOnly, submitImmediately });
 }
 async function imageRequest(page: Page, count = 1) {
-  await expect.poll(async () => (await messages(page)).filter(message => message.type === 'pasteImages').length).toBe(count);
-  return (await messages(page)).filter(message => message.type === 'pasteImages')[count - 1]!;
+  await expect.poll(() => page.evaluate(() => (window as unknown as { sent: Record<string, unknown>[] }).sent.filter(message => message.type === 'pasteImages').length)).toBe(count);
+  return page.evaluate(count => (window as unknown as { sent: Record<string, unknown>[] }).sent.filter(message => message.type === 'pasteImages')[count - 1]!, count);
 }
 async function acceptImages(page: Page, value: Task, request: Record<string, unknown>) {
   value.attachments.push(...(request.urls as string[]).map((url, index) => ({ id: `image-${request.requestId}-${index}`, label: '貼り付けた画像', input: { type: 'image' as const, url } })));
   await receive(page, { type: 'imagesPasted', requestId: request.requestId, attachments: value.attachments });
+}
+
+async function drawAnnotation(page: Page, y = 105.5 / 150) {
+  const rect = (await page.locator('#annotation-canvas').boundingBox())!;
+  await page.mouse.move(rect.x + rect.width * .2, rect.y + rect.height * y);
+  await page.mouse.down();
+  await page.mouse.move(rect.x + rect.width * .8, rect.y + rect.height * y, { steps: 6 });
+  await page.mouse.up();
+}
+
+async function annotationRequest(page: Page, count = 1) {
+  await expect.poll(() => page.evaluate(() => (window as unknown as { sent: Record<string, unknown>[] }).sent.filter(message => message.type === 'updateImageAttachment').length)).toBe(count);
+  return page.evaluate(count => (window as unknown as { sent: Record<string, unknown>[] }).sent.filter(message => message.type === 'updateImageAttachment')[count - 1]!, count);
+}
+
+async function acceptAnnotation(page: Page, value: Task, request: Record<string, unknown>) {
+  const current = value.attachments.find(attachment => attachment.id === request.id)!;
+  const { annotation, ...original } = current;
+  const strokes = request.strokes as ImageStroke[];
+  const updated: Attachment = { ...original, input: { type: 'image', url: request.url as string },
+    ...(strokes.length ? { annotation: { originalUrl: annotation?.originalUrl ?? current.input.url!, strokes } } : {}) };
+  value.attachments = value.attachments.map(attachment => attachment.id === updated.id ? updated : attachment);
+  await receive(page, { type: 'imageAttachmentUpdated', requestId: request.requestId, attachment: updated });
+}
+
+async function imagePixels(page: Page, url: string, points: { x: number; y: number }[]) {
+  return page.evaluate(async ({ url, points }) => {
+    const image = new Image(); image.src = url; await image.decode();
+    const canvas = document.createElement('canvas'); canvas.width = image.naturalWidth; canvas.height = image.naturalHeight;
+    const context = canvas.getContext('2d')!; context.drawImage(image, 0, 0);
+    return { width: canvas.width, height: canvas.height, pixels: points.map(point => [...context.getImageData(point.x, point.y, 1, 1).data]) };
+  }, { url, points });
 }
 
 test.beforeEach(async ({ page }) => {
@@ -1040,9 +1072,9 @@ test('image-only drafts survive send failures and show the sent image in the con
 test('invalid images and read failures show errors and allow a subsequent paste', async ({ page }) => {
   const value = task(); await state(page, value);
   const status = page.locator('#image-status');
-  for (const file of [{ size: 8 * 1024 * 1024 + 1 }, { type: 'image/svg+xml' }, { size: 0 }]) {
+  for (const file of [{ size: 32 * 1024 * 1024 + 1 }, { type: 'image/svg+xml' }, { size: 0 }]) {
     expect(await pasteClipboardImages(page, [file])).toBe(true);
-    await expect(status).toHaveText('8MB以下のPNG・JPEG・WebP・GIF画像を使用してください。');
+    await expect(status).toHaveText('32MiB以下のPNG・JPEG・WebP・GIF画像を使用してください。');
   }
   await page.evaluate(() => {
     const read = FileReader.prototype.readAsDataURL;
@@ -1064,6 +1096,201 @@ test('invalid images and read failures show errors and allow a subsequent paste'
   await acceptImages(page, value, await imageRequest(page, 2));
   await expect(status).toBeHidden();
   await expect(page.locator('#attachments img')).toHaveCount(1);
+});
+
+test('image annotations are composited at the original size and survive a failed send', async ({ page }) => {
+  const value = task(); await state(page, value);
+  await pasteClipboardImages(page, [{}, {}]); await acceptImages(page, value, await imageRequest(page));
+  const original = value.attachments[0]!.input.url!, other = value.attachments[1]!.input.url!;
+  const preview = page.getByRole('button', { name: '貼り付けた画像に描き込む', exact: true }).first();
+  await preview.focus(); await preview.press('Enter');
+  const editor = page.getByRole('dialog', { name: '画像に描き込む' });
+  await expect(editor).toBeVisible(); await expect(page.locator('#annotation-canvas')).toBeVisible();
+  await expect(page.getByRole('button', { name: '送信', exact: true })).toBeDisabled();
+  await state(page, value);
+  await page.evaluate(() => (document.getElementById('composer') as HTMLFormElement).requestSubmit());
+  expect((await messages(page)).some(message => message.type === 'send')).toBe(false);
+  await drawAnnotation(page);
+  await editor.getByRole('button', { name: '反映', exact: true }).click();
+  const request = await annotationRequest(page);
+  expect(request.id).toBe(value.attachments[0]!.id);
+  expect((request.strokes as ImageStroke[])[0]!.width).toBe(3);
+  expect(request.url).not.toBe(original);
+  const pixels = await imagePixels(page, request.url as string, [{ x: 120, y: 105 }, { x: 120, y: 107 }, { x: 120, y: 108 }]);
+  expect(pixels).toEqual({ width: 240, height: 150, pixels: [[255, 59, 48, 255], [255, 255, 255, 255], [0, 0, 0, 255]] });
+  await receive(page, { type: 'imageAttachmentUpdated', requestId: 'older-request', error: '古い失敗' });
+  await expect(editor).toBeVisible(); await expect(editor.getByRole('button', { name: 'キャンセル' })).toBeDisabled();
+  await acceptAnnotation(page, value, request);
+  await expect(editor).not.toBeVisible();
+  await expect(page.locator('#attachments img').first()).toHaveAttribute('src', request.url as string);
+  await expect(page.locator('#attachments img').nth(1)).toHaveAttribute('src', other);
+  expect(value.attachments[0]!.annotation?.originalUrl).toBe(original);
+  await page.getByLabel('メッセージ', { exact: true }).fill('マークした箇所を修正してください。');
+  await page.getByLabel('メッセージ', { exact: true }).press('Enter');
+  await expect(page.locator('#transcript .user-image').first()).toHaveAttribute('src', request.url as string);
+  await sendResult(page, 'failure');
+  await preview.click(); await expect(page.locator('#annotation-canvas')).toBeVisible();
+  await expect(editor.getByRole('button', { name: '取り消し', exact: true })).toBeEnabled();
+  await editor.getByRole('button', { name: 'キャンセル' }).click();
+});
+
+test('reopening annotations supports undo and full restoration, while Escape discards changes', async ({ page }) => {
+  const value = task(); await state(page, value);
+  await pasteClipboardImages(page); await acceptImages(page, value, await imageRequest(page));
+  const original = value.attachments[0]!.input.url!;
+  const preview = page.getByRole('button', { name: '貼り付けた画像に描き込む', exact: true });
+  const editor = page.getByRole('dialog', { name: '画像に描き込む' });
+  await preview.click(); await expect(page.locator('#annotation-canvas')).toBeVisible();
+  await drawAnnotation(page, .3); await drawAnnotation(page, .7);
+  await editor.getByRole('button', { name: '反映', exact: true }).click();
+  const first = await annotationRequest(page); expect(first.strokes).toHaveLength(2);
+  await acceptAnnotation(page, value, first);
+  await preview.click(); await expect(page.locator('#annotation-canvas')).toBeVisible();
+  await page.keyboard.press('Control+z');
+  await editor.getByRole('button', { name: '反映', exact: true }).click();
+  const second = await annotationRequest(page, 2); expect(second.strokes).toHaveLength(1);
+  await acceptAnnotation(page, value, second);
+  expect(value.attachments[0]!.annotation?.originalUrl).toBe(original);
+  await preview.click(); await expect(page.locator('#annotation-canvas')).toBeVisible();
+  await drawAnnotation(page, .8); await page.keyboard.press('Escape');
+  await expect(editor).not.toBeVisible();
+  await expect(page.locator('#attachments img')).toHaveAttribute('src', second.url as string);
+  await preview.click(); await expect(page.locator('#annotation-canvas')).toBeVisible();
+  await editor.getByRole('button', { name: '全消去', exact: true }).click();
+  await editor.getByRole('button', { name: '反映', exact: true }).click();
+  const cleared = await annotationRequest(page, 3);
+  expect(cleared.strokes).toEqual([]); expect(cleared.url).toBe(original);
+  await acceptAnnotation(page, value, cleared);
+  await expect(page.locator('#attachments img')).toHaveAttribute('src', original);
+  await expect(page.getByRole('button', { name: '送信', exact: true })).toBeEnabled();
+});
+
+for (const background of ['#ff3b30', '#ffffff', '#000000', 'transparent']) test(`outlined annotations remain visible on ${background} images`, async ({ page }, info) => {
+  const value = task();
+  const url = await page.evaluate(background => {
+    const canvas = document.createElement('canvas'); canvas.width = 240; canvas.height = 150;
+    const context = canvas.getContext('2d')!; context.fillStyle = background; context.fillRect(0, 0, 240, 150);
+    return canvas.toDataURL();
+  }, background);
+  value.attachments = [{ id: 'image', label: 'テスト画像', input: { type: 'image', url } }];
+  await state(page, value);
+  await page.getByRole('button', { name: 'テスト画像に描き込む', exact: true }).click();
+  await expect(page.locator('#annotation-canvas')).toBeVisible();
+  await drawAnnotation(page);
+  if (background === '#ff3b30') await page.screenshot({ path: info.outputPath('image-annotation-red-background.png') });
+  await page.getByRole('button', { name: '反映', exact: true }).click();
+  const request = await annotationRequest(page);
+  const result = await imagePixels(page, request.url as string, [{ x: 120, y: 105 }, { x: 120, y: 107 }, { x: 120, y: 108 }, { x: 0, y: 0 }]);
+  expect(result.pixels.slice(0, 3)).toEqual([[255, 59, 48, 255], [255, 255, 255, 255], [0, 0, 0, 255]]);
+  if (background === 'transparent') expect(result.pixels[3]).toEqual([0, 0, 0, 0]);
+  await acceptAnnotation(page, value, request);
+});
+
+test('a real PNG above 8MiB covering three Full HD monitors keeps its size and drawing coordinates', async ({ page }, info) => {
+  test.setTimeout(90000);
+  const value = task(); await state(page, value);
+  const size = await page.evaluate(async () => {
+    const canvas = document.createElement('canvas'); canvas.width = 5760; canvas.height = 1080;
+    const context = canvas.getContext('2d')!, image = context.createImageData(canvas.width, canvas.height);
+    let random = 123456;
+    for (let index = 0; index < image.data.length; index += 4) {
+      random ^= random << 13; random ^= random >>> 17; random ^= random << 5;
+      image.data[index] = random & 255; image.data[index + 1] = random >>> 8 & 255;
+      image.data[index + 2] = random >>> 16 & 255; image.data[index + 3] = 255;
+    }
+    context.putImageData(image, 0, 0);
+    const blob = await new Promise<Blob>(resolve => canvas.toBlob(blob => resolve(blob!), 'image/png'));
+    const data = new DataTransfer(); data.items.add(new File([blob], 'three-monitors.png', { type: 'image/png' }));
+    document.getElementById('prompt')!.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+    return blob.size;
+  });
+  expect(size).toBeGreaterThan(8 * 1024 * 1024); expect(size).toBeLessThan(32 * 1024 * 1024);
+  await acceptImages(page, value, await imageRequest(page));
+  await page.getByRole('button', { name: '貼り付けた画像に描き込む', exact: true }).click();
+  const canvas = page.locator('#annotation-canvas'); await expect(canvas).toBeVisible();
+  await expect(canvas).toHaveAttribute('width', '5760'); await expect(canvas).toHaveAttribute('height', '1080');
+  const firstWidth = (await canvas.boundingBox())!.width;
+  await drawAnnotation(page, .5);
+  await page.setViewportSize({ width: 380, height: 800 });
+  await expect.poll(async () => (await canvas.boundingBox())!.width).toBeLessThan(350);
+  const secondWidth = (await canvas.boundingBox())!.width;
+  await drawAnnotation(page, .25);
+  expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
+  await page.screenshot({ path: info.outputPath('image-annotation-three-monitors.png') });
+  await page.getByRole('button', { name: '実寸表示', exact: true }).click();
+  await expect.poll(async () => (await canvas.boundingBox())!.width).toBe(5760);
+  await page.locator('#annotation-stage').evaluate(stage => stage.scrollTo(1800, 300));
+  const stage = (await page.locator('#annotation-stage').boundingBox())!;
+  const imageRect = (await canvas.boundingBox())!;
+  const start = { x: stage.x + 100, y: stage.y + 80 };
+  await page.mouse.move(start.x, start.y); await page.mouse.down();
+  await page.mouse.move(start.x + 100, start.y, { steps: 4 }); await page.mouse.up();
+  await page.screenshot({ path: info.outputPath('image-annotation-three-monitors-actual-size.png') });
+  await page.getByRole('button', { name: '全体表示', exact: true }).click();
+  await expect.poll(async () => (await canvas.boundingBox())!.width).toBeLessThan(350);
+  expect(await page.locator('#annotation-stage').evaluate(stage => [stage.scrollLeft, stage.scrollTop])).toEqual([0, 0]);
+  await page.getByRole('button', { name: '反映', exact: true }).click();
+  const request = await annotationRequest(page);
+  const strokes = request.strokes as ImageStroke[];
+  expect(strokes).toHaveLength(3);
+  expect(strokes[0]!.width).toBeCloseTo(3 * 5760 / firstWidth);
+  expect(strokes[1]!.width).toBeCloseTo(3 * 5760 / secondWidth);
+  expect(strokes[0]!.points[0]!.x).toBeCloseTo(5760 * .2);
+  expect(strokes[1]!.points[0]!.y).toBeCloseTo(1080 * .25);
+  expect(strokes[2]!.width).toBe(3);
+  expect(strokes[2]!.points[0]!.x).toBeCloseTo(start.x - imageRect.x);
+  expect(strokes[2]!.points[0]!.y).toBeCloseTo(start.y - imageRect.y);
+  const result = await imagePixels(page, request.url as string, [{ x: 2880, y: 540 }]);
+  expect(result).toEqual({ width: 5760, height: 1080, pixels: [[255, 59, 48, 255]] });
+  await acceptAnnotation(page, value, request);
+  await page.getByLabel('メッセージ', { exact: true }).fill('マークした箇所を修正');
+  await page.getByLabel('メッセージ', { exact: true }).press('Enter');
+  expect(await page.locator('#transcript .user-image').evaluate(image => image.getAttribute('src') ===
+    (window as unknown as { sent: Record<string, unknown>[] }).sent.findLast(message => message.type === 'updateImageAttachment')!.url)).toBe(true);
+});
+
+test('encoding and update failures retain the original image and allow another apply attempt', async ({ page }) => {
+  const value = task(); await state(page, value);
+  await pasteClipboardImages(page); await acceptImages(page, value, await imageRequest(page));
+  const original = value.attachments[0]!.input.url!;
+  await page.getByRole('button', { name: '貼り付けた画像に描き込む', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: '画像に描き込む' });
+  await expect(page.locator('#annotation-canvas')).toBeVisible(); await drawAnnotation(page);
+  await page.evaluate(() => {
+    const original = HTMLCanvasElement.prototype.toBlob;
+    HTMLCanvasElement.prototype.toBlob = function (callback) { HTMLCanvasElement.prototype.toBlob = original; callback(null); };
+  });
+  await editor.getByRole('button', { name: '反映', exact: true }).click();
+  await expect(editor.getByRole('status')).toHaveText('画像を作成できませんでした。');
+  await expect(page.locator('#attachments img')).toHaveAttribute('src', original);
+  await editor.getByRole('button', { name: '反映', exact: true }).click();
+  const first = await annotationRequest(page);
+  await receive(page, { type: 'imageAttachmentUpdated', requestId: first.requestId, error: '画像を更新できませんでした。' });
+  await expect(editor.getByRole('status')).toHaveText('画像を更新できませんでした。');
+  await expect(page.locator('#attachments img')).toHaveAttribute('src', original);
+  await expect(page.getByRole('button', { name: '送信', exact: true })).toBeDisabled();
+  await editor.getByRole('button', { name: '反映', exact: true }).click();
+  const retry = await annotationRequest(page, 2);
+  expect(retry.strokes).toEqual(first.strokes);
+  await acceptAnnotation(page, value, retry);
+  await expect(editor).not.toBeVisible();
+  await expect(page.locator('#attachments img')).toHaveAttribute('src', retry.url as string);
+});
+
+test('unreadable or removed image attachments close safely and later images can still be edited', async ({ page }) => {
+  const value = task(); value.attachments = [{ id: 'broken', label: '壊れた画像', input: { type: 'image', url: 'data:image/png;base64,YQ==' } }];
+  await state(page, value);
+  await page.getByRole('button', { name: '壊れた画像に描き込む', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: '画像に描き込む' });
+  await expect(editor.getByRole('status')).toHaveText('画像を読み込めませんでした。');
+  await expect(editor.getByRole('button', { name: '反映', exact: true })).toBeDisabled();
+  await page.keyboard.press('Escape'); await expect(editor).not.toBeVisible();
+  value.attachments = []; await state(page, value);
+  await pasteClipboardImages(page); await acceptImages(page, value, await imageRequest(page));
+  await page.getByRole('button', { name: '貼り付けた画像に描き込む', exact: true }).click();
+  await expect(page.locator('#annotation-canvas')).toBeVisible();
+  value.attachments = []; await state(page, value);
+  await expect(editor).not.toBeVisible(); await expect(page.getByRole('button', { name: '送信', exact: true })).toBeEnabled();
 });
 
 test('successive pastes keep sending disabled until every image batch is acknowledged', async ({ page }) => {

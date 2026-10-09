@@ -3,6 +3,7 @@ import { StringDecoder } from 'node:string_decoder';
 import type { Readable, Writable } from 'node:stream';
 import { object, string, Signal, messageOf } from '../core/types';
 import { HF_CONFIG_ARGS, HF_PROVIDER } from '../core/huggingFace';
+import { MAX_MESSAGE_BYTES, serializeMessage } from './limits';
 
 export class RpcError extends Error {
   constructor(public readonly code: number, message: string, public readonly data?: unknown) { super(message); }
@@ -18,7 +19,8 @@ export class JsonRpcPeer {
   handleRequest?: (request: ServerRequest) => Promise<unknown>;
   private pending = new Map<RequestId, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   private sequence = 0;
-  private buffer = '';
+  private buffer: string[] = [];
+  private bufferBytes = 0;
   private decoder = new StringDecoder('utf8');
   private ended = false;
   constructor(private readonly input: Readable, private readonly output: Writable, private readonly timeoutMs = 60_000) {
@@ -45,23 +47,31 @@ export class JsonRpcPeer {
   }
   private send(value: unknown): void {
     if (this.ended) throw new Error('App Serverに接続していません。');
-    this.output.write(`${JSON.stringify(value)}\n`, error => { if (error) this.close(error); });
+    this.output.write(`${serializeMessage(value)}\n`, error => { if (error) this.close(error); });
   }
   private onData = (chunk: Buffer | string): void => {
-    this.buffer += typeof chunk === 'string' ? chunk : this.decoder.write(chunk);
+    const text = typeof chunk === 'string' ? chunk : this.decoder.write(chunk);
+    let start = 0;
     let newline: number;
-    while ((newline = this.buffer.indexOf('\n')) !== -1) {
-      const line = this.buffer.slice(0, newline);
-      this.buffer = this.buffer.slice(newline + 1);
+    while ((newline = text.indexOf('\n', start)) !== -1) {
+      if (!this.append(text.slice(start, newline))) return;
+      const line = this.buffer.join('');
+      this.buffer = []; this.bufferBytes = 0;
+      start = newline + 1;
       if (!line.trim()) continue;
-      if (line.length > 32 * 1024 * 1024) { this.close(new Error('App Serverメッセージが大きすぎます。')); return; }
       let value: unknown;
       try { value = JSON.parse(line); }
       catch { this.close(new Error('App Serverから不正なJSONを受信しました。')); return; }
       this.dispatch(value);
     }
-    if (this.buffer.length > 32 * 1024 * 1024) this.close(new Error('App Serverメッセージが大きすぎます。'));
+    this.append(text.slice(start));
   };
+  private append(text: string): boolean {
+    this.bufferBytes += Buffer.byteLength(text);
+    if (this.bufferBytes > MAX_MESSAGE_BYTES) { this.close(new Error('App Serverメッセージが128MiBを超えています。')); return false; }
+    if (text) this.buffer.push(text);
+    return true;
+  }
   private dispatch(value: unknown): void {
     const msg = object(value);
     const validId = typeof msg.id === 'number' || typeof msg.id === 'string';
@@ -92,6 +102,7 @@ export class JsonRpcPeer {
   close(error = new Error('App Serverとの接続を終了しました。')): void {
     if (this.ended) return;
     this.ended = true;
+    this.buffer = []; this.bufferBytes = 0;
     this.input.off('data', this.onData);
     this.input.off('end', this.onEnd);
     for (const id of this.pending.keys()) this.finish(id, undefined, error);

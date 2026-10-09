@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import { AppServerClient, decodeThread } from '../src/appServer/client';
 import { JsonRpcPeer, RpcError } from '../src/appServer/rpc';
+import { MAX_MESSAGE_BYTES } from '../src/appServer/limits';
 import { TaskManager } from '../src/core/taskManager';
 import { DEFAULT_PRESET } from '../src/core/settings';
 import { object } from '../src/core/types';
@@ -19,6 +20,28 @@ function harness() {
   const tick = () => new Promise<void>(resolve => setImmediate(resolve));
   return { peer, input, output, messages, send, tick };
 }
+
+test('large image messages survive fragmented UTF-8 framing above the former 32MiB limit', async () => {
+  const h = harness();
+  const image = `data:image/png;base64,${'A'.repeat(33 * 1024 * 1024)}`;
+  const request = h.peer.request('turn/start', { input: [{ type: 'image', url: image }] });
+  assert.equal((object(h.messages[0]!.params).input as { url: string }[])[0]?.url, image);
+  const response = Buffer.from(JSON.stringify({ id: h.messages[0]!.id, result: { image, text: '日本語' } }) + '\n');
+  for (let offset = 0; offset < response.length; offset += 65537) h.input.write(response.subarray(offset, offset + 65537));
+  assert.deepEqual(await request, { image, text: '日本語' });
+  h.send({ method: 'next', params: {} });
+  h.peer.close();
+});
+
+test('oversized outgoing messages reject before writing without disconnecting RPC', async () => {
+  const h = harness();
+  await assert.rejects(h.peer.request('turn/start', { text: 'a'.repeat(MAX_MESSAGE_BYTES) }), /128MiB/);
+  assert.equal(h.messages.length, 0);
+  const next = h.peer.request('next');
+  h.send({ id: h.messages[0]!.id, result: 'still connected' });
+  assert.equal(await next, 'still connected');
+  h.peer.close();
+});
 
 test('Fast and Standard overrides follow new, resumed, forked and subsequent turns without changing effort', async () => {
   const h = harness(), client = new AppServerClient();

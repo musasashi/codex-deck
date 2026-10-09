@@ -144,6 +144,8 @@ test('attached and sent images render inline thumbnails without loading external
     { id: 'file', label: '<file>', input: { type: 'text', text: 'file content' } }]);
   assert.ok(html.includes(`src="${url}"`));
   assert.ok(html.includes('alt="&lt;screenshot&gt;"'));
+  assert.ok(html.includes('data-annotate="image"'));
+  assert.ok(html.includes('aria-label="&lt;screenshot&gt;に描き込む"'));
   assert.ok(html.includes('type="button" data-remove="image"'));
   assert.ok(html.includes('&lt;file&gt;'));
   assert.ok(!html.includes('<screenshot>'));

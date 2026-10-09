@@ -41,7 +41,7 @@ function renderUserText(text: string): string {
 export function renderAttachments(attachments: Attachment[]): string {
   return attachments.map(({ id, label, input }) => {
     const preview = input.type === 'image' && isImageDataUrl(input.url);
-    return `<span class="attachment${preview ? ' attachment-image' : ''}" role="listitem" title="${escapeHtml(label)}">${preview ? `<img src="${escapeHtml(input.url!)}" alt="${escapeHtml(label)}">` : escapeHtml(label)}<button type="button" data-remove="${escapeHtml(id)}" aria-label="${escapeHtml(label)}を削除" title="添付を削除">×</button></span>`;
+    return `<span class="attachment${preview ? ' attachment-image' : ''}" role="listitem" title="${escapeHtml(label)}">${preview ? `<button type="button" class="attachment-preview" data-annotate="${escapeHtml(id)}" aria-label="${escapeHtml(label)}に描き込む" title="画像に描き込む"><img src="${escapeHtml(input.url!)}" alt="${escapeHtml(label)}"></button>` : escapeHtml(label)}<button type="button" data-remove="${escapeHtml(id)}" aria-label="${escapeHtml(label)}を削除" title="添付を削除">×</button></span>`;
   }).join('');
 }
 function detail(title: string, content: string, id: string): string { return `<details data-item="${escapeHtml(id)}"><summary>${escapeHtml(title)}</summary>${content}</details>`; }

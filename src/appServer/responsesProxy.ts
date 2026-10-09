@@ -3,6 +3,7 @@ import { once } from 'node:events';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { messageOf, object, type JsonObject } from '../core/types';
 import { responsesRequest } from './responsesWire';
+import { MAX_MESSAGE_BYTES, serializeMessage } from './limits';
 
 /** A loopback-only adapter for Codex's Responses extensions. The upstream is fixed. */
 export class ResponsesProxy {
@@ -29,8 +30,8 @@ export class ResponsesProxy {
     const address = server.address();
     if (!address || typeof address === 'string') throw new Error(`${this.label}の接続を開始できませんでした。`);
     const url = `http://127.0.0.1:${address.port}/v1`;
-    this.request = (body, signal) => fetch(`${url}/responses`, { method: 'POST', signal, redirect: 'error',
-      headers: { authorization: authorization.toString(), 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    this.request = async (body, signal) => fetch(`${url}/responses`, { method: 'POST', signal, redirect: 'error',
+      headers: { authorization: authorization.toString(), 'content-type': 'application/json' }, body: serializeMessage(body) });
     return url;
   }
 
@@ -43,7 +44,7 @@ export class ResponsesProxy {
     let size = 0;
     for await (const chunk of request) {
       size += chunk.length;
-      if (size > 32 * 1024 * 1024) { response.writeHead(413); response.end(); return; }
+      if (size > MAX_MESSAGE_BYTES) { response.writeHead(413); response.end(); return; }
       chunks.push(chunk);
     }
     let converted: ReturnType<typeof responsesRequest>;

@@ -14,7 +14,7 @@ import { messageMarkdown, taskMarkdown } from './core/taskCopy';
 import { linkedThreadId, taskDeepLink } from './core/taskReferences';
 import { selectionReference } from './core/selectionReference';
 import { questionPresetMessage, readQuestionPresets, validateQuestionPreset } from './core/questionPresets';
-import { IMAGE_FORMAT_ERROR, isImageDataUrl, MAX_ATTACHMENT_BYTES } from './core/attachments';
+import { IMAGE_FORMAT_ERROR, isImageDataUrl, isImageStrokes, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TEXT_ATTACHMENT_BYTES } from './core/attachments';
 import { configPermissionMode, parseSlashCommand, permissionOptions, permissionPresets, resolveSkillMentions, slashCommands } from './core/composer';
 import { workingDiff } from './core/gitDiff';
 import { isHuggingFaceModel, withHuggingFaceModels } from './core/huggingFace';
@@ -301,6 +301,13 @@ class DeckExtension implements PanelHost {
         for (const url of urls) this.manager.attach(task.id, { id: randomUUID(), label: '貼り付けた画像', input: { type: 'image', url } });
         return { type: 'imagesPasted', requestId: message.requestId, attachments: task.attachments };
       }
+      case 'updateImageAttachment': {
+        try {
+          if (!isImageStrokes(message.strokes)) throw new Error('画像の描き込みを確認してください。');
+          const attachment = this.manager.updateImageAttachment(task.id, string(message.id), string(message.url), message.strokes);
+          return { type: 'imageAttachmentUpdated', requestId: message.requestId, attachment };
+        } catch (error) { return { type: 'imageAttachmentUpdated', requestId: message.requestId, error: messageOf(error) }; }
+      }
       case 'invalidJson': throw new Error('JSON形式の回答を確認してください。');
       case 'openLink': await this.openLink(task, string(message.url)); return;
       case 'settings': await this.updateSettings(task, message); return;
@@ -463,12 +470,12 @@ class DeckExtension implements PanelHost {
     const ext = path.extname(source.fsPath).toLowerCase();
     if (['.png', '.jpg', '.jpeg', '.webp', '.gif'].includes(ext)) {
       const stat = await vscode.workspace.fs.stat(source);
-      if (stat.size > MAX_ATTACHMENT_BYTES) throw new Error('画像は8MB以下にしてください。');
+      if (stat.size > MAX_IMAGE_ATTACHMENT_BYTES) throw new Error(IMAGE_FORMAT_ERROR);
       this.manager.attach(task.id, { id: randomUUID(), label: path.basename(source.fsPath), input: { type: 'localImage', path: source.fsPath } });
     } else {
       const document = await vscode.workspace.openTextDocument(source);
       const text = document.getText();
-      if (Buffer.byteLength(text) > MAX_ATTACHMENT_BYTES) throw new Error('ファイルは8MB以下にしてください。');
+      if (Buffer.byteLength(text) > MAX_TEXT_ATTACHMENT_BYTES) throw new Error('ファイルは8MiB以下にしてください。');
       this.manager.attach(task.id, { id: randomUUID(), label: path.basename(source.fsPath), input: { type: 'text', text: `ファイル: ${source.fsPath}\n\n${text}` } });
     }
     this.panels.open(task);

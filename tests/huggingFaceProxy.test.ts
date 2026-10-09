@@ -84,3 +84,19 @@ test('HF streams without a terminal event fail instead of reporting a completed 
   const h = await harness(t, (_req, res) => { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end('data: {"type":"response.created"}\n\n'); });
   await assert.rejects(async () => (await h.post({ stream: true })).text());
 });
+
+test('large image requests above 32MiB reach the provider intact', async t => {
+  const imageUrl = `data:image/png;base64,${'A'.repeat(33 * 1024 * 1024)}`;
+  let receivedUrl = '';
+  const h = await harness(t, async (req, res) => {
+    const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(chunk);
+    const request = JSON.parse(Buffer.concat(chunks).toString());
+    receivedUrl = request.input[0].content[0].image_url;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ id: 'response', output: [], status: 'completed' }));
+  });
+  const response = await h.post({ input: [{ type: 'message', role: 'user', content: [{ type: 'input_image', image_url: imageUrl }] }] });
+  assert.equal(response.status, 200);
+  await response.json();
+  assert.equal(receivedUrl, imageUrl);
+});

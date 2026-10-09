@@ -596,6 +596,30 @@ test('deleted chats close visible and hidden tabs and cannot restore saved task 
   } finally { await extension.shutdown(); }
 });
 
+test('image updates acknowledge the request and leave the original attachment intact on rejection', async () => {
+  const extension = connectedExtension();
+  const { host, manager } = extension;
+  try {
+    const task = manager.create('/project');
+    await host.command(task, { type: 'pasteImages', requestId: 1, urls: ['data:image/png;base64,YQ=='] });
+    const original = task.attachments[0]!;
+    const strokes = [{ width: 3, points: [{ x: 10, y: 20 }] }];
+    const updated = await host.command(task, { type: 'updateImageAttachment', requestId: 'edit', id: original.id,
+      url: 'data:image/png;base64,Yg==', strokes });
+    assert.deepEqual(updated, { type: 'imageAttachmentUpdated', requestId: 'edit', attachment: task.attachments[0] });
+    assert.equal(task.attachments[0]?.annotation?.originalUrl, original.input.url);
+    const retained = task.attachments[0];
+    for (const changes of [{ url: 'invalid' }, { strokes: [{ width: 0, points: [] }] }, { id: 'missing' }]) {
+      const result = await host.command(task, { type: 'updateImageAttachment', requestId: 'invalid', id: original.id,
+        url: 'data:image/png;base64,Yg==', strokes, ...changes });
+      assert.equal(result?.type, 'imageAttachmentUpdated');
+      assert.equal(result?.requestId, 'invalid');
+      assert.equal(typeof result?.error, 'string');
+      assert.equal(task.attachments[0], retained);
+    }
+  } finally { await extension.shutdown(); }
+});
+
 test('/plan toggles without a turn and inline instructions use the normal send path with images and skills', async () => {
   const extension = connectedExtension();
   const { host, manager, gateway } = extension;

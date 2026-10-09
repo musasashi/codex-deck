@@ -23,7 +23,10 @@ export interface Input {
   url?: string;
   name?: string;
 }
-export interface Attachment { id: string; label: string; input: Input }
+export interface ImagePoint { x: number; y: number }
+export interface ImageStroke { width: number; points: ImagePoint[] }
+export interface ImageAnnotation { originalUrl: string; strokes: ImageStroke[] }
+export interface Attachment { id: string; label: string; input: Input; annotation?: ImageAnnotation }
 export interface Skill { name: string; description: string; path: string; scope: string }
 export interface FileReference { path: string; kind: 'file' | 'directory' }
 export interface ComposerCatalog { skills: Skill[]; permissionMode?: ExecutionMode; serviceTier?: string | null }

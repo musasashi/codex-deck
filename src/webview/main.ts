@@ -1,6 +1,6 @@
 import { array, object, string, statusLabel, isTaskRunning, type Attachment, type Model, type Task, type Usage } from '../core/types';
 import { escapeHtml, renderAttachments, renderItem, renderTranscript } from './render';
-import { IMAGE_FORMAT_ERROR, IMAGE_TYPES, MAX_ATTACHMENT_BYTES } from '../core/attachments';
+import { IMAGE_FORMAT_ERROR, IMAGE_TYPES, MAX_IMAGE_ATTACHMENT_BYTES } from '../core/attachments';
 import { parseSlashCommand, permissionOptions, slashCommands } from '../core/composer';
 import { latestModel, presetEffortOptions, selectedModel, serviceTierOptions } from '../core/settings';
 import { isExternalTask, sameTaskProvider } from '../core/providers';
@@ -11,6 +11,7 @@ import type { QuestionPresetMenuItem } from '../core/questionPresets';
 import { UsageGauges } from './usage';
 import { Requests } from './requests';
 import { Diagrams } from './diagrams';
+import { ImageAnnotationEditor } from './imageAnnotation';
 import { pendingSubmission, reconcilePendingSends, submissionContent, type PendingSend, type Submission } from './submissions';
 
 declare function acquireVsCodeApi(): { postMessage(value: unknown): void; setState(value: unknown): void; getState(): unknown };
@@ -57,6 +58,11 @@ const completion = new Composer(prompt, $('completions'), $('skills'), post, sav
 const usageGauges = new UsageGauges($('usage-gauges'), post);
 const requests = new Requests($('requests'), post);
 const selectionMenu = new SelectionMenu($('transcript'), () => ({ taskId: task?.id, hasThread: !!task?.threadId, presets: questionPresets }), post, () => render());
+const imageAnnotation = new ImageAnnotationEditor($<HTMLDialogElement>('image-annotation'), post, updateSendButton, attachment => {
+  if (!task) return;
+  task.attachments = task.attachments.map(current => current.id === attachment.id ? attachment : current);
+  updateAttachments();
+});
 const diagrams = new Diagrams($('transcript'), $('conversation'), document.currentScript as HTMLScriptElement,
   () => !selectionMenu.opened && !selectedTranscriptText($('transcript')));
 let selectingTranscript = false;
@@ -71,7 +77,7 @@ function saveDraft(): void {
   if (task) vscode.setState({ taskId: task.id, draft: prompt.value, skillPaths: completion.skillPaths(), pendingSends, dismissedNotice, initialQuestionId });
 }
 function updateSendButton(): void {
-  $<HTMLButtonElement>('send').disabled = !!sending || !!task?.busy || pendingPastes.size > 0;
+  $<HTMLButtonElement>('send').disabled = !!sending || !!task?.busy || pendingPastes.size > 0 || imageAnnotation.opened;
 }
 function draftAttachments(): Attachment[] {
   const submitted = [...pendingSends.flatMap(submission => submission.attachments), ...(sending?.optimistic ? sending.attachments : [])];
@@ -79,6 +85,7 @@ function draftAttachments(): Attachment[] {
 }
 function updateAttachments(): void {
   const attachments = draftAttachments();
+  imageAnnotation.sync(attachments);
   const html = renderAttachments(attachments);
   if (html !== attachmentsHtml) { $('attachments').innerHTML = html; attachmentsHtml = html; }
   $('attachments').hidden = !attachments.length;
@@ -92,7 +99,7 @@ function updateImageStatus(): void {
 }
 async function pasteImages(files: File[]): Promise<void> {
   imageError = '';
-  if (files.some(file => !IMAGE_TYPES.has(file.type) || !file.size || file.size > MAX_ATTACHMENT_BYTES)) {
+  if (files.some(file => !IMAGE_TYPES.has(file.type) || !file.size || file.size > MAX_IMAGE_ATTACHMENT_BYTES)) {
     imageError = IMAGE_FORMAT_ERROR; updateImageStatus(); return;
   }
   const requestId = ++pasteSequence;
@@ -287,6 +294,7 @@ function render(): void {
 }
 window.addEventListener('message', event => {
   const message = object(event.data);
+  if (imageAnnotation.handleMessage(message)) return;
   usageGauges.handleMessage(message);
   if (message.type === 'state') {
     task = message.task as Task;
@@ -304,7 +312,7 @@ window.addEventListener('message', event => {
     selectionMenu.finished(string(message.requestId));
   } else if (message.type === 'initialQuestion') {
     const id = string(message.sendId), text = string(message.text);
-    if (!task || !id || id === initialQuestionId || task.threadId || sending || pendingSends.length) return;
+    if (!task || !id || id === initialQuestionId || task.threadId || sending || pendingSends.length || imageAnnotation.opened) return;
     initialQuestionId = id;
     completion.restore(text, []);
     sendSubmission({ id, text, skillPaths: [], attachments: [], optimistic: true }, true);
@@ -361,9 +369,9 @@ function sendSubmission(submission: Submission, clearDraft: boolean, retryId?: s
 }
 $('composer').addEventListener('submit', event => {
   event.preventDefault();
-  if (!task || sending || task.busy || pendingPastes.size || (!prompt.value.trim() && !draftAttachments().length)) return;
+  if (!task || sending || task.busy || pendingPastes.size || imageAnnotation.opened || (!prompt.value.trim() && !draftAttachments().length)) return;
   if (completion.beforeSubmit()) return;
-  sendSubmission({ id: crypto.randomUUID(), text: prompt.value, skillPaths: completion.skillPaths(), attachments: draftAttachments(),
+  sendSubmission({ id: crypto.randomUUID(), text: prompt.value, skillPaths: completion.skillPaths(), attachments: draftAttachments().map(({ id, label, input }) => ({ id, label, input })),
     optimistic: !parseSlashCommand(prompt.value) }, true);
 });
 prompt.addEventListener('keydown', event => {
@@ -403,13 +411,17 @@ for (const id of ['model', 'effort', 'service-tier', 'mode']) $(id).addEventList
   serviceTier: $<HTMLSelectElement>('service-tier').value,
 }));
 document.addEventListener('click', event => {
-  const target = (event.target as Element).closest<HTMLElement>('[data-link], [data-remove], [data-retry-send], [data-message-action], [data-code-action]');
+  const target = (event.target as Element).closest<HTMLElement>('[data-link], [data-remove], [data-annotate], [data-retry-send], [data-message-action], [data-code-action]');
   if (!target) return;
   if (target.dataset.retrySend) {
     const pendingSend = pendingSends.find(submission => submission.id === target.dataset.retrySend);
-    if (task && !sending && !task.busy && !isTaskRunning(task) && pendingSend && (pendingSend.state === 'failed' || pendingSend.state === 'unknown' && task.hydrated)) {
+    if (task && !sending && !task.busy && !imageAnnotation.opened && !isTaskRunning(task) && pendingSend && (pendingSend.state === 'failed' || pendingSend.state === 'unknown' && task.hydrated)) {
       sendSubmission({ ...pendingSend, id: crypto.randomUUID() }, false, pendingSend.id);
     }
+  }
+  else if (target.dataset.annotate && task && !sending && !task.busy) {
+    const attachment = draftAttachments().find(attachment => attachment.id === target.dataset.annotate);
+    if (attachment) void imageAnnotation.open(attachment);
   }
   else if (target.dataset.link) { event.preventDefault(); post('openLink', { url: target.dataset.link }); }
   else if (target.dataset.remove) { post('removeAttachment', { id: target.dataset.remove }); prompt.focus(); }
