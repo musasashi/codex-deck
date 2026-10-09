@@ -378,6 +378,25 @@ function connectedExtension(records: TaskRecord[] = [], options: Parameters<type
   return { ...extension, host, manager, gateway, resetRequests };
 }
 
+test('new tasks receive their workspace speed setting before starting a conversation', async () => {
+  for (const tier of [undefined, null, 'default', 'fast']) {
+    const extension = connectedExtension();
+    const reads: (string | undefined)[] = [];
+    const client = extension.manager.gateway as AppServerClient;
+    client.readConfig = async cwd => { reads.push(cwd); return { config: { service_tier: tier } }; };
+    try {
+      const task = await extension.commands.get('codexDeck.newTask')!() as Task;
+      const catalog = await extension.host.command(task, { type: 'composerCatalog', requestId: 7 });
+      assert.equal(catalog?.serviceTier, tier ?? null);
+      assert.deepEqual(reads, [task.cwd]);
+      assert.equal(task.threadId, undefined);
+      assert.equal(task.settings.serviceTier, undefined);
+      assert.equal(extension.gateway.threads.size, 0);
+      assert.equal(extension.gateway.sent.length, 0);
+    } finally { await extension.shutdown(); }
+  }
+});
+
 function resetCreditExtension() {
   const extension = connectedExtension([record('reset', true, true)]);
   extension.gateway.limits.accountId = 'test-account';

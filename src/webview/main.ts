@@ -53,7 +53,7 @@ for (const savedSend of array(saved.pendingSends).map(object)) {
     turnId: typeof savedSend.turnId === 'string' ? savedSend.turnId : undefined,
     seenUserMessageIds: array(savedSend.seenUserMessageIds).filter((value): value is string => typeof value === 'string') });
 }
-const completion = new Composer(prompt, $('completions'), $('skills'), post, saveDraft, renderPermissions, array(saved.skillPaths).filter((value): value is string => typeof value === 'string'));
+const completion = new Composer(prompt, $('completions'), $('skills'), post, saveDraft, () => { renderSpeed(); renderPermissions(); }, array(saved.skillPaths).filter((value): value is string => typeof value === 'string'));
 const usageGauges = new UsageGauges($('usage-gauges'), post);
 const requests = new Requests($('requests'), post);
 const selectionMenu = new SelectionMenu($('transcript'), () => ({ taskId: task?.id, hasThread: !!task?.threadId, presets: questionPresets }), post, () => render());
@@ -134,6 +134,19 @@ function renderPermissions(): void {
   const values = permissionOptions(task.settings.mode, task.effectivePermissionMode ?? completion.catalog?.permissionMode);
   if (!completion.catalog && !task.effectivePermissionMode && task.settings.mode === 'default') values[0]!.label = 'Permissions';
   options($<HTMLSelectElement>('mode'), values, task.settings.mode);
+}
+function renderSpeed(): void {
+  if (!task) return;
+  const external = isExternalTask(task);
+  const selectedTier = task.settings.serviceTier;
+  const inheritedTier = task.effectiveServiceTier !== undefined ? task.effectiveServiceTier : completion.catalog?.serviceTier;
+  const inheritedId = inheritedTier === null || inheritedTier === 'default' ? 'default'
+    : inheritedTier === 'fast' || inheritedTier === 'priority' ? 'fast' : undefined;
+  const values = serviceTierOptions.filter(option => option.id).map(option =>
+    !selectedTier && option.id === inheritedId ? { ...option, id: '' } : option);
+  const speed = $<HTMLSelectElement>('service-tier');
+  options(speed, external ? [{ id: 'default', label: 'Standard' }] : values, external ? 'default' : selectedTier ?? '');
+  speed.disabled = external || isTaskRunning(task) || !!sending || task.busy;
 }
 function detailKey(details: HTMLDetailsElement): string {
   const message = details.closest<HTMLElement>('.message');
@@ -261,13 +274,9 @@ function render(): void {
     ...(task.settings.effort === 'default' ? [{ id: 'default', label: model?.defaultEffort || 'モデルの既定値' }] : []),
     ...(model?.efforts ?? []).map(effort => ({ id: effort.id, label: effort.id })),
   ], external ? task.settings.effort ?? 'default' : task.settings.effort ?? '');
-  const inheritedTier = task.effectiveServiceTier;
-  const inheritedSpeed = inheritedTier === null || inheritedTier === 'default' ? 'Standard' : inheritedTier === 'fast' || inheritedTier === 'priority' ? 'Fast' : inheritedTier;
-  options($<HTMLSelectElement>('service-tier'), external ? [{ id: 'default', label: 'Standard' }] : serviceTierOptions.map(option =>
-    option.id ? option : { id: '', label: inheritedSpeed ? `${inheritedSpeed} (Codex設定)` : 'Codex設定' }), external ? 'default' : task.settings.serviceTier ?? '');
+  renderSpeed();
   renderPermissions();
-  for (const id of ['model', 'effort', 'service-tier', 'mode']) $<HTMLSelectElement>(id).disabled = running || busy;
-  if (external) $<HTMLSelectElement>('service-tier').disabled = true;
+  for (const id of ['model', 'effort', 'mode']) $<HTMLSelectElement>(id).disabled = running || busy;
   if (external && !model?.efforts.length) $<HTMLSelectElement>('effort').disabled = true;
   const cyclePreset = $<HTMLButtonElement>('cycle-preset');
   cyclePreset.disabled = running || busy || !presetCount || !models.length;

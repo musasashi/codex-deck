@@ -192,7 +192,7 @@ class DeckExtension implements PanelHost {
     const existing = this.composerLoads.get(cwd);
     if (existing) return existing;
     const work = Promise.all([this.client.listSkills(cwd), this.client.readConfig(cwd)]).then(([skills, config]) => {
-      const catalog = { skills, permissionMode: configPermissionMode(config) };
+      const catalog = { skills, permissionMode: configPermissionMode(config), serviceTier: string(object(config.config).service_tier) || null };
       if (this.composerLoads.get(cwd) === work) this.composerCatalogs.set(cwd, catalog);
       return catalog;
     });

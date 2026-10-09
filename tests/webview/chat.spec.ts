@@ -91,10 +91,10 @@ const skills: Skill[] = [
   { name: 'registered-one', path: '/skills/one/SKILL.md', description: '登録された最初のスキル', scope: 'system' },
   { name: 'registered-two', path: '/skills/two/SKILL.md', description: '登録された二つ目のスキル', scope: 'user' },
 ];
-async function catalog(page: Page, entries = skills, permissionMode = 'workspace-write') {
+async function catalog(page: Page, entries = skills, permissionMode = 'workspace-write', serviceTier: string | null = null) {
   const request = (await messages(page)).findLast(message => message.type === 'composerCatalog');
   expect(request).toBeTruthy();
-  await receive(page, { type: 'composerCatalog', requestId: request!.requestId, skills: entries, permissionMode });
+  await receive(page, { type: 'composerCatalog', requestId: request!.requestId, skills: entries, permissionMode, serviceTier });
 }
 async function fileRequest(page: Page, query: string) {
   await expect.poll(async () => (await messages(page)).findLast(message => message.type === 'fileSearch')?.query).toBe(query);
@@ -1394,6 +1394,7 @@ test('speed sits between reasoning and permissions, restores Fast and locks duri
   await state(page, value);
   const speed = page.getByLabel('速度', { exact: true });
   await expect(speed).toHaveValue('fast');
+  await expect(speed.locator('option')).toHaveText(['Standard', 'Fast']);
   expect(await page.locator('.composer-settings select').evaluateAll(selects => selects.map(select => select.id)))
     .toEqual(['model', 'effort', 'service-tier', 'mode']);
   expect((await messages(page)).filter(message => message.type === 'settings')).toHaveLength(0);
@@ -1414,16 +1415,54 @@ test('speed sits between reasoning and permissions, restores Fast and locks duri
   await page.screenshot({ path: info.outputPath('fast-mode.png'), fullPage: true });
 });
 
-test('inherited speed reflects Codex responses without saving a selection on render', async ({ page }) => {
+test('inherited Standard and Fast share single choices without saving a selection on render', async ({ page }) => {
   const value = task();
-  value.effectiveServiceTier = 'priority'; await state(page, value);
   const speed = page.getByLabel('速度', { exact: true });
-  await expect(speed).toHaveValue('');
-  await expect(speed.locator('option:checked')).toHaveText('Fast (Codex設定)');
-  value.effectiveServiceTier = null; await state(page, value);
-  await expect(speed.locator('option:checked')).toHaveText('Standard (Codex設定)');
+  for (const tier of [null, 'default', 'fast', 'priority']) {
+    value.effectiveServiceTier = tier; await state(page, value);
+    await expect(speed).toHaveValue('');
+    await expect(speed.locator('option')).toHaveText(['Standard', 'Fast']);
+    await expect(speed.locator('option:checked')).toHaveText(tier === 'fast' || tier === 'priority' ? 'Fast' : 'Standard');
+  }
   expect((await messages(page)).filter(message => message.type === 'settings')).toHaveLength(0);
+  await speed.selectOption('default');
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'settings', serviceTier: 'default' });
+  value.settings.serviceTier = 'default'; await state(page, value);
+  await expect(speed.locator('option')).toHaveText(['Standard', 'Fast']);
+  await expect(speed.locator('option:checked')).toHaveText('Standard');
+  delete value.settings.serviceTier;
+  value.effectiveServiceTier = null; await state(page, value);
+  await speed.selectOption('fast');
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'settings', serviceTier: 'fast' });
+  value.settings.serviceTier = 'fast'; await state(page, value);
+  await expect(speed.locator('option')).toHaveText(['Standard', 'Fast']);
+  await expect(speed.locator('option:checked')).toHaveText('Fast');
 });
+
+for (const tier of [null, 'fast']) {
+  test(`new tasks display ${tier === 'fast' ? 'Fast' : 'Standard'} from Codex settings before the first message`, async ({ page }) => {
+    const value = task();
+    delete value.threadId;
+    await state(page, value);
+    const speed = page.getByLabel('速度', { exact: true });
+    await expect(speed.locator('option')).toHaveText(['Standard', 'Fast']);
+    await catalog(page, skills, 'workspace-write', tier);
+    await expect(speed.locator('option')).toHaveText(['Standard', 'Fast']);
+    await expect(speed.locator('option:checked')).toHaveText(tier === 'fast' ? 'Fast' : 'Standard');
+    await expect(speed).toHaveValue('');
+    expect((await messages(page)).filter(message => message.type === 'settings')).toHaveLength(0);
+    await page.getByLabel('推論の強さ', { exact: true }).selectOption('high');
+    expect((await messages(page)).at(-1)).toMatchObject({ type: 'settings', serviceTier: '' });
+    value.threadId = 'thread-1';
+    value.effectiveServiceTier = tier === 'fast' ? null : 'priority';
+    await state(page, value);
+    await expect(speed.locator('option:checked')).toHaveText(tier === 'fast' ? 'Standard' : 'Fast');
+    value.settings.serviceTier = tier === 'fast' ? 'fast' : 'default';
+    await state(page, value);
+    await expect(speed.locator('option:checked')).toHaveText(tier === 'fast' ? 'Fast' : 'Standard');
+    await expect(speed.locator('option')).toHaveText(['Standard', 'Fast']);
+  });
+}
 
 test('unset CLI defaults are not mislabeled Custom and resolve when the server returns thread permissions', async ({ page }) => {
   const value = task(); await state(page, value); await catalog(page, skills, 'default');

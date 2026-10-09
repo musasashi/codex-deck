@@ -79,7 +79,8 @@ export class Composer {
     else if (message.type === 'composerCatalog' && this.catalogRequest !== undefined && message.requestId === this.catalogRequest) {
       this.catalogRequest = undefined;
       this.catalogError = string(message.error);
-      this.catalog = { skills: array(message.skills) as Skill[], permissionMode: message.permissionMode as ComposerCatalog['permissionMode'] };
+      this.catalog = { skills: array(message.skills) as Skill[], permissionMode: message.permissionMode as ComposerCatalog['permissionMode'],
+        serviceTier: message.serviceTier as ComposerCatalog['serviceTier'] };
       for (const skill of this.catalog.skills) if (this.restoredPaths.includes(skill.path)) this.selectedSkills.set(skill.path, skill);
       this.restoredPaths = [];
       this.renderSkills(); this.catalogChanged();

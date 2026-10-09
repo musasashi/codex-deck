@@ -26,7 +26,7 @@ export interface Input {
 export interface Attachment { id: string; label: string; input: Input }
 export interface Skill { name: string; description: string; path: string; scope: string }
 export interface FileReference { path: string; kind: 'file' | 'directory' }
-export interface ComposerCatalog { skills: Skill[]; permissionMode?: ExecutionMode }
+export interface ComposerCatalog { skills: Skill[]; permissionMode?: ExecutionMode; serviceTier?: string | null }
 export interface Model {
   id: string;
   label: string;
