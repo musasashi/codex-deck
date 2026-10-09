@@ -1287,7 +1287,7 @@ test('plan commands complete and submit with attachments while the current mode 
   value.settings.collaborationMode = 'plan';
   await state(page, value); await sendResult(page, 'sent');
   await expect(prompt).toHaveValue('');
-  await expect(page.locator('#plan-mode')).toHaveText('プランモード · /plan で通常モードに戻る');
+  await expect(page.locator('#plan-mode > span')).toHaveText('プランモード · /plan で通常モードに戻る');
   await pasteClipboardImages(page); await acceptImages(page, value, await imageRequest(page));
   await prompt.fill('/plan $registered-one この画像の画面を設計してください');
   await prompt.press('Enter');
@@ -1298,9 +1298,27 @@ test('plan commands complete and submit with attachments while the current mode 
   await page.setViewportSize({ width: 380, height: 850 });
   expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
   await page.screenshot({ path: info.outputPath('plan-mode.png'), fullPage: true });
+  const exit = page.getByRole('button', { name: '通常モードに戻る', exact: true });
+  for (const status of ['running', 'approval', 'input'] as const) {
+    value.status = status;
+    await state(page, value);
+    await expect(exit).toBeDisabled();
+  }
+  value.status = 'idle'; value.busy = true;
+  await state(page, value);
+  await expect(exit).toBeDisabled();
+  value.busy = false;
+  await state(page, value);
+  await expect(exit).toBeEnabled();
+  await exit.click();
+  expect((await messages(page)).at(-1)).toEqual({ type: 'exitPlanMode' });
+  expect((await messages(page)).filter(message => message.type === 'send')).toHaveLength(2);
+  await expect(prompt).toBeFocused();
   value.settings.collaborationMode = 'default';
   await state(page, value);
   await expect(page.locator('#plan-mode')).toBeHidden();
+  await expect(prompt).toHaveValue('/plan $registered-one この画像の画面を設計してください');
+  await expect(page.locator('#attachments .attachment-image')).toHaveCount(value.attachments.length);
 });
 
 test('file lookup inserts a quoted path on Enter without submitting, and ignores stale responses after edits or Escape', async ({ page }, info) => {

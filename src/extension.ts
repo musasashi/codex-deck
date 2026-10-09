@@ -304,6 +304,10 @@ class DeckExtension implements PanelHost {
       case 'invalidJson': throw new Error('JSON形式の回答を確認してください。');
       case 'openLink': await this.openLink(task, string(message.url)); return;
       case 'settings': await this.updateSettings(task, message); return;
+      case 'exitPlanMode':
+        if (isTaskRunning(task) || task.busy) throw new Error('実行が完了してからプランモードを切り替えてください。');
+        await this.connect(); await this.manager.restore(task.id);
+        this.manager.setCollaborationMode(task.id, 'default'); return;
       case 'cyclePreset': this.cyclePreset(task); return;
       case 'menu': await this.menu(task); return;
       case 'account': await this.accountMenu(); return;

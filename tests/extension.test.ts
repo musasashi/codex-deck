@@ -599,6 +599,7 @@ test('/plan toggles without a turn and inline instructions use the normal send p
     assert.deepEqual(gateway.sent[0]?.settings, { model: 'test-model', effort: 'high', mode: 'auto-review', collaborationMode: 'plan' });
     assert.deepEqual(task.attachments.map(attachment => attachment.id), ['later']);
     await assert.rejects(host.command(task, { type: 'send', text: '/plan' }), /実行が完了/);
+    await assert.rejects(host.command(task, { type: 'exitPlanMode' }), /実行が完了/);
     assert.equal(task.settings.collaborationMode, 'plan');
     gateway.finish(task.threadId!, task.activeTurnId!, 'completed');
     await host.command(task, { type: 'send', text: '/plan 計画を調整してください', attachmentIds: [] });
@@ -610,6 +611,14 @@ test('/plan toggles without a turn and inline instructions use the normal send p
     assert.equal(task.settings.collaborationMode, 'plan', 'settings and presets must preserve the conversation mode');
     await host.command(task, { type: 'send', text: '/plan' });
     assert.equal(task.settings.collaborationMode, 'default');
+    await host.command(task, { type: 'send', text: '/plan' });
+    assert.equal(task.settings.collaborationMode, 'plan');
+    const settings = { ...task.settings, collaborationMode: 'default' };
+    await host.command(task, { type: 'exitPlanMode' });
+    await host.command(task, { type: 'exitPlanMode' });
+    assert.deepEqual(task.settings, settings);
+    assert.deepEqual(task.attachments.map(attachment => attachment.id), ['later']);
+    assert.equal(gateway.sent.length, 2);
     await host.command(task, { type: 'send', text: '実装してください', attachmentIds: [] });
     assert.equal(gateway.sent.at(-1)?.settings.collaborationMode, 'default');
     assert.equal(gateway.sent.length, 3);
@@ -631,6 +640,7 @@ test('/plan restores a saved task before checking for an active turn and rejects
     const draft = manager.create('/project');
     draft.busy = true;
     await assert.rejects(host.command(draft, { type: 'send', text: '/plan' }), /実行が完了/);
+    await assert.rejects(host.command(draft, { type: 'exitPlanMode' }), /実行が完了/);
     assert.equal(draft.settings.collaborationMode, undefined);
   } finally { await extension.shutdown(); }
 });

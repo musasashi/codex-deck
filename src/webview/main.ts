@@ -243,6 +243,7 @@ function render(): void {
   requests.render(task.requests, busy, connected);
   updateAttachments();
   const running = isTaskRunning(task);
+  $<HTMLButtonElement>('exit-plan-mode').disabled = running || busy;
   $('stop').hidden = !running && !waiting && !task.busy;
   const send = $<HTMLButtonElement>('send');
   updateSendButton();
@@ -378,6 +379,11 @@ $('dismiss-notice').addEventListener('click', () => {
   dismissedNotice = JSON.stringify([task.id, $('notice-text').textContent]);
   $('notice').hidden = true;
   saveDraft();
+  prompt.focus();
+});
+$('exit-plan-mode').addEventListener('click', () => {
+  if (!task || task.settings.collaborationMode !== 'plan' || sending || task.busy || isTaskRunning(task)) return;
+  post('exitPlanMode');
   prompt.focus();
 });
 for (const [id, type] of [['menu', 'menu'], ['attach', 'attach'], ['stop', 'stop']]) $(id!).addEventListener('click', () => post(type!));
