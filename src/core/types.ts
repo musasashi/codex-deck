@@ -40,7 +40,8 @@ export interface Model {
 }
 export type ExecutionMode = 'default' | 'read-only' | 'workspace-write' | 'auto-review' | 'danger-full-access';
 export type CollaborationMode = 'default' | 'plan';
-export interface RunSettings { model?: string; effort?: string; mode: ExecutionMode; collaborationMode?: CollaborationMode; pricing?: TokenPrice }
+export type ServiceTier = 'default' | 'fast';
+export interface RunSettings { model?: string; effort?: string; serviceTier?: ServiceTier; mode: ExecutionMode; collaborationMode?: CollaborationMode; pricing?: TokenPrice }
 export interface SettingsPreset extends RunSettings { model: string; effort: string }
 export interface TurnError { message: string; kind?: string }
 export interface Item { id: string; kind: string; data: JsonObject }
@@ -71,6 +72,7 @@ export interface Thread extends ThreadReference {
   model?: string;
   modelProvider?: string;
   effort?: string;
+  serviceTier?: string | null;
   instructionSources?: string[];
   permissionMode?: ExecutionMode;
 }
@@ -187,6 +189,7 @@ export interface Task extends TaskRecord {
   instructionSources: string[];
   effectiveModel?: string;
   effectiveEffort?: string;
+  effectiveServiceTier?: string | null;
   effectivePermissionMode?: ExecutionMode;
 }
 

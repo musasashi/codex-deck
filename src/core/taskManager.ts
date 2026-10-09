@@ -182,6 +182,7 @@ export class TaskManager {
     if (isExternalTask(task)) { task.autoResume = false; this.cancel(task); task.cost ??= emptyTaskCost(thread.turns.length > 0, thread.turns.map(turn => turn.id)); }
     if (isHuggingFaceTask(task)) task.settings.effort = 'default';
     task.effectiveEffort = isExternalTask(task) ? (task.settings.effort === 'default' ? undefined : task.settings.effort) : thread.effort;
+    if (thread.serviceTier !== undefined) task.effectiveServiceTier = thread.serviceTier;
     task.effectivePermissionMode = thread.permissionMode ?? task.effectivePermissionMode;
     task.hydrated = true;
     task.error = undefined;
@@ -470,6 +471,7 @@ export class TaskManager {
       if (task.turnError?.turnId !== turn.id) task.turnError = undefined;
       task.effectiveModel = task.settings.model ?? task.effectiveModel;
       task.effectiveEffort = isExternalTask(task) ? (task.settings.effort === 'default' ? undefined : task.settings.effort) : task.settings.effort ?? task.effectiveEffort;
+      if (task.settings.serviceTier) task.effectiveServiceTier = task.settings.serviceTier === 'fast' ? 'fast' : null;
       if (task.settings.mode !== 'default') task.effectivePermissionMode = task.settings.mode;
       this.cancel(task);
       task.activeTurnId = turn.id;

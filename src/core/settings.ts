@@ -1,4 +1,4 @@
-import { array, messageOf, object, string, type ExecutionMode, type Model, type RunSettings, type SettingsPreset } from './types';
+import { array, messageOf, object, string, type ExecutionMode, type Model, type RunSettings, type ServiceTier, type SettingsPreset } from './types';
 import { permissionPresets } from './composer';
 import { huggingFaceModel, isHuggingFaceModel } from './huggingFace';
 import { isExternalModel, sameTaskProvider } from './providers';
@@ -41,6 +41,18 @@ export const presetPermissionOptions = [...permissionPresets,
   { id: 'default', label: 'Codex設定を引き継ぐ', description: 'Codexの権限設定を引き継ぎます。' },
 ];
 
+export const serviceTierOptions = [
+  { id: '', label: 'Codex設定を引き継ぐ' },
+  { id: 'default', label: 'Standard' },
+  { id: 'fast', label: 'Fast' },
+];
+
+export function validateServiceTier(value: unknown): ServiceTier | undefined {
+  if (value === undefined || value === '') return undefined;
+  if (value === 'default' || value === 'fast') return value;
+  throw new Error('一覧から速度を選択してください。');
+}
+
 export function selectedModel(models: Model[], id: string): Model | undefined {
   return id === 'latest' ? latestModel(models) : huggingFaceModel(id) ?? models.find(model => model.id === id);
 }
@@ -54,19 +66,21 @@ export function validatePreset(value: unknown, models: Model[]): SettingsPreset 
   const model = string(data.model);
   const effort = string(data.effort);
   const mode = string(data.mode);
+  const serviceTier = validateServiceTier(data.serviceTier);
   const selected = selectedModel(models, model);
   if (!selected) throw new Error('利用できるモデルを選択してください。候補の再読み込みもお試しください。');
   if (!presetEffortOptions(selected).some(option => option.id === effort)) throw new Error('選択したモデルに対応する推論強度を選択してください。');
   if (!presetPermissionOptions.some(option => option.id === mode)) throw new Error('一覧から権限を選択してください。');
-  return { model, effort, mode: mode as ExecutionMode, ...(isExternalModel(model) && data.pricing !== undefined ? { pricing: validateTokenPrice(data.pricing) } : {}) };
+  return { model, effort, ...(serviceTier && !isExternalModel(model) ? { serviceTier } : {}), mode: mode as ExecutionMode, ...(isExternalModel(model) && data.pricing !== undefined ? { pricing: validateTokenPrice(data.pricing) } : {}) };
 }
 
 export function readPresets(value: unknown): SettingsPreset[] {
   const presets = array(value).flatMap(value => {
     const data = object(value);
     const model = string(data.model), effort = string(data.effort), mode = string(data.mode);
-    return model && effort && presetPermissionOptions.some(option => option.id === mode)
-      ? [{ model, effort: isHuggingFaceModel(model) ? 'default' : effort, mode: mode as ExecutionMode, ...(isExternalModel(model) && readTokenPrice(data.pricing) ? { pricing: readTokenPrice(data.pricing) } : {}) }] : [];
+    const validTier = data.serviceTier === undefined || serviceTierOptions.some(option => option.id === data.serviceTier);
+    return model && effort && presetPermissionOptions.some(option => option.id === mode) && validTier
+      ? [{ model, effort: isHuggingFaceModel(model) ? 'default' : effort, ...(data.serviceTier && !isExternalModel(model) ? { serviceTier: data.serviceTier as ServiceTier } : {}), mode: mode as ExecutionMode, ...(isExternalModel(model) && readTokenPrice(data.pricing) ? { pricing: readTokenPrice(data.pricing) } : {}) }] : [];
   });
   return presets.length ? presets : [{ ...DEFAULT_PRESET }];
 }
@@ -82,6 +96,7 @@ export function validatePresets(value: unknown, models: Model[]): SettingsPreset
 export function nextPresetIndex(settings: RunSettings, presets: SettingsPreset[], models: Model[], previousIndex = -1): number {
   if (!presets.length) return -1;
   const same = (a: RunSettings, b: RunSettings): boolean => a.model === b.model && a.effort === b.effort && a.mode === b.mode
+    && a.serviceTier === b.serviceTier
     && a.pricing?.input === b.pricing?.input && a.pricing?.output === b.pricing?.output;
   const matches = (preset: SettingsPreset): boolean => {
     if (same(preset, settings)) return true;

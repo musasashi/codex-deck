@@ -12,7 +12,7 @@ export function settingsHtml(options: { cspSource: string; script: string; css: 
         <button id="add-preset" type="button" class="accent">プリセットを追加</button>
       </fieldset>
       <fieldset id="question-presets" disabled><legend>質問プリセット</legend>
-        <p class="hint">タスクの文章を範囲選択して右クリックすると、上から順に表示します。選ぶと質問文・選択範囲・元の会話へのリンクを新規タスクに自動送信します。モデル・推論強度・権限は質問ごとに設定します。</p>
+        <p class="hint">タスクの文章を範囲選択して右クリックすると、上から順に表示します。選ぶと質問文・選択範囲・元の会話へのリンクを新規タスクに自動送信します。モデル・推論強度・速度・権限は質問ごとに設定します。</p>
         <div id="question-preset-list"></div>
         <button id="add-question-preset" type="button" class="accent">質問プリセットを追加</button>
       </fieldset>

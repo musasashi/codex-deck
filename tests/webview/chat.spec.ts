@@ -31,6 +31,8 @@ test('Responses tasks only offer their own provider and declared efforts, includ
   await expect(page.locator('#model option[value="responses:two:model"]')).toHaveCount(0);
   await expect(page.locator('#model option[value="catalog-model"]')).toHaveCount(0);
   await expect(page.locator('#effort option')).toHaveText(['モデルの既定値', 'low', 'high']);
+  await expect(page.getByLabel('速度', { exact: true })).toBeDisabled();
+  await expect(page.locator('#service-tier option')).toHaveText(['Standard']);
   await page.locator('#effort').selectOption('default');
   expect((await messages(page)).at(-1)).toMatchObject({ type: 'settings', model: 'responses:one:model', effort: 'default' });
   await expect(page.locator('#task-cost')).toBeVisible();
@@ -43,6 +45,7 @@ test('Responses tasks only offer their own provider and declared efforts, includ
   await expect(page.locator('#effort')).toHaveValue('default');
   await expect(page.locator('#effort')).toBeDisabled();
   await expect(page.locator('#effort option')).toHaveText(['モデルの既定値']);
+  await expect(page.getByLabel('速度', { exact: true })).toBeDisabled();
 });
 
 test('HF task cost replaces quota gauges, updates live, and stays visible after disconnecting', async ({ page }, info) => {
@@ -1365,6 +1368,43 @@ test('CLI permission names reflect inherited settings and rendering does not cha
   value.settings.mode = 'workspace-write'; await state(page, value);
   await mode.selectOption('auto-review');
   expect((await messages(page)).at(-1)).toMatchObject({ type: 'settings', mode: 'auto-review' });
+});
+
+test('speed sits between reasoning and permissions, restores Fast and locks during a turn', async ({ page }, info) => {
+  const value = task();
+  value.settings = { model: 'catalog-model', effort: 'high', serviceTier: 'fast', mode: 'workspace-write' };
+  await state(page, value);
+  const speed = page.getByLabel('速度', { exact: true });
+  await expect(speed).toHaveValue('fast');
+  expect(await page.locator('.composer-settings select').evaluateAll(selects => selects.map(select => select.id)))
+    .toEqual(['model', 'effort', 'service-tier', 'mode']);
+  expect((await messages(page)).filter(message => message.type === 'settings')).toHaveLength(0);
+  await speed.selectOption('default');
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'settings', model: 'catalog-model', effort: 'high', serviceTier: 'default', mode: 'workspace-write' });
+  value.settings.serviceTier = 'default'; await state(page, value);
+  await speed.selectOption('fast');
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'settings', effort: 'high', serviceTier: 'fast' });
+  value.settings.serviceTier = 'fast'; value.busy = true; await state(page, value);
+  await expect(speed).toBeDisabled();
+  value.busy = false; value.activeTurnId = 'running'; value.status = 'running'; await state(page, value);
+  await expect(speed).toBeDisabled();
+  value.activeTurnId = undefined; value.status = 'idle'; await state(page, value);
+  await expect(speed).toBeEnabled();
+  await expect(speed).toHaveValue('fast');
+  await page.setViewportSize({ width: 380, height: 850 });
+  expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
+  await page.screenshot({ path: info.outputPath('fast-mode.png'), fullPage: true });
+});
+
+test('inherited speed reflects Codex responses without saving a selection on render', async ({ page }) => {
+  const value = task();
+  value.effectiveServiceTier = 'priority'; await state(page, value);
+  const speed = page.getByLabel('速度', { exact: true });
+  await expect(speed).toHaveValue('');
+  await expect(speed.locator('option:checked')).toHaveText('Fast (Codex設定)');
+  value.effectiveServiceTier = null; await state(page, value);
+  await expect(speed.locator('option:checked')).toHaveText('Standard (Codex設定)');
+  expect((await messages(page)).filter(message => message.type === 'settings')).toHaveLength(0);
 });
 
 test('unset CLI defaults are not mislabeled Custom and resolve when the server returns thread permissions', async ({ page }) => {

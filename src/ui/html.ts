@@ -23,6 +23,7 @@ export function chatHtml(options: { cspSource: string; script: string; css: stri
               <label><span class="sr-only">モデル</span><select id="model" aria-label="モデル" title="モデル"></select></label>
             </div>
             <label><span class="sr-only">推論の強さ</span><select id="effort" aria-label="推論の強さ" title="推論の強さ"></select></label>
+            <label><span class="sr-only">速度</span><select id="service-tier" aria-label="速度" title="速度"></select></label>
             <label><span class="sr-only">Permissions</span><select id="mode" aria-label="Permissions" title="Permissions"></select></label>
           </div>
           <div class="composer-actions">

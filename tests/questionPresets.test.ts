@@ -11,6 +11,7 @@ test('question settings validate independently, preserving ordering and external
   const providers = validateProviders([{ id: 'local', name: 'Local', baseUrl: 'http://localhost/v1', models: [{ id: 'model', reasoningEfforts: ['low'] }] }]);
   const models = [...await new FakeGateway().listModels(), ...providerModels(providers)];
   const configured = [question,
+    { ...question, id: 'fast', settings: { ...DEFAULT_PRESET, serviceTier: 'fast' } },
     { ...question, id: 'hf', settings: { model: 'hf:org/model', effort: 'default', mode: 'read-only', pricing: { input: 1, output: 2 } } },
     { ...question, id: 'api', settings: { model: 'responses:local:model', effort: 'low', mode: 'workspace-write' } },
   ];
@@ -29,6 +30,7 @@ test('invalid questions and model settings are rejected without replacing them w
     { ...question, settings: {} }, { ...question, settings: { ...question.settings, model: 'missing' } },
     { ...question, settings: { ...question.settings, effort: 'unsupported' } },
     { ...question, settings: { ...question.settings, mode: 'bad' } },
+    { ...question, settings: { ...question.settings, serviceTier: 'bad' } },
     { ...question, settings: { model: 'hf:org/model', effort: 'default', mode: 'read-only', pricing: { input: -1, output: 1 } } },
   ]) assert.throws(() => validateQuestionPresets([invalid], models), /質問プリセット1/);
   assert.throws(() => validateQuestionPresets([question, { ...question, id: ' explain ' }], models), /重複/);

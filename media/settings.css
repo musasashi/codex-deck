@@ -20,6 +20,7 @@ legend { padding: 0 12px 0 0; font-size: 16px; font-weight: 600; }
 .preset-default { display: block; margin-top: 4px; color: var(--vscode-descriptionForeground); font-size: 11px; }
 .preset-actions button { padding: 4px 9px; }
 .preset-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.preset-run-settings { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .actions { display: flex; flex-wrap: wrap; gap: 10px; }
 button { padding: 7px 16px; border: 1px solid transparent; border-radius: 3px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); font: inherit; cursor: pointer; }
 button:hover { background: var(--vscode-button-hoverBackground); }

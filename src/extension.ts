@@ -21,7 +21,7 @@ import { isHuggingFaceModel, withHuggingFaceModels } from './core/huggingFace';
 import { isExternalModel, parseResponsesModel, providerModels, readProviders, sameTaskProvider, type ResponsesProvider } from './core/providers';
 import { readTokenPrice } from './core/cost';
 import { availableResetCredits, resetCreditExpiry } from './core/usage';
-import { nextPresetIndex, readPresets, readTitleEffort, readTitleModel, resolveRunSettings, selectedModel, taskPresets, validatePreset } from './core/settings';
+import { nextPresetIndex, readPresets, readTitleEffort, readTitleModel, resolveRunSettings, selectedModel, taskPresets, validatePreset, validateServiceTier } from './core/settings';
 import { array, object, string, messageOf, statusLabel, isTaskRunning, type ComposerCatalog, type ExecutionMode, type JsonObject, type Model, type Task } from './core/types';
 import { TaskPanels, TaskTree, type PanelHost } from './ui/panels';
 import { SettingsPanel } from './ui/settingsPanel';
@@ -374,12 +374,14 @@ class DeckExtension implements PanelHost {
     if (task.activeTurnId || task.busy) throw new Error('実行が完了してから設定を変更してください。');
     const model = string(message.model);
     const effort = string(message.effort);
+    const serviceTier = validateServiceTier(message.serviceTier ?? task.settings.serviceTier);
     const selected = selectedModel(this.models, model || task.effectiveModel || 'latest');
     if (model && model !== 'latest' && !selected) throw new Error('モデル一覧を再取得してください。');
     if (effort && effort !== 'default' && (selected || model !== 'latest') && !selected?.efforts.some(candidate => candidate.id === effort)) throw new Error('このモデルで利用できる推論の強さを選択してください。');
     const pricing = !model || model === task.settings.model ? task.settings.pricing
       : readPresets(vscode.workspace.getConfiguration('codexDeck', vscode.Uri.file(task.cwd)).get('presets')).find(preset => preset.model === model)?.pricing;
     this.manager.updateSettings(task.id, { model: model || undefined, effort: effort === 'default' ? selected?.defaultEffort || undefined : effort || (model && model !== task.settings.model ? selected?.defaultEffort || undefined : undefined), mode,
+      ...(serviceTier && !isExternalModel(model || task.effectiveModel) ? { serviceTier } : {}),
       ...(pricing && isExternalModel(model || task.effectiveModel) ? { pricing } : {}) });
     this.presetSelections.delete(task);
   }

@@ -33,7 +33,7 @@ test.beforeEach(async ({ page }) => {
 
 test('the first preset supplies defaults and uses live dropdowns without saving on load', async ({ page }) => {
   await snapshot(page);
-  await expect(page.getByRole('combobox')).toHaveCount(6);
+  await expect(page.getByRole('combobox')).toHaveCount(7);
   await expect(page.getByLabel('要約に使うモデル')).toHaveValue('latest');
   await expect(page.getByLabel('要約の推論強度')).toHaveValue('lowest');
   await expect(page.locator('#title-effort option')).toHaveText(['最低 (medium)', 'モデルの既定値', 'medium', 'high']);
@@ -44,6 +44,32 @@ test('the first preset supplies defaults and uses live dropdowns without saving 
   await expect(page.locator('.preset-default')).toHaveText('新規タスクの初期設定');
   await expect(page.getByRole('button', { name: 'プリセット1を削除' })).toBeDisabled();
   expect((await messages(page)).filter(message => message.type === 'saveSettings')).toHaveLength(0);
+});
+
+test('task and question presets save their speeds and external models disable Fast', async ({ page }) => {
+  const preset = { ...initialPreset, serviceTier: 'fast' };
+  const question = { id: 'explain', name: '説明', prompt: '説明してください。', settings: { ...preset } };
+  await snapshot(page, { presets: [preset], questionPresets: [question] });
+  const taskSpeed = page.locator('#preset-service-tier-0');
+  const questionSpeed = page.locator('#question-preset-service-tier-0');
+  await expect(taskSpeed).toHaveValue('fast');
+  await expect(questionSpeed).toHaveValue('fast');
+  await expect(taskSpeed.locator('option')).toHaveText(['Codex設定を引き継ぐ', 'Standard', 'Fast']);
+  await taskSpeed.selectOption('default');
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  const saved = [{ ...initialPreset, serviceTier: 'default' }];
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'saveSettings', presets: saved, questionPresets: [question] });
+  await snapshot(page, { saved: true, presets: saved, questionPresets: [question] });
+  await expect(taskSpeed).toHaveValue('default');
+  await page.locator('#preset-model-0').selectOption('huggingface');
+  await expect(taskSpeed).toBeDisabled();
+  await expect(taskSpeed.locator('option')).toHaveText(['Standard']);
+  await page.locator('#preset-model-0').selectOption('latest');
+  await expect(taskSpeed).toBeEnabled();
+  await expect(taskSpeed).toHaveValue('');
+  await questionSpeed.selectOption('');
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  expect((await messages(page)).at(-1)).toMatchObject({ presets: [{ ...initialPreset, effort: 'default' }], questionPresets: [{ ...question, settings: initialPreset }] });
 });
 
 test('presets can be added, edited, reordered and deleted before saving the complete list', async ({ page }, info) => {

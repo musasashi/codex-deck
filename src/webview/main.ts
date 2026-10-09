@@ -2,7 +2,7 @@ import { array, object, string, statusLabel, isTaskRunning, type Attachment, typ
 import { escapeHtml, renderAttachments, renderItem, renderTranscript } from './render';
 import { IMAGE_FORMAT_ERROR, IMAGE_TYPES, MAX_ATTACHMENT_BYTES } from '../core/attachments';
 import { parseSlashCommand, permissionOptions, slashCommands } from '../core/composer';
-import { latestModel, presetEffortOptions, selectedModel } from '../core/settings';
+import { latestModel, presetEffortOptions, selectedModel, serviceTierOptions } from '../core/settings';
 import { isExternalTask, sameTaskProvider } from '../core/providers';
 import { costLabel } from '../core/cost';
 import { Composer } from './composer';
@@ -121,7 +121,7 @@ function options(select: HTMLSelectElement, values: { id: string; label: string 
   if (select.dataset.options !== signature) {
     select.replaceChildren(...values.map(value => {
       const option = new Option(value.label, value.id);
-      option.hidden = value.id === '';
+      option.hidden = value.id === '' && select.id !== 'service-tier';
       return option;
     }));
     select.dataset.options = signature;
@@ -260,8 +260,13 @@ function render(): void {
     ...(task.settings.effort === 'default' ? [{ id: 'default', label: model?.defaultEffort || 'モデルの既定値' }] : []),
     ...(model?.efforts ?? []).map(effort => ({ id: effort.id, label: effort.id })),
   ], external ? task.settings.effort ?? 'default' : task.settings.effort ?? '');
+  const inheritedTier = task.effectiveServiceTier;
+  const inheritedSpeed = inheritedTier === null || inheritedTier === 'default' ? 'Standard' : inheritedTier === 'fast' || inheritedTier === 'priority' ? 'Fast' : inheritedTier;
+  options($<HTMLSelectElement>('service-tier'), external ? [{ id: 'default', label: 'Standard' }] : serviceTierOptions.map(option =>
+    option.id ? option : { id: '', label: inheritedSpeed ? `${inheritedSpeed} (Codex設定)` : 'Codex設定' }), external ? 'default' : task.settings.serviceTier ?? '');
   renderPermissions();
-  for (const id of ['model', 'effort', 'mode']) $<HTMLSelectElement>(id).disabled = running || busy;
+  for (const id of ['model', 'effort', 'service-tier', 'mode']) $<HTMLSelectElement>(id).disabled = running || busy;
+  if (external) $<HTMLSelectElement>('service-tier').disabled = true;
   if (external && !model?.efforts.length) $<HTMLSelectElement>('effort').disabled = true;
   const cyclePreset = $<HTMLButtonElement>('cycle-preset');
   cyclePreset.disabled = running || busy || !presetCount || !models.length;
@@ -378,8 +383,9 @@ $('dismiss-notice').addEventListener('click', () => {
 for (const [id, type] of [['menu', 'menu'], ['attach', 'attach'], ['stop', 'stop']]) $(id!).addEventListener('click', () => post(type!));
 $('cycle-preset').addEventListener('click', () => post('cyclePreset'));
 for (const event of ['mouseenter', 'focus']) $('cycle-preset').addEventListener(event, () => post('keybindings'));
-for (const id of ['model', 'effort', 'mode']) $(id).addEventListener('change', () => post('settings', {
+for (const id of ['model', 'effort', 'service-tier', 'mode']) $(id).addEventListener('change', () => post('settings', {
   model: $<HTMLSelectElement>('model').value, effort: id === 'model' ? '' : $<HTMLSelectElement>('effort').value, mode: $<HTMLSelectElement>('mode').value,
+  serviceTier: $<HTMLSelectElement>('service-tier').value,
 }));
 document.addEventListener('click', event => {
   const target = (event.target as Element).closest<HTMLElement>('[data-link], [data-remove], [data-retry-send], [data-message-action], [data-code-action]');

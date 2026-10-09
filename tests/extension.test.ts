@@ -7,7 +7,7 @@ import * as path from 'node:path';
 import { buildSync } from 'esbuild';
 import type * as vscode from 'vscode';
 import type { JsonObject, Task, TaskRecord } from '../src/core/types';
-import type { TaskManager } from '../src/core/taskManager';
+import { TaskManager } from '../src/core/taskManager';
 import type { PanelHost } from '../src/ui/panels';
 import { deferred, FakeGateway, thread } from './helpers';
 import type { AppServerClient } from '../src/appServer/client';
@@ -155,6 +155,29 @@ test('code block copy requests write the exact code and acknowledge their reques
     const text = 'const value = "<tag>";\n  run(value);';
     assert.deepEqual(await host.command(task, { type: 'copyCode', requestId: 7, text }), { type: 'codeCopied', requestId: 7 });
     assert.equal(extension.clipboard(), text);
+  } finally { await extension.shutdown(); }
+});
+
+test('speed changes persist independently and survive other composer settings and task restoration', async () => {
+  const extension = activate([record('draft', true, true)]);
+  const { host, manager } = extension.serializer as unknown as { host: PanelHost; manager: TaskManager };
+  try {
+    host.models = await new FakeGateway().listModels();
+    const task = manager.get('draft');
+    await host.command(task, { type: 'settings', model: 'test-model', effort: 'high', mode: 'read-only', serviceTier: 'fast' });
+    assert.equal(task.settings.serviceTier, 'fast');
+    await host.command(task, { type: 'settings', model: 'test-model', effort: 'high', mode: 'workspace-write' });
+    assert.equal(task.settings.serviceTier, 'fast');
+    await manager.flush();
+    const restored = new TaskManager(new FakeGateway(), { async save() {} }, extension.records(), { schedule: false });
+    try { assert.equal(restored.get('draft').settings.serviceTier, 'fast'); }
+    finally { restored.dispose(); await restored.flush(); }
+    await host.command(task, { type: 'settings', model: 'test-model', effort: 'high', mode: 'workspace-write', serviceTier: 'default' });
+    assert.equal(task.settings.serviceTier, 'default');
+    await assert.rejects(host.command(task, { type: 'settings', model: 'test-model', effort: 'high', mode: 'workspace-write', serviceTier: 'invalid' }), /速度/);
+    assert.equal(task.settings.serviceTier, 'default');
+    await host.command(task, { type: 'settings', model: 'test-model', effort: 'high', mode: 'workspace-write', serviceTier: '' });
+    assert.equal(task.settings.serviceTier, undefined);
   } finally { await extension.shutdown(); }
 });
 
