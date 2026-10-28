@@ -3,7 +3,7 @@ import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { messageOf, object, type ThreadReference } from '../core/types';
 
-async function readReference(file: string): Promise<ThreadReference> {
+async function readReference(file: string): Promise<ThreadReference | undefined> {
   try {
     // Only the first JSONL record is needed, even for very large conversations.
     const chunks: Buffer[] = [];
@@ -13,6 +13,7 @@ async function readReference(file: string): Promise<ThreadReference> {
       chunks.push(end < 0 ? chunk : chunk.subarray(0, end));
       if (end >= 0) break;
     }
+    if (!chunks.length) return undefined;
     const entry = object(JSON.parse(Buffer.concat(chunks).toString('utf8')));
     const meta = object(entry.payload);
     if (entry.type !== 'session_meta' || typeof meta.id !== 'string' || !meta.id) throw new Error('session_metaがありません。');
@@ -47,6 +48,7 @@ export async function readRolloutReferences(codexHome: string): Promise<ThreadRe
       if (entry.isDirectory()) await visit(file);
       else if (entry.isFile() && entry.name.startsWith('rollout-') && entry.name.endsWith('.jsonl')) {
         const reference = await readReference(file);
+        if (!reference) continue;
         const previous = references.get(reference.id);
         if (previous && JSON.stringify(previous) !== JSON.stringify(reference)) throw new Error(`チャットの参照関係が重複しています：${reference.id}`);
         references.set(reference.id, reference);

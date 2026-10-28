@@ -9,7 +9,7 @@ import { JsonRpcPeer } from '../src/appServer/rpc';
 import { deleteThreadHistory } from '../src/core/threadDeletion';
 import type { JsonObject } from '../src/core/types';
 
-for (const scenario of ['approve', 'cancel', 'running', 'unreadable', 'missing-root-rollout'] as const) test(`persisted references include hidden forks before deletion: ${scenario}`, async t => {
+for (const scenario of ['approve', 'cancel', 'running', 'unreadable', 'missing-root-rollout'] as const) test(`persisted references include hidden forks despite empty rollouts: ${scenario}`, async t => {
   const folder = await mkdtemp(join(tmpdir(), 'codex-deck-deletion-'));
   t.after(() => rm(folder, { recursive: true, force: true }));
   const records = [
@@ -24,6 +24,7 @@ for (const scenario of ['approve', 'cancel', 'running', 'unreadable', 'missing-r
     await mkdir(directory, { recursive: true });
     await writeFile(join(directory, `rollout-${record.id}.jsonl`), JSON.stringify({ type: 'session_meta', payload: record }) + '\n');
   }
+  for (const store of ['sessions', 'archived_sessions']) await writeFile(join(folder, store, 'rollout-empty.jsonl'), '');
   const input = new PassThrough(), output = new PassThrough();
   const requests: { method: string; params: JsonObject }[] = [];
   const deleted: string[] = [];
