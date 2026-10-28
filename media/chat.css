@@ -155,7 +155,7 @@ select option { background: var(--vscode-dropdown-background); color: var(--vsco
 .attachment-image [data-remove]:hover, #dismiss-notice:hover { background: var(--vscode-button-secondaryBackground); }
 #dismiss-notice { top: 8px; right: 8px; }
 #image-status { padding: 4px 14px; font-size: 12px; }
-#image-annotation { width: min(1100px, calc(100vw - 32px)); max-width: none; max-height: calc(100vh - 32px); padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--vscode-editor-background); color: var(--vscode-foreground); }
+#image-annotation { width: calc(100vw - 16px); height: calc(100vh - 16px); max-width: none; max-height: none; padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--vscode-editor-background); color: var(--vscode-foreground); }
 #image-annotation[open] { display: flex; flex-direction: column; gap: 12px; }
 #image-annotation::backdrop { background: #0009; }
 .annotation-toolbar, .annotation-tools, .annotation-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
@@ -163,7 +163,7 @@ select option { background: var(--vscode-dropdown-background); color: var(--vsco
 .annotation-tools { margin-left: auto; }
 .annotation-pen { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; }
 .annotation-pen span { width: 26px; height: 7px; border: 1px solid #fff; border-radius: 5px; background: #ff3b30; box-shadow: 0 0 0 1px #000; }
-#annotation-stage { display: flex; align-items: center; justify-content: center; height: min(60vh, 650px); min-height: 0; overflow: hidden; background: var(--surface); border-radius: 5px; }
+#annotation-stage { display: flex; align-items: center; justify-content: center; flex: 1; min-height: 0; overflow: hidden; background: var(--surface); border-radius: 5px; }
 #annotation-stage[data-actual-size=true] { display: block; overflow: auto; }
 #annotation-canvas { display: block; flex-shrink: 0; cursor: crosshair; touch-action: none; }
 #annotation-stage[data-actual-size=true] #annotation-canvas { margin: 0 auto; }

@@ -31,13 +31,28 @@ test('rollout metadata discovers forks, spawned children and history bases acros
   }
 });
 
+test('empty rollout files in either store do not block reference lookup', async t => {
+  const folder = await mkdtemp(join(tmpdir(), 'codex-deck-metadata-'));
+  t.after(() => rm(folder, { recursive: true, force: true }));
+  for (const store of ['sessions', 'archived_sessions']) {
+    const directory = join(folder, store);
+    await mkdir(directory);
+    await writeFile(join(directory, 'rollout-empty.jsonl'), '');
+  }
+  await writeFile(join(folder, 'archived_sessions', 'rollout-root.jsonl'), JSON.stringify({ type: 'session_meta', payload: { id: 'root' } }));
+  await writeFile(join(folder, 'sessions', 'rollout-fork.jsonl'), JSON.stringify({ type: 'session_meta', payload: { id: 'fork', forked_from_id: 'root' } }));
+  const references = await readRolloutReferences(folder);
+  assert.equal(references.length, 2);
+  assert.deepEqual(threadDeletionOrder({ id: 'root' }, references).map(value => value.id), ['fork', 'root']);
+});
+
 test('absent history directories are empty but malformed metadata prevents a partial dependency graph', async t => {
   const folder = await mkdtemp(join(tmpdir(), 'codex-deck-metadata-'));
   t.after(() => rm(folder, { recursive: true, force: true }));
   assert.deepEqual(await readRolloutReferences(folder), []);
   await mkdir(join(folder, 'sessions'));
   const file = join(folder, 'sessions', 'rollout-broken.jsonl');
-  for (const content of ['', '{unfinished', '{"type":"event_msg","payload":{"id":"wrong-record"}}', '{"type":"session_meta","payload":{"id":"child","forked_from_id":42}}']) {
+  for (const content of ['{unfinished', '{"type":"event_msg","payload":{"id":"wrong-record"}}', '{"type":"session_meta","payload":{"id":"child","forked_from_id":42}}']) {
     await writeFile(file, content);
     await assert.rejects(readRolloutReferences(folder), /参照関係を読み取れませんでした.*rollout-broken/);
   }
