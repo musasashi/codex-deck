@@ -46,7 +46,7 @@ export const slashCommands = [
   { name: 'compact', description: '会話を圧縮' },
   { name: 'diff', description: 'Gitの変更差分を表示' },
   { name: 'mention', description: 'ファイルのパスを挿入' },
-  { name: 'status', description: '設定と使用量を表示' },
+  { name: 'status', description: 'タスクの状態と使用量を表示' },
   { name: 'mcp', description: 'MCPサーバーとツールを表示' },
   { name: 'init', description: 'AGENTS.mdを作成' },
   { name: 'copy', description: '直近の応答をコピー' },

@@ -6,7 +6,11 @@ export function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => voi
   const promise = new Promise<T>((a, b) => { resolve = a; reject = b; });
   return { promise, resolve, reject };
 }
-export function thread(id = 'thread-1'): Thread { return { id, title: id, cwd: '/project', status: 'idle', activeFlags: [], turns: [] }; }
+export const chatgptAccount = { account: { type: 'chatgpt', email: 'fixture@example.test', planType: 'plus' }, requiresOpenaiAuth: true };
+
+export const externalModelIds = ['hf:fixture/model', 'responses:fixture:model'] as const;
+
+export function thread(id = 'thread-1'): Thread { return { id, title: id, modelProvider: 'openai', cwd: '/project', status: 'idle', activeFlags: [], turns: [] }; }
 export function usage(percent: number, resetsAt = 10_000): Usage { return { buckets: [{ id: 'codex', label: 'Codex', windows: [{ key: 'primary', usedPercent: percent, resetsAt }], complete: true, reachedKnown: true }] }; }
 
 export class FakeGateway implements Gateway {

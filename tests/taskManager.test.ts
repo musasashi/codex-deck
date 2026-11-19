@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { TaskManager, CONTINUE_MESSAGE, readTaskRecords, type TaskStore } from '../src/core/taskManager';
-import type { TaskRecord, Thread, Turn } from '../src/core/types';
+import { UnsupportedThreadError, type TaskRecord, type Thread, type Turn } from '../src/core/types';
 import { FakeGateway, deferred, thread, usage } from './helpers';
 
 function setup(store?: TaskStore, records?: TaskRecord[]) {
@@ -32,6 +32,22 @@ test('new tasks are listed immediately and stay listed after completion; closing
   assert.equal(reopened, task);
   assert.equal(reopened.status, 'idle');
   assert.ok(manager.openTasks.includes(task));
+});
+
+test('restoring a task with no recorded provider removes it from Deck when Codex identifies it as external', async () => {
+  const stored: TaskRecord = { id: 'saved', threadId: 'external', title: 'Saved task', cwd: '/project', open: true,
+    autoResume: true, waiting: { token: 'reservation', turnId: 'stopped' }, claims: [], settings: { mode: 'default' } };
+  const { manager, gateway, task, saved } = setup(undefined, [stored]);
+  gateway.threads.set('external', { ...thread('external'), modelProvider: 'custom' });
+  gateway.resumeThread = async () => { throw new UnsupportedThreadError(); };
+  try {
+    await assert.rejects(manager.restore(task.id), UnsupportedThreadError);
+    await manager.checkUsage(); await manager.flush();
+    assert.deepEqual(manager.openTasks, []);
+    assert.deepEqual(saved.at(-1), []);
+    assert.deepEqual(gateway.sent, []);
+    assert.ok(gateway.threads.has('external'));
+  } finally { manager.dispose(); }
 });
 
 test('permanent deletion removes saved task state and ignores late events and hydration', async () => {

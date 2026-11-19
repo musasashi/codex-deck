@@ -1,5 +1,3 @@
-import type { CostSample, TaskCost, TokenPrice } from './cost';
-
 export type JsonObject = Record<string, unknown>;
 export const object = (value: unknown): JsonObject =>
   value !== null && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : {};
@@ -39,12 +37,11 @@ export interface Model {
   isDefault: boolean;
   upgrade?: string;
   inputModalities: string[];
-  structuredOutput?: boolean;
 }
 export type ExecutionMode = 'default' | 'read-only' | 'workspace-write' | 'auto-review' | 'danger-full-access';
 export type CollaborationMode = 'default' | 'plan';
 export type ServiceTier = 'default' | 'fast';
-export interface RunSettings { model?: string; effort?: string; serviceTier?: ServiceTier; mode: ExecutionMode; collaborationMode?: CollaborationMode; pricing?: TokenPrice }
+export interface RunSettings { model?: string; effort?: string; serviceTier?: ServiceTier; mode: ExecutionMode; collaborationMode?: CollaborationMode }
 export interface SettingsPreset extends RunSettings { model: string; effort: string }
 export interface TurnError { message: string; kind?: string }
 export interface Item { id: string; kind: string; data: JsonObject }
@@ -63,6 +60,10 @@ export interface ThreadReference {
   forkedFromId?: string;
   parentThreadId?: string;
   historyBaseThreadId?: string;
+}
+export const OPENAI_PROVIDER = 'openai';
+export class UnsupportedThreadError extends Error {
+  constructor() { super('この会話はCodex Deckで開けません。ChatGPTの会話を選択してください。'); }
 }
 export interface Thread extends ThreadReference {
   title: string;
@@ -127,7 +128,6 @@ export type ServerEvent =
   | { type: 'skills' }
   | { type: 'warning'; threadId?: string; message: string }
   | { type: 'tokens'; threadId: string; value: unknown }
-  | { type: 'cost'; threadId: string; sample: CostSample }
   | { type: 'archived' | 'deleted'; threadId: string };
 
 export interface Gateway {
@@ -154,13 +154,12 @@ export const statusLabel: Record<TaskStatus, string> = {
   waiting: '使用量回復待ち', error: 'エラー', disconnected: '未接続',
 };
 export interface Reservation { turnId: string; token: string; blockers?: string[] }
-export interface TitleRequest { cwd: string; model: string; effort: string; input: string; ownerThreadId?: string; pricing?: TokenPrice }
+export interface TitleRequest { cwd: string; model: string; effort: string; input: string }
 export type TitleSource = 'provisional' | 'fork' | 'generated' | 'manual' | 'existing';
 export interface TaskRecord {
   id: string;
   threadId?: string;
   modelProvider?: string;
-  cost?: TaskCost;
   title: string;
   titleSource?: TitleSource;
   titleGenerationAttempted?: boolean;

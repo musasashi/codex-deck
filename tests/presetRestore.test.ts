@@ -5,11 +5,12 @@ import { AppServerClient } from '../src/appServer/client';
 import { JsonRpcPeer } from '../src/appServer/rpc';
 import { TaskManager, readTaskRecords } from '../src/core/taskManager';
 import { object, type JsonObject, type SettingsPreset } from '../src/core/types';
+import { chatgptAccount } from './helpers';
 
 const presets: SettingsPreset[] = [
-  { model: 'gpt-5.6-terra', effort: 'high', mode: 'auto-review' },
-  { model: 'gpt-5.6-sol', effort: 'xhigh', mode: 'auto-review' },
-  { model: 'gpt-6-astra', effort: 'max', mode: 'auto-review' },
+  { model: 'fixture-first', effort: 'high', mode: 'auto-review' },
+  { model: 'fixture-selected', effort: 'xhigh', mode: 'auto-review' },
+  { model: 'fixture-default', effort: 'max', mode: 'auto-review' },
 ];
 
 for (const scenario of ['selected preset', 'fork', 'saved task without overrides', 'history', 'pending preset change'] as const) {
@@ -27,6 +28,7 @@ for (const scenario of ['selected preset', 'fork', 'saved task without overrides
     server.handleRequest = async ({ method, params: raw }) => {
       const params = object(raw);
       if (method === 'initialize' || method === 'thread/name/set') return {};
+      if (method === 'account/read') return chatgptAccount;
       if (method === 'model/list') return { data: presets.map(preset => ({ model: preset.model,
         supportedReasoningEfforts: [{ reasoningEffort: preset.effort }], defaultReasoningEffort: preset.effort,
         isDefault: preset === defaults })) };

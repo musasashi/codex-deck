@@ -1,19 +1,20 @@
 import { array, object, string, messageOf, type ExecutionMode, type Model, type SettingsPreset } from './types';
-import { validatePreset } from './settings';
+import { isExternalModelId, validatePreset } from './settings';
 import { selectionReference } from './selectionReference';
 
 export interface QuestionPreset { id: string; name: string; prompt: string; settings: SettingsPreset }
 export type QuestionPresetMenuItem = Pick<QuestionPreset, 'id' | 'name'>;
 
+function readQuestionPreset(value: unknown): QuestionPreset {
+  const row = object(value), settings = object(row.settings);
+  return { id: string(row.id), name: string(row.name), prompt: string(row.prompt), settings: {
+    model: string(settings.model), effort: string(settings.effort), mode: string(settings.mode) as ExecutionMode,
+    ...(settings.serviceTier !== undefined ? { serviceTier: settings.serviceTier as SettingsPreset['serviceTier'] } : {}),
+  } };
+}
+
 export function readQuestionPresets(value: unknown): QuestionPreset[] {
-  return array(value).map(value => {
-    const row = object(value), settings = object(row.settings);
-    return { id: string(row.id), name: string(row.name), prompt: string(row.prompt), settings: {
-      model: string(settings.model), effort: string(settings.effort), mode: string(settings.mode) as ExecutionMode,
-      ...(settings.serviceTier !== undefined ? { serviceTier: settings.serviceTier as SettingsPreset['serviceTier'] } : {}),
-      ...(settings.pricing !== undefined ? { pricing: settings.pricing as SettingsPreset['pricing'] } : {}),
-    } };
-  });
+  return array(value).map(readQuestionPreset).filter(preset => !isExternalModelId(preset.settings.model));
 }
 
 export function validateQuestionPreset(preset: QuestionPreset, models: Model[]): QuestionPreset {
@@ -27,9 +28,9 @@ export function validateQuestionPreset(preset: QuestionPreset, models: Model[]):
 export function validateQuestionPresets(value: unknown, models: Model[]): QuestionPreset[] {
   if (!Array.isArray(value)) throw new Error('質問プリセットを配列で指定してください。');
   const ids = new Set<string>();
-  return readQuestionPresets(value).map((preset, index) => {
+  return value.map((raw, index) => {
     try {
-      const result = validateQuestionPreset(preset, models);
+      const result = validateQuestionPreset(readQuestionPreset(raw), models);
       if (ids.has(result.id)) throw new Error('質問プリセットのIDが重複しています。');
       ids.add(result.id);
       return result;

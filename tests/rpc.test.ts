@@ -1,14 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
+import { displayName, version } from '../package.json';
 import { AppServerClient, decodeThread } from '../src/appServer/client';
 import { JsonRpcPeer, RpcError } from '../src/appServer/rpc';
 import { MAX_MESSAGE_BYTES } from '../src/appServer/limits';
 import { TaskManager } from '../src/core/taskManager';
 import { DEFAULT_PRESET } from '../src/core/settings';
 import { object } from '../src/core/types';
-import { deferred } from './helpers';
-import { validateProviders } from '../src/core/providers';
+import { chatgptAccount, deferred, externalModelIds } from './helpers';
 import type { RunSettings } from '../src/core/types';
 
 function harness() {
@@ -21,7 +21,24 @@ function harness() {
   return { peer, input, output, messages, send, tick };
 }
 
-test('large image messages survive fragmented UTF-8 framing above the former 32MiB limit', async () => {
+async function allowChatGPT(h: ReturnType<typeof harness>) {
+  await h.tick();
+  const request = h.messages.at(-1)!;
+  assert.equal(request.method, 'account/read');
+  h.send({ id: request.id, result: chatgptAccount });
+  await h.tick();
+}
+
+async function confirmOpenAIThread(h: ReturnType<typeof harness>, threadId: string) {
+  await h.tick();
+  const request = h.messages.at(-1)!;
+  assert.equal(request.method, 'thread/read');
+  assert.deepEqual(request.params, { threadId, includeTurns: false });
+  h.send({ id: request.id, result: { thread: { id: threadId, modelProvider: 'openai' } } });
+  await h.tick();
+}
+
+test('large image payloads and Japanese text round-trip through fragmented UTF-8 frames', async () => {
   const h = harness();
   const image = `data:image/png;base64,${'A'.repeat(33 * 1024 * 1024)}`;
   const request = h.peer.request('turn/start', { input: [{ type: 'image', url: image }] });
@@ -48,6 +65,7 @@ test('Fast and Standard overrides follow new, resumed, forked and subsequent tur
   const server = new JsonRpcPeer(h.output, h.input);
   let tier: string | null = 'priority';
   server.handleRequest = async ({ method, params: raw }) => {
+    if (method === 'account/read') return chatgptAccount;
     const params = object(raw);
     if (method === 'turn/start') return { turn: { id: 'turn', status: 'completed' } };
     if (method.startsWith('thread/')) {
@@ -80,29 +98,63 @@ test('Fast and Standard overrides follow new, resumed, forked and subsequent tur
   } finally { client.detach(); h.peer.close(); server.close(); }
 });
 
-test('Codex Fast overrides are cleared for HF and external Responses API threads and turns', async () => {
-  const h = harness();
-  const providers = validateProviders([{ id: 'local', name: 'Local API', baseUrl: 'http://localhost/v1', models: [{ id: 'model' }] }]);
-  const client = new AppServerClient(() => providers), server = new JsonRpcPeer(h.output, h.input);
-  let modelProvider: unknown;
-  server.handleRequest = async ({ method, params: raw }) => {
-    const params = object(raw);
-    if (method === 'thread/start') {
-      modelProvider = params.modelProvider;
-      return { thread: { id: 'external', modelProvider }, model: params.model, serviceTier: null };
-    }
-    if (method === 'turn/start') return { turn: { id: 'turn', status: 'completed' } };
+test('a cached thread and catalog cannot run inference after losing ChatGPT authentication', async () => {
+  const h = harness(), client = new AppServerClient(), server = new JsonRpcPeer(h.output, h.input);
+  let account: unknown = chatgptAccount.account;
+  server.handleRequest = async ({ method }) => {
+    if (method === 'account/read') return { account, requiresOpenaiAuth: true };
+    if (method === 'model/list') return { data: [{ model: 'native', isDefault: true }] };
+    if (method === 'thread/start') return { thread: { id: 'native-thread', modelProvider: 'openai' } };
     return {};
   };
   try {
     await client.connect(h.peer);
-    for (const model of ['hf:org/model', 'responses:local:model']) {
-      const settings: RunSettings = { model, mode: 'default', serviceTier: 'fast' };
-      await client.startThread('/project', settings);
-      assert.equal(object(h.messages.at(-1)!.params).serviceTier, null);
-      await client.startTurn('external', [], settings, 'message');
-      assert.equal(object(h.messages.at(-1)!.params).serviceTier, null);
+    await client.listModels();
+    const thread = await client.startThread('/project');
+    const attempts = [
+      () => client.startThread('/project'), () => client.resumeThread(thread.id), () => client.forkThread(thread.id),
+      () => client.startTurn(thread.id, [], { mode: 'default' }, 'test'), () => client.steerTurn(thread.id, 'turn', []),
+      () => client.review(thread.id, {}), () => client.compactThread(thread.id), () => client.readUsage(),
+      () => client.consumeResetCredit('fixture', 'fixture'),
+      () => client.generateTitle({ cwd: '/project', model: 'latest', effort: 'lowest', input: 'title' }, new AbortController().signal),
+      () => client.listModels(true),
+    ];
+    for (account of [null, { type: 'apiKey' }, { type: 'unknown' }]) {
+      const offset = h.messages.length;
+      for (const attempt of attempts) await assert.rejects(attempt(), /ChatGPTでサインイン/);
+      assert.ok(h.messages.slice(offset).every(message => ['account/read', 'config/read'].includes(String(message.method))));
     }
+  } finally { client.detach(); h.peer.close(); server.close(); }
+});
+
+test('external or unidentified threads cannot expose messages or start work', async () => {
+  const h = harness(), client = new AppServerClient(), server = new JsonRpcPeer(h.output, h.input);
+  let provider: string | undefined, effective: string | undefined;
+  server.handleRequest = async ({ method, params }) => {
+    if (method === 'thread/read') return { thread: { id: object(params).threadId, modelProvider: provider }, modelProvider: effective };
+    return {};
+  };
+  try {
+    await client.connect(h.peer);
+    for ([provider, effective] of [['custom'], [undefined], ['openai', 'custom']]) {
+      const id = 'stored';
+      const offset = h.messages.length;
+      for (const attempt of [
+        () => client.checkThread(id), () => client.readThread(id), () => client.resumeThread(id), () => client.forkThread(id),
+        () => client.startTurn(id, [], { mode: 'default' }, 'test'), () => client.steerTurn(id, 'turn', []),
+        () => client.review(id, {}), () => client.compactThread(id),
+        () => client.renameThread(id, 'new name'), () => client.archiveThread(id), () => client.unarchiveThread(id),
+        () => client.deleteThread(id), () => client.interruptTurn(id, 'turn'),
+      ]) await assert.rejects(attempt(), /この会話はCodex Deckで開けません/);
+      for (const request of h.messages.slice(offset)) {
+        assert.equal(request.method, 'thread/read');
+        assert.deepEqual(request.params, { threadId: id, includeTurns: false });
+      }
+    }
+    for (const model of externalModelIds) {
+      await assert.rejects(client.startThread('/project', { model, mode: 'default' }), /モデル/);
+    }
+    assert.equal(h.messages.some(message => message.method === 'thread/start'), false);
   } finally { client.detach(); h.peer.close(); server.close(); }
 });
 
@@ -111,19 +163,19 @@ test('reset credit redemption uses only the explicitly selected ID and preserves
   const h = harness(); const client = new AppServerClient();
   const connecting = client.connect(h.peer); h.send({ id: h.messages[0]!.id, result: {} }); await connecting;
   try {
-    const reading = client.readUsage();
+    const reading = client.readUsage(); await allowChatGPT(h);
     assert.equal(h.messages.at(-1)!.method, 'account/rateLimits/read');
     h.send({ id: h.messages.at(-1)!.id, result: { rateLimitResetCredits: { availableCount: 1, credits: null } } });
     assert.equal((await reading).resetCredits?.availableCount, 1);
     assert.equal(h.messages.filter(message => message.method === 'account/rateLimitResetCredit/consume').length, 0);
     for (const outcome of ['reset', 'nothingToReset', 'noCredit', 'alreadyRedeemed']) {
-      const consuming = client.consumeResetCredit('fake-credit', 'fake-idempotency-key');
+      const consuming = client.consumeResetCredit('fake-credit', 'fake-idempotency-key'); await allowChatGPT(h);
       const request = h.messages.at(-1)!;
       assert.equal(request.method, 'account/rateLimitResetCredit/consume');
       assert.deepEqual(request.params, { creditId: 'fake-credit', idempotencyKey: 'fake-idempotency-key' });
       h.send({ id: request.id, result: { outcome } }); assert.equal(await consuming, outcome);
     }
-    const unknown = client.consumeResetCredit('fake-credit', 'fake-idempotency-key');
+    const unknown = client.consumeResetCredit('fake-credit', 'fake-idempotency-key'); await allowChatGPT(h);
     h.send({ id: h.messages.at(-1)!.id, result: { outcome: 'future' } });
     await assert.rejects(unknown, /使用結果を確認できません/);
   } finally { client.detach(); h.peer.close(); }
@@ -160,11 +212,12 @@ test('broken framing, disconnection and RPC errors reject outstanding requests',
   await assert.rejects(h.peer.request('late'), /接続/);
 });
 
-test('initialization completes before initialized and enables collaboration mode fields', async () => {
+test('initialization identifies the installed extension and negotiates capabilities before initialized', async () => {
   const h = harness(); const client = new AppServerClient();
   const connecting = client.connect(h.peer);
   const initialize = h.messages[0]!;
-  assert.equal(initialize.method, 'initialize'); assert.deepEqual(object(initialize.params).capabilities, { experimentalApi: true });
+  assert.equal(initialize.method, 'initialize');
+  assert.deepEqual(initialize.params, { clientInfo: { name: 'codex_deck', title: displayName, version }, capabilities: { experimentalApi: true } });
   assert.equal(h.messages.length, 1);
   h.send({ id: initialize.id, result: { userAgent: 'fake', future: true } });
   await connecting;
@@ -200,8 +253,9 @@ test('title generation uses the shared connection without exposing its turns or 
   const events: import('../src/core/types').ServerEvent[] = [];
   client.events.subscribe(event => events.push(event));
   server.handleRequest = async ({ method }) => {
+    if (method === 'account/read') return chatgptAccount;
     if (method === 'model/list') return { data: [{ model: 'title-model', isDefault: true, supportedReasoningEfforts: [{ reasoningEffort: 'low' }], defaultReasoningEffort: 'low' }], nextCursor: null };
-    if (method === 'thread/start') return { thread: { id: 'title-thread' } };
+    if (method === 'thread/start') return { thread: { id: 'title-thread', modelProvider: 'openai' } };
     if (method === 'turn/start') return { turn: { id: 'title-turn', status: 'inProgress' } };
     return {};
   };
@@ -270,7 +324,8 @@ test('tool questions validate all answers, preserve nonblocking input, and allow
 test('models and reasoning options are obtained across pages without fixed names', async () => {
   const h = harness(); const client = new AppServerClient();
   const connecting = client.connect(h.peer); h.send({ id: h.messages[0]!.id, result: {} }); await connecting;
-  const listing = client.listModels();
+  const listing = client.listModels(); await allowChatGPT(h);
+  assert.deepEqual(h.messages.at(-1)?.params, { modelProvider: 'openai', includeHidden: false, limit: 100 });
   h.send({ id: h.messages.at(-1)!.id, result: { data: [{ model: 'future-model', displayName: 'Future', supportedReasoningEfforts: [{ reasoningEffort: 'new-effort', description: 'new' }], upgrade: 'another-new-model', isDefault: true, extra: 123 }], nextCursor: 'page2' } });
   await h.tick();
   assert.equal(object(h.messages.at(-1)!.params).cursor, 'page2');
@@ -288,9 +343,10 @@ test('first sends share the background model request and reuse the loaded catalo
   const catalog = deferred<unknown>();
   let threadCount = 0;
   server.handleRequest = async ({ method, params }) => {
+    if (method === 'account/read') return chatgptAccount;
     if (method === 'initialize') return {};
     if (method === 'model/list') return catalog.promise;
-    if (method === 'thread/start') return { thread: { id: `thread-${++threadCount}`, cwd: '/project', turns: [] } };
+    if (method === 'thread/start') return { thread: { id: `thread-${++threadCount}`, modelProvider: 'openai', cwd: '/project', turns: [] } };
     if (method === 'turn/start') return { turn: { id: `turn-${threadCount}`, status: 'completed', items: [
       { id: `user-${threadCount}`, type: 'userMessage', clientId: object(params).clientUserMessageId, content: object(params).input },
     ] } };
@@ -319,8 +375,8 @@ test('model refresh supersedes an older in-flight request and account changes in
   const connecting = client.connect(h.peer); h.send({ id: h.messages[0]!.id, result: {} }); await connecting;
   const result = (model: string) => ({ data: [{ model, supportedReasoningEfforts: [] }], nextCursor: null });
   try {
-    const old = client.listModels(); const oldId = h.messages.at(-1)!.id;
-    const refreshed = client.listModels(true); const newId = h.messages.at(-1)!.id;
+    const old = client.listModels(); await allowChatGPT(h); const oldId = h.messages.at(-1)!.id;
+    const refreshed = client.listModels(true); await allowChatGPT(h); const newId = h.messages.at(-1)!.id;
     const concurrent = client.listModels();
     assert.notEqual(oldId, newId);
     h.send({ id: newId, result: result('new') });
@@ -332,7 +388,7 @@ test('model refresh supersedes an older in-flight request and account changes in
     assert.equal(h.messages.filter(message => message.method === 'model/list').length, 2);
     for (const notification of ['account/updated', 'account/login/completed']) {
       h.send({ method: notification, params: { success: true } });
-      const listing = client.listModels();
+      const listing = client.listModels(); await allowChatGPT(h);
       h.send({ id: h.messages.at(-1)!.id, result: result(notification) });
       assert.equal((await listing)[0]?.id, notification);
     }
@@ -344,10 +400,10 @@ test('failed model loads can retry, empty catalogs are cached, and reconnects di
   const h = harness(); const next = harness(); const client = new AppServerClient();
   const connecting = client.connect(h.peer); h.send({ id: h.messages[0]!.id, result: {} }); await connecting;
   try {
-    const failed = client.listModels();
+    const failed = client.listModels(); await allowChatGPT(h);
     h.send({ id: h.messages.at(-1)!.id, error: { code: -1, message: 'temporary error' } });
     await assert.rejects(failed, /temporary error/);
-    const retry = client.listModels();
+    const retry = client.listModels(); await allowChatGPT(h);
     h.send({ id: h.messages.at(-1)!.id, result: { data: [], nextCursor: null } });
     assert.deepEqual(await retry, []);
     assert.deepEqual(await client.listModels(), []);
@@ -355,7 +411,7 @@ test('failed model loads can retry, empty catalogs are cached, and reconnects di
     h.peer.close();
     await assert.rejects(client.listModels(), /接続/);
     const reconnecting = client.connect(next.peer); next.send({ id: next.messages[0]!.id, result: {} }); await reconnecting;
-    const listing = client.listModels();
+    const listing = client.listModels(); await allowChatGPT(next);
     next.send({ id: next.messages.at(-1)!.id, result: { data: [{ model: 'reconnected' }], nextCursor: null } });
     assert.equal((await listing)[0]?.id, 'reconnected');
     assert.equal(next.messages.filter(message => message.method === 'model/list').length, 1);
@@ -368,15 +424,16 @@ test('history pages use the state database and preserve cursors and archived fil
   try {
     const listing = client.listThreads();
     assert.equal(h.messages.at(-1)!.method, 'thread/list');
-    assert.deepEqual(h.messages.at(-1)!.params, { limit: 50, archived: false, useStateDbOnly: true });
-    h.send({ id: h.messages.at(-1)!.id, result: { data: [{ id: 'recent', name: 'Recent chat', cwd: '/project', updatedAt: 123 }], nextCursor: 'next-page' } });
+    assert.deepEqual(h.messages.at(-1)!.params, { limit: 50, archived: false, modelProviders: ['openai'], useStateDbOnly: true });
+    h.send({ id: h.messages.at(-1)!.id, result: { data: [{ id: 'recent', name: 'Recent chat', modelProvider: 'openai', cwd: '/project', updatedAt: 123 }, { id: 'external', modelProvider: 'custom' }, { id: 'unknown' }], nextCursor: 'next-page' } });
     const page = await listing;
+    assert.deepEqual(page.threads.map(thread => thread.id), ['recent']);
     assert.equal(page.threads[0]?.title, 'Recent chat');
     assert.equal(page.threads[0]?.cwd, '/project');
     assert.equal(page.cursor, 'next-page');
 
     const archived = client.listThreads(page.cursor, true);
-    assert.deepEqual(h.messages.at(-1)!.params, { limit: 50, archived: true, useStateDbOnly: true, cursor: 'next-page' });
+    assert.deepEqual(h.messages.at(-1)!.params, { limit: 50, archived: true, modelProviders: ['openai'], useStateDbOnly: true, cursor: 'next-page' });
     h.send({ id: h.messages.at(-1)!.id, result: { data: [], nextCursor: null } });
     assert.deepEqual(await archived, { threads: [], cursor: undefined });
   } finally { h.peer.close(); client.detach(); }
@@ -389,6 +446,7 @@ test('permanent deletion sends the thread ID and handles deletion notifications'
     const events: unknown[] = [];
     client.events.subscribe(event => events.push(event));
     const deleting = client.deleteThread('root');
+    await confirmOpenAIThread(h, 'root');
     assert.equal(h.messages.at(-1)!.method, 'thread/delete');
     assert.deepEqual(h.messages.at(-1)!.params, { threadId: 'root' });
     h.send({ id: h.messages.at(-1)!.id, result: {} }); await deleting;
@@ -404,14 +462,15 @@ test('a new paginated thread sends the first user message before requesting stor
   const manager = new TaskManager(client, { async save() {} }, [], { schedule: false });
   let turnCount = 0;
   server.handleRequest = async ({ method, params }) => {
+    if (method === 'account/read') return chatgptAccount;
     if (method === 'initialize') return {};
     if (method === 'model/list') return {
       data: [{ model: 'test-model', isDefault: true, supportedReasoningEfforts: [{ reasoningEffort: 'high' }], defaultReasoningEffort: 'high' }], nextCursor: null,
     };
     if (method === 'thread/start') {
-      assert.deepEqual(params, { cwd: '/project', model: 'test-model', config: { model_reasoning_effort: 'high' }, sandbox: 'workspace-write', approvalPolicy: 'on-request', approvalsReviewer: 'auto_review' });
+      assert.deepEqual(params, { cwd: '/project', modelProvider: 'openai', model: 'test-model', config: { model_reasoning_effort: 'high' }, sandbox: 'workspace-write', approvalPolicy: 'on-request', approvalsReviewer: 'auto_review' });
       return {
-        thread: { id: 'new-thread', cwd: '/project', status: { type: 'idle' }, historyMode: 'paginated', turns: [] },
+        thread: { id: 'new-thread', modelProvider: 'openai', cwd: '/project', status: { type: 'idle' }, historyMode: 'paginated', turns: [] },
         model: 'test-model', reasoningEffort: 'high', instructionSources: ['/project/AGENTS.md'],
         sandbox: { type: 'workspaceWrite' }, approvalPolicy: 'on-request', approvalsReviewer: 'auto_review',
       };
@@ -441,7 +500,7 @@ test('a new paginated thread sends the first user message before requesting stor
     assert.deepEqual(task.turns[0]?.items[0]?.data.content, [{ type: 'text', text: 'test', text_elements: [] }]);
     await manager.send(task.id, 'follow-up');
     assert.equal(task.turns.length, 2);
-    assert.deepEqual(h.messages.map(message => message.method), ['initialize', 'initialized', 'model/list', 'thread/start', 'turn/start', 'turn/start']);
+    assert.deepEqual(h.messages.map(message => message.method), ['initialize', 'initialized', 'account/read', 'model/list', 'account/read', 'thread/start', 'account/read', 'turn/start', 'account/read', 'turn/start']);
   } finally { manager.dispose(); await manager.flush(); client.detach(); h.peer.close(); server.close(); }
 });
 
@@ -449,13 +508,14 @@ test('message forks request history through the selected turn while ordinary for
   const h = harness(); const client = new AppServerClient();
   const server = new JsonRpcPeer(h.output, h.input);
   server.handleRequest = async ({ method, params }) => {
+    if (method === 'account/read') return chatgptAccount;
     if (method === 'initialize') return {};
-    if (method === 'thread/read') return { thread: { id: 'source' } };
+    if (method === 'thread/read') return { thread: { id: 'source', modelProvider: 'openai' } };
     assert.equal(method, 'thread/fork');
     assert.equal(object(params).threadId, 'source');
     const lastTurnId = object(params).lastTurnId;
-    assert.deepEqual(params, { threadId: 'source', ...(lastTurnId ? { lastTurnId: 'earlier' } : {}) });
-    return { thread: { id: 'forked', status: { type: 'idle' }, turns: (lastTurnId ? ['earlier'] : ['earlier', 'later']).map(id => ({ id, status: 'completed', items: [] })) } };
+    assert.deepEqual(params, { threadId: 'source', modelProvider: 'openai', ...(lastTurnId ? { lastTurnId: 'earlier' } : {}) });
+    return { thread: { id: 'forked', modelProvider: 'openai', status: { type: 'idle' }, turns: (lastTurnId ? ['earlier'] : ['earlier', 'later']).map(id => ({ id, status: 'completed', items: [] })) } };
   };
   try {
     await client.connect(h.peer);
@@ -471,6 +531,7 @@ for (const method of ['resumeThread', 'readThread', 'forkThread'] as const) {
     const h = harness(); const client = new AppServerClient();
     const server = new JsonRpcPeer(h.output, h.input);
     server.handleRequest = async ({ method: request, params }) => {
+      if (request === 'account/read') return chatgptAccount;
       if (request === 'initialize') return {};
       if (request === 'thread/turns/list') {
         const cursor = object(params).cursor;
@@ -478,7 +539,7 @@ for (const method of ['resumeThread', 'readThread', 'forkThread'] as const) {
         const id = cursor ? 'newer-turn' : 'older-turn';
         return { data: [{ id, status: 'completed', items: [{ id: `${id}-agent`, type: 'agentMessage', text: id }] }], nextCursor: cursor ? null : 'next-page' };
       }
-      return { thread: { id: 'stored-thread', status: { type: 'idle' }, historyMode: 'paginated', turns: [] } };
+      return { thread: { id: 'stored-thread', modelProvider: 'openai', status: { type: 'idle' }, historyMode: 'paginated', turns: [] } };
     };
     try {
       await client.connect(h.peer);
@@ -518,6 +579,7 @@ test('explicit skill input carries the documented text mention and preserves dyn
   const h = harness(); const client = new AppServerClient();
   const connecting = client.connect(h.peer); h.send({ id: h.messages[0]!.id, result: {} }); await connecting;
   const sending = client.startTurn('thread', [{ type: 'text', text: 'Use this skill' }, { type: 'skill', name: 'sample', path: '/skills/sample/SKILL.md' }], { mode: 'default', model: 'new-model', effort: 'new-effort' }, 'client-id');
+  await confirmOpenAIThread(h, 'thread'); await allowChatGPT(h);
   const params = object(h.messages.at(-1)!.params);
   assert.equal(params.model, 'new-model'); assert.equal(params.effort, 'new-effort');
   assert.equal(params.sandboxPolicy, undefined);
@@ -531,11 +593,12 @@ test('clipboard image data reaches both turn/start and turn/steer unchanged', as
   const connecting = client.connect(h.peer); h.send({ id: h.messages[0]!.id, result: {} }); await connecting;
   const input = [{ type: 'image' as const, url: 'data:image/png;base64,YQ==' }];
   const starting = client.startTurn('thread', input, { mode: 'default' }, 'image-message');
+  await confirmOpenAIThread(h, 'thread'); await allowChatGPT(h);
   assert.equal(h.messages.at(-1)?.method, 'turn/start');
   assert.deepEqual(object(h.messages.at(-1)!.params).input, input);
   h.send({ id: h.messages.at(-1)!.id, result: { turn: { id: 'turn', status: 'inProgress', items: [] } } });
   await starting;
-  const steering = client.steerTurn('thread', 'turn', input);
+  const steering = client.steerTurn('thread', 'turn', input); await allowChatGPT(h);
   assert.equal(h.messages.at(-1)?.method, 'turn/steer');
   assert.deepEqual(object(h.messages.at(-1)!.params).input, input);
   h.send({ id: h.messages.at(-1)!.id, result: {} });
@@ -546,8 +609,9 @@ test('plan and default modes use built-in instructions and preserve the resumed 
   const h = harness(); const client = new AppServerClient();
   const server = new JsonRpcPeer(h.output, h.input);
   server.handleRequest = async ({ method }) => {
+    if (method === 'account/read') return chatgptAccount;
     if (method === 'thread/read') return { thread: { id: 'thread', modelProvider: 'openai' } };
-    if (method === 'thread/resume') return { thread: { id: 'thread', turns: [] }, model: 'session-model', reasoningEffort: 'high' };
+    if (method === 'thread/resume') return { thread: { id: 'thread', modelProvider: 'openai', turns: [] }, model: 'session-model', reasoningEffort: 'high' };
     if (method === 'turn/start') return { turn: { id: 'turn', status: 'completed', items: [] } };
     return {};
   };
@@ -570,19 +634,6 @@ test('plan and default modes use built-in instructions and preserve the resumed 
     const params = object(h.messages.at(-1)!.params);
     assert.deepEqual(params.collaborationMode, { mode: 'default', settings: { model: 'changed-model', reasoning_effort: 'low', developer_instructions: null } });
     assert.equal(params.sandboxPolicy, undefined);
-  } finally { client.detach(); h.peer.close(); server.close(); }
-});
-
-test('plan mode uses external provider model IDs without inheriting Codex reasoning effort', async () => {
-  const h = harness(); const client = new AppServerClient();
-  const server = new JsonRpcPeer(h.output, h.input);
-  server.handleRequest = async ({ method }) => method === 'turn/start' ? { turn: { id: 'turn', status: 'completed', items: [] } } : {};
-  try {
-    await client.connect(h.peer);
-    await client.startTurn('hf', [], { mode: 'read-only', model: 'hf:org/model:provider', effort: 'default', collaborationMode: 'plan' }, 'hf');
-    assert.deepEqual(object(h.messages.at(-1)!.params).collaborationMode, {
-      mode: 'plan', settings: { model: 'org/model:provider', reasoning_effort: null, developer_instructions: null },
-    });
   } finally { client.detach(); h.peer.close(); server.close(); }
 });
 
@@ -613,8 +664,9 @@ test('permission presets route approvals correctly and inherited settings omit o
   const h = harness(); const client = new AppServerClient();
   const connecting = client.connect(h.peer); h.send({ id: h.messages[0]!.id, result: {} }); await connecting;
   try {
+    const checking = client.checkThread('thread'); await confirmOpenAIThread(h, 'thread'); await checking;
     for (const mode of ['auto-review', 'workspace-write', 'danger-full-access', 'default'] as const) {
-      const sending = client.startTurn('thread', [{ type: 'text', text: '$sample を使用' }, { type: 'skill', name: 'sample', path: '/skills/SKILL.md' }], { mode }, 'id');
+      const sending = client.startTurn('thread', [{ type: 'text', text: '$sample を使用' }, { type: 'skill', name: 'sample', path: '/skills/SKILL.md' }], { mode }, 'id'); await allowChatGPT(h);
       const params = object(h.messages.at(-1)!.params);
       assert.equal(params.approvalsReviewer, mode === 'default' ? undefined : mode === 'auto-review' ? 'auto_review' : 'user');
       assert.equal(params.approvalPolicy, mode === 'default' ? undefined : mode === 'danger-full-access' ? 'never' : 'on-request');
