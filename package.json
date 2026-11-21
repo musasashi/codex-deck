@@ -3,7 +3,7 @@
   "displayName": "Codex Deck",
   "icon": "media/icon.png",
   "description": "ChatGPTの利用枠でWSL内の公式Codex CLIを実行し、タスクをエディタタブで管理するVS Code拡張機能",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "publisher": "codex-deck",
   "private": true,
   "engines": {
