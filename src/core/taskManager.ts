@@ -1,19 +1,26 @@
 import { randomUUID } from 'node:crypto';
 import { evaluateUsage } from './usage';
-import { readTitleEffort, resolveRunSettings } from './settings';
-import { isHuggingFaceModel, isHuggingFaceTask } from './huggingFace';
-import { isExternalModel, isExternalTask, sameTaskProvider } from './providers';
-import { addTaskCost, emptyTaskCost, type TokenPrice } from './cost';
+import { isExternalModelId, readTitleEffort, resolveRunSettings } from './settings';
 import { messageQuestions, questionAnswerText } from './questions';
 import { referencedTaskInput } from './taskReferences';
 import { FORK_TITLE, provisionalTitle, titleInput } from './taskTitle';
 import { IMAGE_FORMAT_ERROR, isImageDataUrl, isImageStrokes } from './attachments';
-import { array, object, string, messageOf, isTaskRunning, Signal, type Attachment, type CollaborationMode, type Gateway, type ImageStroke, type Input, type PendingRequest, type RequestAnswer, type RunSettings, type ServerEvent, type Task, type TaskRecord, type Thread, type TitleSource, type Turn, type Usage } from './types';
+import { array, object, string, messageOf, isTaskRunning, OPENAI_PROVIDER, Signal, UnsupportedThreadError, type Attachment, type CollaborationMode, type Gateway, type ImageStroke, type Input, type PendingRequest, type RequestAnswer, type RunSettings, type ServerEvent, type Task, type TaskRecord, type Thread, type TitleSource, type Turn, type Usage } from './types';
 
 export const CONTINUE_MESSAGE = '使用量上限で中断した作業を直前の状態から続行してください。';
 const POLL_MS = 10 * 60 * 1000;
 export interface TaskStore { save(records: TaskRecord[]): Promise<void> }
-export interface ManagerOptions { now?: () => number; schedule?: boolean; titleModel?: (cwd: string) => string; titleEffort?: (cwd: string) => string; titlePricing?: (cwd: string) => TokenPrice | undefined; referenceTempRoot?: string }
+export interface ManagerOptions { now?: () => number; schedule?: boolean; titleModel?: (cwd: string) => string; titleEffort?: (cwd: string) => string; referenceTempRoot?: string }
+
+function taskRecord(task: TaskRecord): TaskRecord {
+  const { model, effort, mode, serviceTier, collaborationMode } = task.settings;
+  return structuredClone({
+    id: task.id, threadId: task.threadId, modelProvider: task.modelProvider, title: task.title, cwd: task.cwd, open: task.open, autoResume: task.autoResume,
+    titleSource: task.titleSource, titleGenerationAttempted: task.titleGenerationAttempted, waiting: task.waiting, lastTurn: task.lastTurn,
+    unreadTurnId: task.unreadTurnId, resolvedQuestionIds: task.resolvedQuestionIds, claims: task.claims, suppressedTurnId: task.suppressedTurnId,
+    settings: { mode, ...(model && { model }), ...(effort && { effort }), ...(serviceTier && { serviceTier }), ...(collaborationMode && { collaborationMode }) },
+  });
+}
 
 export class TaskManager {
   readonly changed = new Signal<Task | undefined>();
@@ -42,6 +49,7 @@ export class TaskManager {
   constructor(readonly gateway: Gateway, private readonly store: TaskStore, records: TaskRecord[] = [], private readonly options: ManagerOptions = {}) {
     this.now = options.now ?? Date.now;
     for (const record of records) {
+      if ((record.modelProvider !== undefined && record.modelProvider !== OPENAI_PROVIDER) || isExternalModelId(record.settings.model)) continue;
       const task = this.fromRecord(record);
       this.tasks.set(task.id, task);
       if (task.threadId) this.byThread.set(task.threadId, task);
@@ -52,7 +60,7 @@ export class TaskManager {
     let titleSource = record.titleSource ?? (record.threadId ? 'existing' : 'provisional');
     // Recover forks whose placeholder was saved after an unsuccessful summary.
     if (record.threadId && record.title === FORK_TITLE && (titleSource === 'provisional' || titleSource === 'existing')) titleSource = 'fork';
-    return { ...structuredClone(record), titleSource, status: record.threadId ? 'disconnected' : 'idle', turns: [], requests: [], attachments: [], busy: false, hydrated: !record.threadId, instructionSources: [] };
+    return { ...taskRecord(record), titleSource, status: record.threadId ? 'disconnected' : 'idle', turns: [], requests: [], attachments: [], busy: false, hydrated: !record.threadId, instructionSources: [] };
   }
   get openTasks(): Task[] { return [...this.tasks.values()].filter(task => task.open); }
   get(id: string): Task {
@@ -62,7 +70,6 @@ export class TaskManager {
   }
   create(cwd: string, settings: RunSettings = { mode: 'default' }): Task {
     const task = this.fromRecord({ id: randomUUID(), title: '新規タスク', cwd, open: true, autoResume: false, claims: [], settings });
-    if (isExternalTask(task)) task.cost = emptyTaskCost();
     this.tasks.set(task.id, task);
     this.touch(task, true);
     this.armTimer(true);
@@ -90,14 +97,10 @@ export class TaskManager {
     const source = this.get(id);
     const threadId = await this.ensureThread(source);
     const settings = { ...source.settings, model: source.settings.model ?? source.effectiveModel,
-      effort: isExternalTask(source) ? source.settings.effort : source.settings.effort ?? source.effectiveEffort };
+      effort: source.settings.effort ?? source.effectiveEffort };
     const thread = await this.gateway.forkThread(threadId, { lastTurnId, settings });
     const task = this.adoptThread({ ...thread, name: undefined, title: FORK_TITLE });
     task.settings = { ...settings };
-    if (isExternalTask(task)) {
-      task.effectiveEffort = settings.effort === 'default' ? undefined : settings.effort;
-      task.cost = emptyTaskCost(false, thread.turns.map(turn => turn.id));
-    }
     task.titleSource = 'fork';
     // Persist the fallback so history and reloads also stop using the inherited name.
     try { await this.writeTitle(task, task.title, 'fork'); }
@@ -152,6 +155,7 @@ export class TaskManager {
         this.armTimer(true);
       } catch (error) {
         if (!this.tasks.has(task.id)) return;
+        if (error instanceof UnsupportedThreadError) { this.removeThread(threadId); throw error; }
         const queued = this.hydrations.get(threadId) ?? [];
         this.hydrations.delete(threadId);
         for (const event of queued) this.onEvent(event);
@@ -179,10 +183,8 @@ export class TaskManager {
     task.effectiveModel = thread.model;
     task.modelProvider = thread.modelProvider ?? task.modelProvider;
     task.settings.model ??= thread.model;
-    if (!isExternalTask(task)) task.settings.effort ??= thread.effort;
-    if (isExternalTask(task)) { task.autoResume = false; this.cancel(task); task.cost ??= emptyTaskCost(thread.turns.length > 0, thread.turns.map(turn => turn.id)); }
-    if (isHuggingFaceTask(task)) task.settings.effort = 'default';
-    task.effectiveEffort = isExternalTask(task) ? (task.settings.effort === 'default' ? undefined : task.settings.effort) : thread.effort;
+    task.settings.effort ??= thread.effort;
+    task.effectiveEffort = thread.effort;
     if (thread.serviceTier !== undefined) task.effectiveServiceTier = thread.serviceTier;
     task.effectivePermissionMode = thread.permissionMode ?? task.effectivePermissionMode;
     task.hydrated = true;
@@ -218,7 +220,7 @@ export class TaskManager {
   }
   setAutoResume(id: string, enabled: boolean): void {
     const task = this.get(id);
-    task.autoResume = enabled && task.open && !isExternalTask(task);
+    task.autoResume = enabled && task.open;
     if (!task.autoResume) this.cancel(task);
     else if (task.lastTurn?.error?.kind === 'usageLimitExceeded' && task.lastTurn.status === 'failed' && !task.activeTurnId && !task.busy && task.hydrated) {
       // Explicitly opting in after a stop is a new user decision.
@@ -230,12 +232,8 @@ export class TaskManager {
   }
   updateSettings(id: string, settings: RunSettings): void {
     const task = this.get(id);
-    if (task.threadId && settings.model && !sameTaskProvider(task, settings.model)) {
-      throw new Error('会話の接続先は変更できません。別の接続先を使う場合は新規タスクでプリセットを選択してください。');
-    }
     const collaborationMode = settings.collaborationMode ?? task.settings.collaborationMode;
     task.settings = { ...settings, ...(collaborationMode ? { collaborationMode } : {}) };
-    if (isExternalTask(task)) { task.autoResume = false; this.cancel(task); task.cost ??= emptyTaskCost(!!task.threadId); }
     this.touch(task, true);
   }
   setCollaborationMode(id: string, mode: CollaborationMode): void {
@@ -283,10 +281,7 @@ export class TaskManager {
       try {
         await this.checkpoint();
         if (controller.signal.aborted || this.disposed) return;
-        const configured = this.options.titleModel!(task.cwd);
-        const model = configured === 'latest' && isExternalTask(task) ? task.settings.model ?? task.effectiveModel ?? configured : configured;
-        const name = await this.gateway.generateTitle({ cwd: task.cwd, model,
-          ...(isExternalModel(model) ? { ownerThreadId: task.threadId, pricing: configured === 'latest' ? task.settings.pricing : this.options.titlePricing?.(task.cwd) } : {}),
+        const name = await this.gateway.generateTitle({ cwd: task.cwd, model: this.options.titleModel!(task.cwd),
           effort: readTitleEffort(this.options.titleEffort?.(task.cwd)), input }, controller.signal);
         await this.writeTitle(task, name, 'generated', controller.signal);
       } catch (error) {
@@ -329,7 +324,7 @@ export class TaskManager {
     const run = (async () => {
       if (!task.threadId) {
         if (task.settings.model) {
-          const models = isHuggingFaceModel(task.settings.model) ? [] : await this.gateway.listModels();
+          const models = await this.gateway.listModels();
           task.settings = resolveRunSettings(task.settings, models);
           this.touch(task, true);
         }
@@ -449,7 +444,7 @@ export class TaskManager {
     task.turnError = undefined;
     if (turn.status === 'failed' && turn.error?.kind === 'usageLimitExceeded') {
       task.status = 'limited';
-      if (!isExternalTask(task) && task.open && task.autoResume && task.suppressedTurnId !== turn.id && !task.claims.some(claim => claim.stoppedTurnId === turn.id)) {
+      if (task.open && task.autoResume && task.suppressedTurnId !== turn.id && !task.claims.some(claim => claim.stoppedTurnId === turn.id)) {
         task.waiting ??= { turnId: turn.id, token: randomUUID() };
         task.status = 'waiting';
         this.armTimer(true);
@@ -486,7 +481,7 @@ export class TaskManager {
       // A late turn/start acknowledgement must not erase an intervening retry notification.
       if (task.turnError?.turnId !== turn.id) task.turnError = undefined;
       task.effectiveModel = task.settings.model ?? task.effectiveModel;
-      task.effectiveEffort = isExternalTask(task) ? (task.settings.effort === 'default' ? undefined : task.settings.effort) : task.settings.effort ?? task.effectiveEffort;
+      task.effectiveEffort = task.settings.effort ?? task.effectiveEffort;
       if (task.settings.serviceTier) task.effectiveServiceTier = task.settings.serviceTier === 'fast' ? 'fast' : null;
       if (task.settings.mode !== 'default') task.effectivePermissionMode = task.settings.mode;
       this.cancel(task);
@@ -593,9 +588,6 @@ export class TaskManager {
         this.touch(task, true); break;
       }
       case 'tokens': task.tokenUsage = event.value; break;
-      case 'cost':
-        if (isExternalTask(task)) { task.cost = addTaskCost(task.cost ?? emptyTaskCost(true), event.sample); this.touch(task, true); }
-        break;
       case 'warning': task.error = event.message; break;
       case 'archived': this.cancelTitle(task.id); this.close(task.id); break;
     }
@@ -688,9 +680,7 @@ export class TaskManager {
     this.timer.unref?.();
   }
   records(): TaskRecord[] {
-    return [...this.tasks.values()].map(task => structuredClone({ id: task.id, threadId: task.threadId, modelProvider: task.modelProvider, title: task.title, cwd: task.cwd, open: task.open, autoResume: task.autoResume,
-      titleSource: task.titleSource, titleGenerationAttempted: task.titleGenerationAttempted, cost: task.cost,
-      waiting: task.waiting, lastTurn: task.lastTurn, unreadTurnId: task.unreadTurnId, resolvedQuestionIds: task.resolvedQuestionIds, claims: task.claims, suppressedTurnId: task.suppressedTurnId, settings: task.settings }));
+    return [...this.tasks.values()].map(taskRecord);
   }
   checkpoint(): Promise<void> {
     const records = this.records();

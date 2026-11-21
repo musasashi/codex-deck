@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { DEFAULT_PRESET, presetEffortOptions, latestModel, nextPresetIndex, readPresets, readTitleEffort, readTitleModel, resolveRunSettings, resolveTitleEffort, titleEffortOptions, validatePreset, validatePresets, validateTitleEffort, validateTitleModel } from '../src/core/settings';
 import { TaskManager } from '../src/core/taskManager';
 import type { Model, RunSettings, SettingsPreset } from '../src/core/types';
-import { deferred, FakeGateway } from './helpers';
+import { deferred, FakeGateway, externalModelIds } from './helpers';
 
 function model(id: string, extra: Partial<Model> = {}): Model {
   return { id, label: id, description: '', efforts: ['low', 'medium', 'high'].map(id => ({ id, description: id })), defaultEffort: 'medium', isDefault: false, inputModalities: ['text'], ...extra };
@@ -108,8 +108,17 @@ test('speed presets retain their selection and cycle independently of reasoning 
   }
   assert.throws(() => validatePreset({ ...DEFAULT_PRESET, serviceTier: 'unsupported' }, models), /速度/);
   assert.deepEqual(validatePreset({ ...DEFAULT_PRESET, serviceTier: '' }, models), DEFAULT_PRESET);
-  assert.deepEqual(validatePreset({ model: 'hf:org/model', effort: 'default', serviceTier: 'fast', mode: 'read-only' }, models),
-    { model: 'hf:org/model', effort: 'default', mode: 'read-only' });
+});
+
+test('stored external presets and title models fall back to subscription options', () => {
+  const native = { ...DEFAULT_PRESET, model: 'native' };
+  for (const model of externalModelIds) {
+    const external = { ...native, model };
+    assert.equal(readTitleModel(model), 'latest');
+    assert.deepEqual(readPresets([external]), [DEFAULT_PRESET]);
+    assert.deepEqual(readPresets([external, native]), [native]);
+    assert.throws(() => validatePreset(external, []), /モデル/);
+  }
 });
 
 test('three presets cycle together, wrap around, and start at the first after unmatched manual settings', () => {

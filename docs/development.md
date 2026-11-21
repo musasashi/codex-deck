@@ -10,20 +10,15 @@ VS CodeからWSLに接続してリポジトリを開き、F5でExtension Develop
 
 ## 検証する
 
-コマンドはWSL内で実行します。
+コマンドはWSL内で実行します。エージェントによるテストはリポジトリの実行規則に従います。[AGENTS.md](../AGENTS.md)
 
 | コマンド | 対象 |
 | --- | --- |
 | `npm run check` | TypeScriptの型チェック |
-| `npm test` | 単体テスト |
-| `npx playwright test` | チャット・設定画面・履歴の操作 |
-| `npm run test:extension` | Extension Hostでの拡張機能 |
-| `npm run test:history` | 履歴の操作 |
-| `npm run test:smoke` | インストール済みCLIとの接続とデータ取得。推論は実行しない |
-| `npm run test:hf` | インストール済みCLIとローカルの模擬HFサーバーで、ツール往復・推論履歴・要約を検証。HFへの外部リクエストは送信しない |
-| `npm run test:responses` | インストール済みCLIとローカルの模擬APIで、接続先登録・認証分離・ストリーミング・ツール往復・要約を検証。外部APIへのリクエストは送信しない |
-
-API残高がなくても実装と模擬APIによるテストを進められます。本番APIとの互換性は、設定画面の「利用可否を確認」で別途確認します。この操作は提供元の料金の対象になります。
+| `npm run build` | 拡張機能とWebviewのビルド |
+| `npm test` | `tests/*.test.ts` の単体テスト。App Serverとの通信、履歴ピッカー、タスク管理など |
+| `npx playwright test` | `tests/webview/` のチャット画面・設定画面の操作 |
+| `npm run test:smoke` | インストール済みの公式CLIとの接続、履歴と設定の取得。ChatGPTでサインイン済みの場合はモデル一覧と利用枠も取得 |
 
 ### 画面テスト
 
@@ -34,31 +29,29 @@ npx playwright install chromium
 npm run build
 ```
 
-既存のブラウザーを使う場合は`CODEX_DECK_CHROMIUM`に実行ファイルを指定します。UIテストの実行規則は[AGENTS.md](../AGENTS.md#uiテスト)を参照してください。
+既存のChromiumを使う場合は `CODEX_DECK_CHROMIUM` に実行ファイルを指定します。
 
-### WSL内でのExtension Host・履歴テスト
+### VS Codeでの統合テスト
+
+手動でVS Codeとの統合を確認する場合は、WSL内でLinux版VS Codeを起動します。`test:extension` はコマンドとタスクタブ、`test:history` は実際の履歴ピッカーでのアーカイブ・復元・削除を検証します。どちらも隔離したワークスペースと模擬App Serverを使います。
 
 ```sh
 xvfb-run -a npm run test:extension
 xvfb-run -a npm run test:history
 ```
 
-これらのテストはWSL内でLinux版VS Codeを直接起動し、隔離した設定と模擬App Serverを使用します。WSL接続のない開発用Extension Hostは、LinuxカーネルのWSL識別情報で判定します。
-
 ## リリースする
 
 リリースは`master`で直接行います。リリース用のブランチやPRは作成しません。
 
-`master`を最新にし、次のどちらかでバージョンを更新します。
+`master` を最新にします。
 
 ```sh
 git switch master
 git pull --ff-only
-npm version minor --no-git-tag-version
-npm version major --no-git-tag-version
 ```
 
-どちらか一方だけを実行します。パッケージ作成時に型チェックとビルドも実行されます。
+バージョンは `npm version minor --no-git-tag-version` または `npm version major --no-git-tag-version` で更新します。パッケージ作成時に型チェックとビルドも実行されます。
 
 バージョン更新を直接`master`へコミットし、パッケージをGitHub Releasesに公開します。
 

@@ -5,9 +5,7 @@ import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import { AppServerClient } from './appServer/client';
 import { StdioConnection } from './appServer/rpc';
-import { appServerEnvironment, requireWslHost } from './appServer/environment';
-import { HuggingFaceProxy } from './appServer/huggingFaceProxy';
-import { ResponsesConnections } from './appServer/responsesConnections';
+import { requireWslHost } from './appServer/environment';
 import { TaskManager, readTaskRecords } from './core/taskManager';
 import { deleteThreadHistory } from './core/threadDeletion';
 import { messageMarkdown, taskMarkdown } from './core/taskCopy';
@@ -17,11 +15,8 @@ import { questionPresetMessage, readQuestionPresets, validateQuestionPreset } fr
 import { IMAGE_FORMAT_ERROR, isImageDataUrl, isImageStrokes, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TEXT_ATTACHMENT_BYTES } from './core/attachments';
 import { configPermissionMode, parseSlashCommand, permissionOptions, permissionPresets, resolveSkillMentions, slashCommands } from './core/composer';
 import { workingDiff } from './core/gitDiff';
-import { isHuggingFaceModel, withHuggingFaceModels } from './core/huggingFace';
-import { isExternalModel, parseResponsesModel, providerModels, readProviders, sameTaskProvider, type ResponsesProvider } from './core/providers';
-import { readTokenPrice } from './core/cost';
 import { availableResetCredits, resetCreditExpiry } from './core/usage';
-import { nextPresetIndex, readPresets, readTitleEffort, readTitleModel, resolveRunSettings, selectedModel, taskPresets, validatePreset, validateServiceTier } from './core/settings';
+import { nextPresetIndex, readPresets, readTitleEffort, readTitleModel, resolveRunSettings, selectedModel, validatePreset, validateServiceTier } from './core/settings';
 import { array, object, string, messageOf, statusLabel, isTaskRunning, type ComposerCatalog, type ExecutionMode, type JsonObject, type Model, type Task } from './core/types';
 import { TaskPanels, TaskTree, type PanelHost } from './ui/panels';
 import { SettingsPanel } from './ui/settingsPanel';
@@ -32,13 +27,16 @@ const STORAGE_KEY = 'codexDeck.tasks';
 let deck: DeckExtension | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
+  deck = createDeck(context);
+}
+export function createDeck(context: vscode.ExtensionContext): DeckExtension {
   requireWslHost(vscode.env.remoteName);
-  deck = new DeckExtension(context);
+  return new DeckExtension(context);
 }
 export async function deactivate(): Promise<void> { await deck?.shutdown(); deck = undefined; }
 
 class DeckExtension implements PanelHost {
-  readonly client = new AppServerClient(() => this.providers(), (model, effort) => this.responses.config(model, this.providers(), effort));
+  readonly client = new AppServerClient();
   readonly manager: TaskManager;
   readonly panels: TaskPanels;
   private readonly settingsPanel: SettingsPanel;
@@ -46,8 +44,6 @@ class DeckExtension implements PanelHost {
   accountLabel = '未接続';
   private output = vscode.window.createOutputChannel('Codex Deck');
   private connection = new StdioConnection(text => this.output.append(text));
-  private huggingFace = new HuggingFaceProxy();
-  private responses = new ResponsesConnections();
   private connecting?: Promise<void>;
   private catalogSequence = 0;
   private composerCatalogs = new Map<string, ComposerCatalog>();
@@ -62,36 +58,27 @@ class DeckExtension implements PanelHost {
   private resetCreditKeys = new Map<string, string>();
 
   constructor(private readonly context: vscode.ExtensionContext) {
-    this.manager = new TaskManager(this.client, { save: async records => { await context.workspaceState.update(STORAGE_KEY, { version: 1, tasks: records }); } }, readTaskRecords(context.workspaceState.get(STORAGE_KEY)), {
+    const savedTasks = readTaskRecords(context.workspaceState.get(STORAGE_KEY));
+    this.manager = new TaskManager(this.client, { save: async records => { await context.workspaceState.update(STORAGE_KEY, { version: 1, tasks: records }); } }, savedTasks, {
       titleModel: cwd => readTitleModel(vscode.workspace.getConfiguration('codexDeck', vscode.Uri.file(cwd)).get('titleModel')),
       titleEffort: cwd => readTitleEffort(vscode.workspace.getConfiguration('codexDeck', vscode.Uri.file(cwd)).get('titleEffort')),
-      titlePricing: cwd => readTokenPrice(vscode.workspace.getConfiguration('codexDeck', vscode.Uri.file(cwd)).get('titlePricing')),
     });
     // Hidden tabs are deserialized only when shown, so keep their saved open state.
-    this.panels = new TaskPanels(context.extensionUri, this.manager, this);
+    this.panels = new TaskPanels(context.extensionUri, this.manager, this, savedTasks);
     this.settingsPanel = new SettingsPanel(context.extensionUri, {
       loadModels: async () => {
         await this.connect();
-        const sequence = ++this.catalogSequence;
+        const sequence = this.catalogSequence;
         const models = await this.client.listModels(true);
         if (sequence === this.catalogSequence && this.client.connected && !this.stopping) {
           this.models = models; this.manager.changed.emit(undefined);
         }
         return models;
       },
-      checkProvider: async (model, purpose, providers, signal, progress) => {
-        if (!vscode.workspace.isTrusted) throw new Error('ワークスペースを信頼してからAPIに接続してください。');
-        if (!isHuggingFaceModel(model)) return this.responses.check(model, providers, purpose, signal, progress);
-        await this.connect(); signal.throwIfAborted(); return this.huggingFace.check(model, purpose, signal, progress);
-      },
-      providersChanged: () => {
-        this.models = [...this.models.filter(model => !parseResponsesModel(model.id)), ...providerModels(this.providers())];
-        this.manager.changed.emit(undefined);
-      },
       openCodexSettings: () => this.codexSettings(), report: error => this.report(error),
     });
     const tree = new TaskTree(context.extensionUri, this.manager);
-    context.subscriptions.push(this.output, this.settingsPanel, tree, vscode.window.registerTreeDataProvider('codexDeck.tasks', tree), vscode.window.registerWebviewPanelSerializer('codexDeck.task', this.panels),
+    context.subscriptions.push(this.output, this.settingsPanel, tree, vscode.window.registerTreeDataProvider('codexDeck.tasks', tree),
       vscode.window.registerTreeDataProvider<vscode.TreeItem>('codexDeck.launcher', { getTreeItem: item => item, getChildren: () => [] }),
       vscode.workspace.registerTextDocumentContentProvider('codex-deck', { provideTextDocumentContent: uri => this.virtualDocuments.get(uri.toString()) ?? '' }));
     context.subscriptions.push(vscode.workspace.onDidCloseTextDocument(document => { if (document.uri.scheme === 'codex-deck') this.virtualDocuments.delete(document.uri.toString()); }));
@@ -102,6 +89,8 @@ class DeckExtension implements PanelHost {
     });
     const eventsSubscription = this.client.events.subscribe(event => {
       if (event.type === 'account' || event.type === 'connection') {
+        this.models = [];
+        this.accountLabel = event.type === 'connection' && !event.connected ? '未接続' : 'アカウント確認中';
         this.resetCreditEpoch++;
         if (event.type === 'account') this.resetCreditKeys.clear();
       }
@@ -124,7 +113,7 @@ class DeckExtension implements PanelHost {
       renameTask: async arg => this.rename(await this.task(arg)), archiveTask: async arg => this.archive(await this.task(arg)), forkTask: async arg => this.fork(await this.task(arg)),
       copyTaskDeepLink: async arg => this.copyTaskDeepLink(await this.task(arg)),
       copyTaskMarkdown: async arg => this.copyTaskMarkdown(await this.task(arg)),
-      mentionSelection: arg => this.mentionSelection(arg), addFile: arg => this.addFile(arg instanceof vscode.Uri ? arg : undefined),
+      mentionSelection: () => this.mentionEditorSelection(), addFile: arg => this.addFile(arg instanceof vscode.Uri ? arg : undefined),
       signIn: () => this.signIn(), signOut: () => this.signOut(), settings: () => this.settings(),
       cyclePreset: async arg => this.cyclePreset(await this.task(arg)),
       mcp: () => this.mcp(), skills: async () => this.skills(await this.task()), review: async () => this.review(await this.task()),
@@ -140,24 +129,18 @@ class DeckExtension implements PanelHost {
   report(error: unknown): void {
     this.output.appendLine(messageOf(error));
   }
-  private providers(): ResponsesProvider[] { return readProviders(vscode.workspace.getConfiguration('codexDeck').get('providers', [])); }
   async connect(): Promise<void> {
     if (this.client.connected) return;
     if (this.connecting) return this.connecting;
     const work = (async () => {
       if (!vscode.workspace.isTrusted) throw new Error('ワークスペースを信頼してからCodexを起動してください。');
       this.connection.dispose();
-      this.huggingFace.dispose();
       const executable = vscode.workspace.getConfiguration('codexDeck').get<string>('cliPath', 'codex').trim();
       if (!executable) throw new Error('codexDeck.cliPathにWSL内の公式Codex CLIの実行ファイルを指定してください。');
       if (/\\|^[a-z]:|\.(?:exe|cmd|bat)$/i.test(executable)) throw new Error('codexDeck.cliPathにWSL内のCodex CLIを指定してください。Windows版の実行ファイルは使用できません。');
       this.invalidateComposerCatalogs();
-      const env = await appServerEnvironment();
       if (this.stopping) return;
-      const hfUrl = env.HF_TOKEN ? await this.huggingFace.start(env.HF_TOKEN) : undefined;
-      if (this.stopping) { this.huggingFace.dispose(); return; }
-      try { await this.client.connect(this.connection.start(executable, this.workspaceCwd() || undefined, env, hfUrl)); }
-      catch (error) { this.huggingFace.dispose(); throw error; }
+      await this.client.connect(this.connection.start(executable, this.workspaceCwd() || undefined));
       void this.refreshCatalog().catch(error => this.report(error));
       for (const task of this.manager.openTasks) {
         if (task.threadId) void this.manager.restore(task.id).catch(error => this.report(error));
@@ -172,12 +155,12 @@ class DeckExtension implements PanelHost {
     const [models, account] = await Promise.allSettled([this.client.listModels(true), this.client.account()]);
     // A background read must not overwrite a newer sign-in or reconnect refresh.
     if (sequence !== this.catalogSequence || !this.client.connected || this.stopping) return;
-    if (models.status === 'fulfilled') this.models = models.value;
-    else this.output.appendLine(`モデル一覧: ${messageOf(models.reason)}`);
+    this.models = models.status === 'fulfilled' ? models.value : [];
+    if (models.status === 'rejected') this.output.appendLine(`モデル一覧: ${messageOf(models.reason)}`);
     if (account.status === 'fulfilled') {
       const value = object(account.value.account);
-      this.accountLabel = value.type === 'chatgpt' ? `ChatGPT ${string(value.planType)}` : value.type === 'apiKey' ? 'API key' : value.type ? string(value.type) : account.value.requiresOpenaiAuth === false ? 'カスタムプロバイダー' : '未サインイン';
-    } else this.output.appendLine(`アカウント情報: ${messageOf(account.reason)}`);
+      this.accountLabel = value.type === 'chatgpt' ? `ChatGPT ${string(value.planType)}`.trim() : 'ChatGPTでサインインしてください';
+    } else { this.accountLabel = 'アカウントを確認できません'; this.output.appendLine(`アカウント情報: ${messageOf(account.reason)}`); }
     this.manager.changed.emit(undefined);
   }
   private invalidateComposerCatalogs(): void {
@@ -253,7 +236,7 @@ class DeckExtension implements PanelHost {
         if (!requestId || !text.trim()) throw new Error('操作する文章を範囲選択してください。');
         if (text.length > 2 * 1024 * 1024) throw new Error('メッセージが大きすぎます。');
         if (message.action === 'copy') await vscode.env.clipboard.writeText(text);
-        else if (message.action === 'mention') await this.mentionSelection({ codexDeckTaskId: task.id, codexDeckSelectionText: text });
+        else if (message.action === 'mention') this.insertSelectionReference(task, text, `会話「${task.title}」`);
         else if (message.action === 'question') {
           const previous = this.questionStarts.get(task);
           if (previous?.requestId === requestId) await previous.promise;
@@ -317,8 +300,6 @@ class DeckExtension implements PanelHost {
         this.manager.setCollaborationMode(task.id, 'default'); return;
       case 'cyclePreset': this.cyclePreset(task); return;
       case 'menu': await this.menu(task); return;
-      case 'account': await this.accountMenu(); return;
-      case 'review': await this.review(task); return;
       case 'stop': this.manager.setAutoResume(task.id, false); await this.connect(); await this.manager.stop(task.id); return;
       case 'answer': await this.manager.answer(task.id, string(message.requestId), object(message.answer)); return;
       case 'send': {
@@ -389,16 +370,13 @@ class DeckExtension implements PanelHost {
     const selected = selectedModel(this.models, model || task.effectiveModel || 'latest');
     if (model && model !== 'latest' && !selected) throw new Error('モデル一覧を再取得してください。');
     if (effort && effort !== 'default' && (selected || model !== 'latest') && !selected?.efforts.some(candidate => candidate.id === effort)) throw new Error('このモデルで利用できる推論の強さを選択してください。');
-    const pricing = !model || model === task.settings.model ? task.settings.pricing
-      : readPresets(vscode.workspace.getConfiguration('codexDeck', vscode.Uri.file(task.cwd)).get('presets')).find(preset => preset.model === model)?.pricing;
     this.manager.updateSettings(task.id, { model: model || undefined, effort: effort === 'default' ? selected?.defaultEffort || undefined : effort || (model && model !== task.settings.model ? selected?.defaultEffort || undefined : undefined), mode,
-      ...(serviceTier && !isExternalModel(model || task.effectiveModel) ? { serviceTier } : {}),
-      ...(pricing && isExternalModel(model || task.effectiveModel) ? { pricing } : {}) });
+      ...(serviceTier ? { serviceTier } : {}) });
     this.presetSelections.delete(task);
   }
   private cyclePreset(task: Task): void {
     if (isTaskRunning(task) || task.busy) throw new Error('実行が完了してから設定を変更してください。');
-    const presets = taskPresets(task, readPresets(vscode.workspace.getConfiguration('codexDeck', vscode.Uri.file(task.cwd)).get('presets')));
+    const presets = readPresets(vscode.workspace.getConfiguration('codexDeck', vscode.Uri.file(task.cwd)).get('presets'));
     if (!presets.length) return;
     const signature = JSON.stringify(presets);
     const previous = this.presetSelections.get(task);
@@ -489,17 +467,7 @@ class DeckExtension implements PanelHost {
     if (!selected) return;
     return selected.task ?? this.newTask();
   }
-  private async mentionSelection(arg?: unknown): Promise<void> {
-    const context = object(arg);
-    const taskId = string(context.codexDeckTaskId);
-    if (taskId) {
-      const text = string(context.codexDeckSelectionText);
-      if (!text.trim()) return;
-      const task = this.manager.get(taskId);
-      this.panels.open(task);
-      this.panels.message(task.id, { type: 'insertReference', text: selectionReference(text, `会話「${task.title}」`) });
-      return;
-    }
+  private async mentionEditorSelection(): Promise<void> {
     const editor = vscode.window.activeTextEditor;
     if (!editor || editor.selection.isEmpty) throw new Error('言及する文章を範囲選択してください。');
     const text = editor.document.getText(editor.selection);
@@ -509,7 +477,9 @@ class DeckExtension implements PanelHost {
     const { start, end } = editor.selection;
     const source = `${filename}:${start.line + 1}:${start.character + 1}-${end.line + 1}:${end.character + 1}`;
     const task = await this.chooseMentionTask();
-    if (!task) return;
+    if (task) this.insertSelectionReference(task, text, source);
+  }
+  private insertSelectionReference(task: Task, text: string, source: string): void {
     this.panels.open(task);
     this.panels.message(task.id, { type: 'insertReference', text: selectionReference(text, source) });
   }
@@ -519,7 +489,7 @@ class DeckExtension implements PanelHost {
     const matches = readQuestionPresets(config.get('questionPresets')).filter(preset => preset.id === presetId);
     if (matches.length !== 1) throw new Error('質問プリセットが見つからないか、IDが重複しています。設定を確認してください。');
     await this.connect();
-    const models = isHuggingFaceModel(matches[0]!.settings.model) ? [] : await this.client.listModels();
+    const models = await this.client.listModels();
     const preset = validateQuestionPreset(matches[0]!, models);
     const text = questionPresetMessage(preset, selectedText, { title: source.title, link });
     const task = this.manager.create(source.cwd, resolveRunSettings(preset.settings, models));
@@ -530,12 +500,10 @@ class DeckExtension implements PanelHost {
     await this.connect();
     if (this.pendingLogin) throw new Error('サインイン手続き中です。アカウントメニューからキャンセルできます。');
     const option = await vscode.window.showQuickPick([
-      { label: 'ChatGPTでサインイン', type: 'chatgpt' as const }, { label: 'ChatGPTのデバイスコードでサインイン', type: 'chatgptDeviceCode' as const }, { label: 'APIキーでサインイン', type: 'apiKey' as const },
+      { label: 'ChatGPTでサインイン', type: 'chatgpt' as const }, { label: 'ChatGPTのデバイスコードでサインイン', type: 'chatgptDeviceCode' as const },
     ], { title: 'Codexにサインイン' });
     if (!option) return;
-    const apiKey = option.type === 'apiKey' ? await vscode.window.showInputBox({ title: 'OpenAI APIキー', password: true, ignoreFocusOut: true }) : undefined;
-    if (option.type === 'apiKey' && !apiKey) return;
-    const result = await this.client.login(option.type, apiKey);
+    const result = await this.client.login(option.type);
     this.pendingLogin = typeof result.loginId === 'string' ? result.loginId : undefined;
     if (typeof result.authUrl === 'string') await this.openExternal(result.authUrl);
     if (typeof result.verificationUrl === 'string') {
@@ -635,8 +603,7 @@ class DeckExtension implements PanelHost {
   private async pickModel(task: Task): Promise<void> {
     await this.connect();
     await this.refreshCatalog();
-    const models = withHuggingFaceModels(this.models, [...readPresets(vscode.workspace.getConfiguration('codexDeck', vscode.Uri.file(task.cwd)).get('presets')).map(preset => preset.model), task.settings.model, task.effectiveModel])
-      .filter(model => !task.threadId || sameTaskProvider(task, model.id));
+    const models = this.models;
     const choice = await vscode.window.showQuickPick(models.map(model => ({ label: model.label, description: model.description, id: model.id })), { title: 'モデル' });
     if (!choice) return;
     const model = selectedModel(models, choice.id)!;
@@ -716,6 +683,7 @@ class DeckExtension implements PanelHost {
     const threadId = linkedThreadId(value);
     if (threadId) {
       await this.connect();
+      await this.client.checkThread(threadId);
       const linked = this.manager.openThread(threadId);
       this.panels.open(linked);
       await this.manager.restore(linked.id); return;
@@ -741,6 +709,6 @@ class DeckExtension implements PanelHost {
     this.panels.dispose();
     this.manager.dispose();
     await this.manager.checkpoint().catch(error => this.output.appendLine(messageOf(error)));
-    this.connection.dispose(); this.huggingFace.dispose(); this.responses.dispose(); this.client.detach();
+    this.connection.dispose(); this.client.detach();
   }
 }

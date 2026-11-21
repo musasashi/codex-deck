@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import type { Readable, Writable } from 'node:stream';
 import { object, string, Signal, messageOf } from '../core/types';
-import { HF_CONFIG_ARGS, HF_PROVIDER } from '../core/huggingFace';
+import { appServerEnvironment } from './environment';
 import { MAX_MESSAGE_BYTES, serializeMessage } from './limits';
 
 export class RpcError extends Error {
@@ -114,11 +114,13 @@ export class StdioConnection {
   private child?: ChildProcessWithoutNullStreams;
   private peer?: JsonRpcPeer;
   constructor(private readonly log: (text: string) => void) {}
-  start(executable: string, cwd?: string, env?: NodeJS.ProcessEnv, huggingFaceUrl?: string): JsonRpcPeer {
+  start(executable: string, cwd?: string, env?: NodeJS.ProcessEnv): JsonRpcPeer {
     if (this.child) throw new Error('App Serverはすでに起動しています。');
     // No shell: executable settings and paths are never evaluated as commands.
-    const args = ['app-server', ...HF_CONFIG_ARGS, ...(huggingFaceUrl ? ['-c', `model_providers.${HF_PROVIDER}.base_url=${JSON.stringify(huggingFaceUrl)}`] : [])];
-    const child = spawn(executable, args, { cwd, env, stdio: 'pipe' });
+    const args = ['app-server',
+      '-c', 'model_provider="openai"', '-c', 'forced_login_method="chatgpt"',
+      '-c', 'openai_base_url="https://chatgpt.com/backend-api/codex"', '-c', 'chatgpt_base_url="https://chatgpt.com/backend-api/"'];
+    const child = spawn(executable, args, { cwd, env: appServerEnvironment(env), stdio: 'pipe' });
     this.child = child;
     const peer = new JsonRpcPeer(child.stdout, child.stdin);
     this.peer = peer;

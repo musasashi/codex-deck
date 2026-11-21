@@ -8,8 +8,7 @@ import { buildSync } from 'esbuild';
 import type * as vscode from 'vscode';
 import type { JsonObject, Task, TaskRecord } from '../src/core/types';
 import { TaskManager } from '../src/core/taskManager';
-import type { PanelHost } from '../src/ui/panels';
-import { deferred, FakeGateway, thread } from './helpers';
+import { deferred, FakeGateway, thread, externalModelIds } from './helpers';
 import type { AppServerClient } from '../src/appServer/client';
 
 const bundle = buildSync({ entryPoints: [path.resolve('src/extension.ts')], bundle: true, write: false,
@@ -49,7 +48,6 @@ function panel() {
 function activate(records: TaskRecord[], options: { remoteName?: string; isTrusted?: boolean; cliPath?: string; presets?: unknown; questionPresets?: unknown } = { remoteName: 'wsl' }) {
   let stored: unknown = { version: 1, tasks: structuredClone(records) };
   let clipboardText = '';
-  let serializer!: vscode.WebviewPanelSerializer;
   const serializers = new Map<string, vscode.WebviewPanelSerializer>();
   let createdPanels = 0;
   const openedPanels: ReturnType<typeof panel>[] = [];
@@ -76,7 +74,7 @@ function activate(records: TaskRecord[], options: { remoteName?: string; isTrust
       onDidChangeWindowState: disposable, registerFileDecorationProvider: disposable,
       registerTreeDataProvider(id: string, tree: { getChildren(): Task[] }) { trees.set(id, tree); return disposable(); },
       registerWebviewPanelSerializer(type: string, value: vscode.WebviewPanelSerializer) {
-        serializer = value; serializers.set(type, value);
+        serializers.set(type, value);
         return { dispose() { serializers.delete(type); } };
       },
       createWebviewPanel(viewType: string) { createdPanels++; const value = Object.assign(panel(), { viewType }); openedPanels.push(value); return value; },
@@ -96,13 +94,19 @@ function activate(records: TaskRecord[], options: { remoteName?: string; isTrust
   };
   const module = { exports: {} as typeof import('../src/extension') };
   new Function('require', 'module', 'exports', bundle)((id: string) => id === 'vscode' ? api : nodeRequire(id), module, module.exports);
-  module.exports.activate(context as unknown as vscode.ExtensionContext);
+  const host = module.exports.createDeck(context as unknown as vscode.ExtensionContext);
   return {
-    rows: () => trees.get('codexDeck.tasks')!.getChildren(), serializer, serializers, commands, api, openedPanels,
+    host, manager: host.manager, serializers, commands, api, openedPanels,
+    rows: () => trees.get('codexDeck.tasks')!.getChildren(),
+    async restoreTab(id: string, tab = panel()) {
+      const serializer = serializers.get(`codexDeck.task.${encodeURIComponent(id)}`);
+      assert.ok(serializer, `Missing serializer for ${id}`);
+      await serializer.deserializeWebviewPanel(tab, undefined);
+    },
     createdPanels: () => createdPanels,
     records: () => (stored as { tasks: TaskRecord[] }).tasks, clipboard: () => clipboardText,
     async shutdown() {
-      try { await module.exports.deactivate(); }
+      try { await host.shutdown(); }
       finally { for (const subscription of context.subscriptions.reverse()) subscription.dispose(); }
     },
   };
@@ -130,7 +134,7 @@ test('preset cycling is a customizable command bound to Ctrl+Tab in task editors
     { model: 'test-model', effort: 'test-effort', mode: 'workspace-write' },
   ];
   const extension = activate([record('draft', true, true)], { remoteName: 'wsl', presets });
-  const { host, manager } = extension.serializer as unknown as { host: PanelHost; manager: TaskManager };
+  const { host, manager } = extension;
   try {
     const manifest = nodeRequire('./package.json');
     assert.equal(manifest.contributes.commands.find((command: { command: string }) => command.command === 'codexDeck.cyclePreset').title, '次のプリセットに切り替え');
@@ -139,7 +143,7 @@ test('preset cycling is a customizable command bound to Ctrl+Tab in task editors
     });
 
     host.models = [{ id: 'test-model', label: 'Test', description: '', defaultEffort: 'test-effort', efforts: [{ id: 'high', description: '' }, { id: 'test-effort', description: '' }], isDefault: true, inputModalities: ['text'] }];
-    await extension.serializer.deserializeWebviewPanel(panel(), { taskId: 'draft' });
+    await extension.restoreTab('draft');
     await extension.commands.get('codexDeck.cyclePreset')!();
     assert.deepEqual(manager.get('draft').settings, presets[0]);
     await extension.commands.get('codexDeck.cyclePreset')!();
@@ -149,7 +153,7 @@ test('preset cycling is a customizable command bound to Ctrl+Tab in task editors
 
 test('code block copy requests write the exact code and acknowledge their request', async () => {
   const extension = activate([]);
-  const { host, manager } = extension.serializer as unknown as { host: PanelHost; manager: TaskManager };
+  const { host, manager } = extension;
   try {
     const task = manager.create('/project');
     const text = 'const value = "<tag>";\n  run(value);';
@@ -160,7 +164,7 @@ test('code block copy requests write the exact code and acknowledge their reques
 
 test('speed changes persist independently and survive other composer settings and task restoration', async () => {
   const extension = activate([record('draft', true, true)]);
-  const { host, manager } = extension.serializer as unknown as { host: PanelHost; manager: TaskManager };
+  const { host, manager } = extension;
   try {
     host.models = await new FakeGateway().listModels();
     const task = manager.get('draft');
@@ -181,22 +185,22 @@ test('speed changes persist independently and survive other composer settings an
   } finally { await extension.shutdown(); }
 });
 
-test('selection mentions replace the old command and use the source chat instead of another active task', async () => {
+test('selection mentions from a chat insert the quoted text into its own composer', async () => {
   const extension = activate([record('first', true), record('source', true)]);
   const first = panel(), source = panel();
   try {
-    await extension.serializer.deserializeWebviewPanel(first, { taskId: 'first' });
-    await extension.serializer.deserializeWebviewPanel(source, { taskId: 'source' });
+    await extension.restoreTab('first', first);
+    await extension.restoreTab('source', source);
     await source.receive({ type: 'ready' });
-    assert.equal(extension.commands.has('codexDeck.addSelection'), false);
     const manifest = nodeRequire('./package.json');
-    assert.equal(manifest.contributes.commands.some((command: { command: string }) => command.command === 'codexDeck.addSelection'), false);
+    assert.ok(extension.commands.has('codexDeck.mentionSelection'));
     assert.equal(manifest.contributes.commands.find((command: { command: string }) => command.command === 'codexDeck.mentionSelection').title, 'Codex-Deckで言及');
     assert.equal(manifest.contributes.menus['editor/context'][0].command, 'codexDeck.mentionSelection');
-    assert.equal(manifest.contributes.menus['webview/context'], undefined);
-
-    await extension.commands.get('codexDeck.mentionSelection')!({ webview: 'codexDeck.task', codexDeckTaskId: 'source', codexDeckSelectionText: '選択した文章\n  字下げを保持' });
-    assert.deepEqual(source.messages.at(-1), { type: 'insertReference', text: '> 参照元: 会話「source」\n>\n> 選択した文章\n>   字下げを保持\n\n' });
+    await source.receive({ type: 'selectionAction', action: 'mention', requestId: 'mention', text: '選択した文章\n  字下げを保持' });
+    assert.deepEqual(source.messages.slice(-2), [
+      { type: 'insertReference', text: '> 参照元: 会話「source」\n>\n> 選択した文章\n>   字下げを保持\n\n' },
+      { type: 'selectionResult', requestId: 'mention' },
+    ]);
     assert.equal(first.messages.some(message => message.type === 'insertReference'), false);
     assert.ok(extension.rows().every(task => !task.attachments.length && !task.turns.length));
   } finally { await extension.shutdown(); }
@@ -242,7 +246,7 @@ test('editor mentions offer a new task even when the only open conversation is a
     return items.find(item => item.label === '新規タスク');
   };
   try {
-    await extension.serializer.deserializeWebviewPanel(existing, { taskId: 'existing' });
+    await extension.restoreTab('existing', existing);
     await extension.commands.get('codexDeck.mentionSelection')!();
     assert.equal(extension.rows().length, 2);
     const draft = extension.rows().find(task => !task.threadId)!;
@@ -270,7 +274,7 @@ test('editor mentions reuse an open draft without offering a duplicate new task'
       return items.find(item => item.task?.id === 'draft');
     };
     try {
-      await extension.serializer.deserializeWebviewPanel(draft, { taskId: 'draft' });
+      await extension.restoreTab('draft', draft);
       await draft.receive({ type: 'ready' });
       await extension.commands.get('codexDeck.mentionSelection')!();
       assert.equal(pickCount, hasConversation ? 1 : 0);
@@ -315,7 +319,7 @@ test('Windows CLI paths are rejected before connecting from WSL', async () => {
   for (const cliPath of ['codex.exe', 'codex.cmd', 'codex.bat', ' C:\\tools\\codex.exe ', 'C:/tools/codex', '/mnt/c/tools/CODEX.EXE', '\\\\server\\share\\codex']) {
     const extension = activate([], { remoteName: 'wsl', isTrusted: true, cliPath });
     try {
-      const { host } = extension.serializer as unknown as { host: PanelHost };
+      const { host } = extension;
       await assert.rejects(host.connect(), /WSL内のCodex CLI.*Windows版/);
     } finally { await extension.shutdown(); }
   }
@@ -330,10 +334,32 @@ test('activation lists all saved open tasks before any editor tab is deserialize
   } finally { await extension.shutdown(); }
 });
 
+test('saved external tasks and drafts are hidden and their restored tabs close', async () => {
+  const native = { ...record('native', true), modelProvider: 'openai', cost: { total: 1 },
+    settings: { mode: 'default' as const, model: 'test-model', pricing: { input: 1, output: 2 } } };
+  const extension = activate([native, { ...record('external', true), modelProvider: 'custom' },
+    { ...record('draft', true, true), settings: { mode: 'default', model: externalModelIds[0] } }]);
+  try {
+    const rows = extension.rows();
+    assert.deepEqual(rows.map(row => row.id), ['native']);
+    assert.deepEqual(rows[0]?.settings, { mode: 'default', model: 'test-model' });
+    assert.equal(Object.hasOwn(rows[0]!, 'cost'), false);
+    for (const id of ['external', 'draft']) {
+      const tab = panel();
+      let disposed = false;
+      tab.onDidDispose(() => { disposed = true; });
+      await extension.restoreTab(id, tab);
+      assert.equal(disposed, true);
+      assert.deepEqual(tab.messages, []);
+    }
+  } finally { await extension.shutdown(); }
+  assert.deepEqual(extension.records().map(record => record.id), ['native']);
+});
+
 test('restoring and closing one editor preserves the other open tasks across another reload', async () => {
   const extension = activate([record('first', true), record('hidden', true), record('closed', false)]);
   try {
-    await extension.serializer.deserializeWebviewPanel(panel(), { taskId: 'first' });
+    await extension.restoreTab('first');
     assert.deepEqual(extension.rows().map(task => task.id), ['first', 'hidden']);
     assert.equal(extension.createdPanels(), 0);
     await extension.commands.get('codexDeck.closeTask')!('first');
@@ -359,7 +385,7 @@ test('reloading without selecting any task retains open drafts and conversations
 
 function connectedExtension(records: TaskRecord[] = [], options: Parameters<typeof activate>[1] = {}) {
   const extension = activate(records, { remoteName: 'wsl', ...options });
-  const { host, manager } = extension.serializer as unknown as { host: PanelHost; manager: TaskManager };
+  const { host, manager } = extension;
   const gateway = new FakeGateway();
   const client = manager.gateway;
   const resetRequests: { creditId: string; idempotencyKey: string }[] = [];
@@ -377,6 +403,23 @@ function connectedExtension(records: TaskRecord[] = [], options: Parameters<type
   host.connect = async () => {};
   return { ...extension, host, manager, gateway, resetRequests };
 }
+
+test('opening a conversation link checks its provider before creating a tab or task', async () => {
+  const extension = connectedExtension();
+  const { host, manager, gateway } = extension;
+  try {
+    const source = manager.create('/project');
+    const client = manager.gateway as AppServerClient;
+    client.checkThread = async id => { if (id !== 'supported') throw new Error('この会話はCodex Deckで開けません'); };
+    await assert.rejects(host.command(source, { type: 'openLink', url: 'codex://threads/external' }), /開けません/);
+    assert.equal(extension.createdPanels(), 0);
+    assert.equal(manager.tasks.size, 1);
+    gateway.threads.set('supported', thread('supported'));
+    await host.command(source, { type: 'openLink', url: 'codex://threads/supported' });
+    assert.equal(extension.createdPanels(), 1);
+    assert.ok(manager.openTasks.some(task => task.threadId === 'supported' && task.hydrated));
+  } finally { await extension.shutdown(); }
+});
 
 test('new tasks receive their workspace speed setting before starting a conversation', async () => {
   for (const tier of [undefined, null, 'default', 'fast']) {
@@ -525,8 +568,9 @@ test('tab menu commands act on the clicked task even when an identically named t
       items: [{ id: 'target-reply', kind: 'agentMessage', data: { text: '対象の会話' } }] }] };
     gateway.threads.set(source.id, source);
     const target = manager.adoptThread(source);
-    await extension.serializer.deserializeWebviewPanel(panel(), { taskId: first.id });
-    await extension.serializer.deserializeWebviewPanel(Object.assign(panel(), { active: false, viewColumn: 2 }), { taskId: target.id });
+    extension.host.panels.open(first);
+    extension.host.panels.open(target);
+    Object.assign(extension.openedPanels[1]!, { active: false, viewColumn: 2 });
     const resource = editorResource(target.id);
 
     await commands.get('codexDeck.copyTaskDeepLink')!(resource);
@@ -539,8 +583,8 @@ test('tab menu commands act on the clicked task even when an identically named t
     await commands.get('codexDeck.editor.forkTask')!(resource);
     const fork = [...manager.tasks.values()].find(task => task.threadId?.startsWith('fork-'))!;
     assert.deepEqual(fork.turns, target.turns);
-    assert.equal(extension.openedPanels[0]!.viewType, `codexDeck.task.${fork.id}`);
-    assert.ok(extension.serializers.has(extension.openedPanels[0]!.viewType));
+    assert.equal(extension.openedPanels.at(-1)!.viewType, `codexDeck.task.${fork.id}`);
+    assert.ok(extension.serializers.has(extension.openedPanels.at(-1)!.viewType));
     await commands.get('codexDeck.editor.archiveTask')!(resource);
     assert.deepEqual(archived, ['target']);
     assert.equal(target.open, false);
@@ -553,7 +597,7 @@ test('tab menu commands act on the clicked task even when an identically named t
   } finally { await extension.shutdown(); }
 });
 
-test('saved task tabs register their serializers at startup and can be archived before being shown', async () => {
+test('saved task tabs restore by view type without Webview state and can be archived before being shown', async () => {
   const extension = connectedExtension([record('first', true, true), record('hidden', true, true)]);
   const { api, manager } = extension;
   const hiddenTab = { input: new api.TabInputWebview('mainThreadWebview-codexDeck.task.hidden') } as vscode.Tab;
@@ -563,7 +607,7 @@ test('saved task tabs register their serializers at startup and can be archived 
   try {
     assert.ok(extension.serializers.has('codexDeck.task.first'));
     assert.ok(extension.serializers.has('codexDeck.task.hidden'));
-    await extension.serializer.deserializeWebviewPanel(panel(), { taskId: 'first' });
+    await extension.restoreTab('first');
     await extension.commands.get('codexDeck.editor.archiveTask')!(editorResource('hidden'));
     assert.deepEqual(closed, [hiddenTab]);
     assert.equal(manager.get('hidden').open, false);
@@ -585,7 +629,7 @@ test('deleted chats close visible and hidden tabs and cannot restore saved task 
   let disposed = false;
   visible.onDidDispose(() => { disposed = true; });
   try {
-    await extension.serializer.deserializeWebviewPanel(visible, { taskId: 'visible' });
+    await extension.restoreTab('visible', visible);
     manager.gateway.events.emit({ type: 'deleted', threadId: 'thread-visible' });
     manager.gateway.events.emit({ type: 'deleted', threadId: 'thread-hidden' });
     await manager.flush();
@@ -690,7 +734,7 @@ test('/plan restores a saved task before checking for an active turn and rejects
 
 for (const settings of [
   { model: 'latest', effort: 'high', mode: 'read-only' },
-  { model: 'hf:org/model', effort: 'default', mode: 'workspace-write', pricing: { input: 1, output: 2 } },
+  { model: 'test-model', effort: 'default', mode: 'workspace-write' },
 ]) test(`selection questions create one independent task with ${settings.model} and reference the source conversation`, async () => {
   const questions = [{ id: 'explain', name: '具体例で', prompt: '/new という語を説明してください。', settings }];
   const extension = connectedExtension([], { questionPresets: questions });
@@ -711,7 +755,7 @@ for (const settings of [
     const child = [...manager.tasks.values()].find(task => task !== source)!;
     assert.equal(extension.createdPanels(), 1);
     assert.equal(child.cwd, source.cwd);
-    assert.deepEqual(child.settings, { ...settings, model: settings.model === 'latest' ? 'test-model' : settings.model, effort: settings.model.startsWith('hf:') ? undefined : 'high' });
+    assert.deepEqual(child.settings, { ...settings, model: 'test-model', effort: 'high' });
     assert.ok(contexts.includes(source.cwd));
     assert.equal(gateway.sent.length, 0, 'sending waits until the new webview is ready');
     const panel = extension.openedPanels[0]!;
@@ -732,7 +776,7 @@ for (const settings of [
     referenceFile = JSON.parse(reference.match(/スナップショット: (.+)/)![1]!);
     assert.match(await readFile(referenceFile!, 'utf8'), /コードの説明です/);
     assert.deepEqual(source, before);
-    questions[0]!.settings = { model: 'hf:another/model', effort: 'default', mode: 'read-only' };
+    questions[0]!.settings = { model: 'latest', effort: 'default', mode: 'read-only' };
     await panel.receive({ type: 'ready' });
     assert.equal(child.settings.mode, settings.mode, 'editing questions does not change an existing task');
   } finally {

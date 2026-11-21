@@ -2,24 +2,23 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readQuestionPresets, validateQuestionPresets, questionPresetMessage, type QuestionPreset } from '../src/core/questionPresets';
 import { DEFAULT_PRESET } from '../src/core/settings';
-import { providerModels, validateProviders } from '../src/core/providers';
-import { FakeGateway } from './helpers';
+import { FakeGateway, externalModelIds } from './helpers';
 
 const question: QuestionPreset = { id: 'explain', name: 'かみ砕いて', prompt: '具体例で説明してください。', settings: { ...DEFAULT_PRESET } };
 
-test('question settings validate independently, preserving ordering and external model prices', async () => {
-  const providers = validateProviders([{ id: 'local', name: 'Local', baseUrl: 'http://localhost/v1', models: [{ id: 'model', reasoningEfforts: ['low'] }] }]);
-  const models = [...await new FakeGateway().listModels(), ...providerModels(providers)];
+test('question settings validate independently, preserving ordering and speed', async () => {
+  const models = await new FakeGateway().listModels();
   const configured = [question,
     { ...question, id: 'fast', settings: { ...DEFAULT_PRESET, serviceTier: 'fast' } },
-    { ...question, id: 'hf', settings: { model: 'hf:org/model', effort: 'default', mode: 'read-only', pricing: { input: 1, output: 2 } } },
-    { ...question, id: 'api', settings: { model: 'responses:local:model', effort: 'low', mode: 'workspace-write' } },
   ];
   const valid = validateQuestionPresets(configured, models);
   assert.deepEqual(valid, configured);
   valid[0]!.settings.model = 'test-model';
   assert.equal(question.settings.model, 'latest');
   assert.deepEqual(readQuestionPresets(undefined), []);
+  const external = externalModelIds.map(model => ({ ...question, settings: { ...DEFAULT_PRESET, model } }));
+  assert.deepEqual(readQuestionPresets([...external, ...configured]), configured);
+  for (const preset of external) assert.throws(() => validateQuestionPresets([preset], models), /質問プリセット1/);
   assert.deepEqual(validateQuestionPresets([], models), []);
 });
 
@@ -31,7 +30,6 @@ test('invalid questions and model settings are rejected without replacing them w
     { ...question, settings: { ...question.settings, effort: 'unsupported' } },
     { ...question, settings: { ...question.settings, mode: 'bad' } },
     { ...question, settings: { ...question.settings, serviceTier: 'bad' } },
-    { ...question, settings: { model: 'hf:org/model', effort: 'default', mode: 'read-only', pricing: { input: -1, output: 1 } } },
   ]) assert.throws(() => validateQuestionPresets([invalid], models), /質問プリセット1/);
   assert.throws(() => validateQuestionPresets([question, { ...question, id: ' explain ' }], models), /重複/);
   assert.throws(() => validateQuestionPresets({}, models), /配列/);

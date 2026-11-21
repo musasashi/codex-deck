@@ -6,10 +6,10 @@ const { join } = require('node:path');
 const codexHome = mkdtempSync(join(tmpdir(), 'codex-deck-mock-'));
 const rolloutPaths = new Map();
 const hidden = new Set();
-const threads = new Map([['history-fixture', { id: 'history-fixture', name: 'History fixture', cwd: process.cwd(), status: { type: 'idle' }, turns: [] }]]);
+const threads = new Map([['history-fixture', { id: 'history-fixture', name: 'History fixture', modelProvider: 'openai', cwd: process.cwd(), status: { type: 'idle' }, turns: [] }]]);
 for (let i = 2; i <= Number(process.env.CODEX_DECK_TEST_HISTORY_COUNT ?? 1); i++) {
   const id = `history-fixture-${i}`;
-  threads.set(id, { id, name: `History fixture ${i}`, cwd: process.cwd(), updatedAt: 1700000000 - i, status: { type: 'idle' }, turns: [] });
+  threads.set(id, { id, name: `History fixture ${i}`, modelProvider: 'openai', cwd: process.cwd(), updatedAt: 1700000000 - i, status: { type: 'idle' }, turns: [] });
 }
 const archived = new Set();
 const archiveAttempts = new Map();
@@ -46,7 +46,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   let deletedId;
   if (message.method === 'initialize') result = { userAgent: 'codex-deck-test', codexHome };
   else if (message.method === 'model/list') result = { data: [{ model: 'test-model', displayName: 'Test model', supportedReasoningEfforts: [{ reasoningEffort: 'test-effort', description: 'test' }, { reasoningEffort: 'high', description: 'high' }], defaultReasoningEffort: 'test-effort', isDefault: true }], nextCursor: null };
-  else if (message.method === 'account/read') result = { account: null, requiresOpenaiAuth: false };
+  else if (message.method === 'account/read') result = { account: { type: 'chatgpt', email: 'fixture@example.test', planType: 'plus' }, requiresOpenaiAuth: true };
   else if (message.method === 'skills/list') result = { data: [{ cwd: message.params.cwds[0], skills: [
     { name: 'fixture-skill', description: 'Registered fixture skill', path: '/fixture/SKILL.md', scope: 'user', enabled: true },
     { name: 'disabled-skill', description: 'Disabled fixture', path: '/disabled/SKILL.md', scope: 'user', enabled: false },
@@ -54,7 +54,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   else if (message.method === 'config/read') result = { config: { sandbox_mode: 'workspace-write', approval_policy: 'on-request', approvals_reviewer: 'user' } };
   else if (message.method === 'fuzzyFileSearch') result = { files: [{ path: 'src/example file.ts', match_type: 'file', root: message.params.roots[0], file_name: 'example file.ts', score: 100 }] };
   else if (message.method === 'thread/list') {
-    const matching = [...threads.values()].filter(thread => !hidden.has(thread.id) && archived.has(thread.id) === Boolean(message.params.archived));
+    const matching = [...threads.values()].filter(thread => (!message.params.modelProviders || message.params.modelProviders.includes(thread.modelProvider)) && !hidden.has(thread.id) && archived.has(thread.id) === Boolean(message.params.archived));
     const start = Number(message.params.cursor ?? 0);
     const end = start + message.params.limit;
     result = { data: matching.slice(start, end).map(thread => ({ ...thread, forkedFromId: null, parentThreadId: null })), nextCursor: end < matching.length ? String(end) : null };
@@ -81,9 +81,12 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     archived.delete(message.params.threadId); saveRollout(threads.get(message.params.threadId));
   }
   else if (message.method === 'thread/start') {
-    const thread = { id: `thread-${threads.size + 1}`, cwd: message.params.cwd, status: { type: 'idle' }, preview: '', turns: [] };
+    const thread = { id: `thread-${threads.size + 1}`, cwd: message.params.cwd, modelProvider: message.params.modelProvider ?? 'openai', status: { type: 'idle' }, preview: '', turns: [] };
     threads.set(thread.id, thread); saveRollout(thread); result = { thread };
-  } else if (message.method === 'thread/read' || message.method === 'thread/resume') result = { thread: threads.get(message.params.threadId) };
+  } else if (message.method === 'thread/read' || message.method === 'thread/resume') {
+    const thread = threads.get(message.params.threadId);
+    result = { thread: thread && message.method === 'thread/read' && !message.params.includeTurns ? { ...thread, turns: [] } : thread };
+  }
   else if (message.method === 'turn/start') {
     const thread = threads.get(message.params.threadId);
     const turn = { id: `turn-${thread.turns.length + 1}`, status: 'completed', items: [

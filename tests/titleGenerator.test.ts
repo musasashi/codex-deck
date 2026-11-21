@@ -4,7 +4,7 @@ import { PassThrough } from 'node:stream';
 import { TitleGenerator } from '../src/appServer/titleGenerator';
 import { JsonRpcPeer } from '../src/appServer/rpc';
 import { object, type JsonObject, type Model } from '../src/core/types';
-import { deferred } from './helpers';
+import { chatgptAccount, deferred } from './helpers';
 
 const tick = () => new Promise<void>(resolve => setImmediate(resolve));
 const request = { cwd: '/project', model: 'title-model', effort: 'lowest', input: '{"request":"ログインエラーを修正して"}' };
@@ -18,12 +18,16 @@ function harness(timeoutMs = 1000, catalog = models) {
   const calls: { method: string; params: JsonObject }[] = [];
   let handle: (method: string, params: JsonObject) => Promise<unknown> = async method => {
     if (method === 'config/read') return { config: { mcp_servers: { sample: { command: 'server', required: true } } } };
-    if (method === 'thread/start') return { thread: { id: 'title-thread' } };
+    if (method === 'thread/start') return { thread: { id: 'title-thread', modelProvider: 'openai' } };
     if (method === 'turn/start') return { turn: { id: 'title-turn', status: 'inProgress', items: [] } };
     return {};
   };
-  server.handleRequest = ({ method, params }) => { calls.push({ method, params: object(params) }); return handle(method, object(params)); };
-  return { generator, calls, server, peer, setHandler: (next: typeof handle) => { handle = next; },
+  let account: unknown = chatgptAccount.account;
+  server.handleRequest = ({ method, params }) => {
+    calls.push({ method, params: object(params) });
+    return method === 'account/read' ? Promise.resolve({ account }) : handle(method, object(params));
+  };
+  return { generator, calls, server, peer, setAccount: (value: unknown) => { account = value; }, setHandler: (next: typeof handle) => { handle = next; },
     dispose: () => { generator.dispose(); peer.close(); server.close(); } };
 }
 
@@ -32,7 +36,7 @@ test('titles use an ephemeral read-only thread, bounded structured output, and t
   try {
     const result = h.generator.generate(request, new AbortController().signal); await tick();
     const start = h.calls.find(call => call.method === 'thread/start')!.params;
-    assert.equal(start.model, 'title-model'); assert.equal(start.ephemeral, true);
+    assert.equal(start.model, 'title-model'); assert.equal(start.modelProvider, 'openai'); assert.equal(start.ephemeral, true);
     assert.equal(start.sandbox, 'read-only'); assert.equal(start.approvalPolicy, 'never');
     assert.equal(object(start.config).model_reasoning_effort, 'low');
     assert.equal(object(start.config)['features.hooks'], false);
@@ -52,24 +56,25 @@ test('titles use an ephemeral read-only thread, bounded structured output, and t
   } finally { h.dispose(); }
 });
 
-test('HF titles use the HF provider without a catalog and report usage for their owning task', async () => {
-  const h = harness(1000, []);
-  const hfRequest = { ...request, model: 'hf:org/model:provider', ownerThreadId: 'main-thread', pricing: { input: 1, output: 3 } };
-  const usages: unknown[] = [];
-  h.generator.onTokenUsage = (request, sourceId, usage) => usages.push({ request, sourceId, usage });
-  try {
-    const result = h.generator.generate(hfRequest, new AbortController().signal); await tick();
-    const start = h.calls.find(call => call.method === 'thread/start')!.params;
-    assert.equal(start.model, 'org/model:provider'); assert.equal(start.modelProvider, 'codex_deck_huggingface');
-    assert.equal(object(start.config).model_reasoning_effort, undefined);
-    assert.match(String(start.baseInstructions), /JSON object/);
-    assert.equal(h.calls.find(call => call.method === 'turn/start')!.params.outputSchema, undefined);
-    const tokenUsage = { total: { inputTokens: 100, outputTokens: 20 }, last: { inputTokens: 100, outputTokens: 20 } };
-    h.server.notify('thread/tokenUsage/updated', { threadId: 'title-thread', turnId: 'title-turn', tokenUsage });
-    h.server.notify('turn/completed', { threadId: 'title-thread', turn: { id: 'title-turn', status: 'completed', items: [{ id: 'title', type: 'agentMessage', text: '{"title":"HF title"}' }] } });
-    assert.equal(await result, 'HF title');
-    assert.deepEqual(usages, [{ request: hfRequest, sourceId: 'title-thread', usage: tokenUsage }]);
-  } finally { h.dispose(); }
+test('title generation checks the provider and the active login before sending the prompt', async () => {
+  for (const scenario of ['signed-out', 'login-changed', 'wrong-provider']) {
+    const h = harness();
+    if (scenario === 'signed-out') h.setAccount(null);
+    h.setHandler(async method => {
+      if (method === 'thread/start') {
+        if (scenario === 'login-changed') h.setAccount({ type: 'apiKey' });
+        return { thread: { id: 'title-thread', modelProvider: scenario === 'wrong-provider' ? 'custom' : 'openai' } };
+      }
+      return {};
+    });
+    try {
+      await assert.rejects(h.generator.generate(request, new AbortController().signal), /ChatGPT/);
+      assert.equal(h.calls.some(call => call.method === 'turn/start'), false);
+      assert.equal(h.calls.some(call => call.method === 'thread/start'), scenario !== 'signed-out');
+      await tick();
+      assert.equal(h.calls.some(call => call.method === 'thread/unsubscribe'), scenario !== 'signed-out');
+    } finally { h.dispose(); }
+  }
 });
 
 test('selected title effort and the lowest effort of the latest model reach the title thread', async () => {
@@ -94,7 +99,7 @@ test('completion notifications before the start response and immediate completed
   for (const early of [true, false]) {
     const h = harness(); const started = deferred<unknown>();
     h.setHandler(async method => {
-      if (method === 'thread/start') return { thread: { id: 'title-thread' } };
+      if (method === 'thread/start') return { thread: { id: 'title-thread', modelProvider: 'openai' } };
       if (method === 'turn/start') return early ? started.promise : { turn: { id: 'title-turn', status: 'completed', items: [
         { id: 'answer', type: 'agentMessage', text: '{"title":"Immediate"}' },
       ] } };
@@ -128,12 +133,12 @@ test('late thread and turn creation responses are cleaned up even after the dead
     const h = harness(20); const response = deferred<unknown>();
     h.setHandler(async method => {
       if (method === lateMethod) return response.promise;
-      if (method === 'thread/start') return { thread: { id: 'title-thread' } };
+      if (method === 'thread/start') return { thread: { id: 'title-thread', modelProvider: 'openai' } };
       return {};
     });
     try {
       await assert.rejects(h.generator.generate(request, new AbortController().signal), /タイムアウト/);
-      response.resolve(lateMethod === 'thread/start' ? { thread: { id: 'title-thread' } } : { turn: { id: 'title-turn', status: 'inProgress' } });
+      response.resolve(lateMethod === 'thread/start' ? { thread: { id: 'title-thread', modelProvider: 'openai' } } : { turn: { id: 'title-turn', status: 'inProgress' } });
       await tick();
       assert.equal(h.calls.filter(call => call.method === 'thread/unsubscribe').length, 1);
       assert.equal(h.calls.filter(call => call.method === 'turn/interrupt').length, lateMethod === 'turn/start' ? 1 : 0);

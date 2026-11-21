@@ -2,9 +2,7 @@ import { array, object, string, statusLabel, isTaskRunning, type Attachment, typ
 import { escapeHtml, renderAttachments, renderItem, renderTranscript } from './render';
 import { IMAGE_FORMAT_ERROR, IMAGE_TYPES, MAX_IMAGE_ATTACHMENT_BYTES } from '../core/attachments';
 import { parseSlashCommand, permissionOptions, slashCommands } from '../core/composer';
-import { latestModel, presetEffortOptions, selectedModel, serviceTierOptions } from '../core/settings';
-import { isExternalTask, sameTaskProvider } from '../core/providers';
-import { costLabel } from '../core/cost';
+import { latestModel, selectedModel, serviceTierOptions } from '../core/settings';
 import { Composer } from './composer';
 import { SelectionMenu, selectedTranscriptText } from './selection';
 import type { QuestionPresetMenuItem } from '../core/questionPresets';
@@ -144,7 +142,6 @@ function renderPermissions(): void {
 }
 function renderSpeed(): void {
   if (!task) return;
-  const external = isExternalTask(task);
   const selectedTier = task.settings.serviceTier;
   const inheritedTier = task.effectiveServiceTier !== undefined ? task.effectiveServiceTier : completion.catalog?.serviceTier;
   const inheritedId = inheritedTier === null || inheritedTier === 'default' ? 'default'
@@ -152,8 +149,8 @@ function renderSpeed(): void {
   const values = serviceTierOptions.filter(option => option.id).map(option =>
     !selectedTier && option.id === inheritedId ? { ...option, id: '' } : option);
   const speed = $<HTMLSelectElement>('service-tier');
-  options(speed, external ? [{ id: 'default', label: 'Standard' }] : values, external ? 'default' : selectedTier ?? '');
-  speed.disabled = external || isTaskRunning(task) || !!sending || task.busy;
+  options(speed, values, selectedTier ?? '');
+  speed.disabled = isTaskRunning(task) || !!sending || task.busy;
 }
 function detailKey(details: HTMLDetailsElement): string {
   const message = details.closest<HTMLElement>('.message');
@@ -208,19 +205,11 @@ function render(): void {
   pendingSends = reconcilePendingSends(pendingSends, task);
   completion.setContext(task, connected, pendingSends.length > 0);
   const busy = !!sending || task.busy;
-  const external = isExternalTask(task);
-  usageGauges.render(connected && !external ? usage : undefined);
-  const cost = costLabel(task.cost);
-  $('task-cost').hidden = !external;
-  $('task-cost').textContent = cost.label;
-  $('task-cost').title = cost.detail;
-  $('task-cost').setAttribute('aria-label', `このタスクの外部API利用額: ${cost.label}`);
+  usageGauges.render(connected ? usage : undefined);
   const retrying = task.turnError?.willRetry === true;
   $('status').textContent = busy ? '送信中' : retrying && task.status === 'running' ? '再試行中' : statusLabel[task.status];
   $('status-dot').className = `dot ${task.status}`;
   $<HTMLInputElement>('auto-resume').checked = task.autoResume;
-  $<HTMLInputElement>('auto-resume').disabled = external;
-  $<HTMLInputElement>('auto-resume').closest<HTMLElement>('label')!.hidden = external;
   const notice = $('notice');
   const waiting = task.status === 'waiting';
   const turnError = task.turnError ? `${retrying ? 'Codexが再試行しています。\n' : ''}${task.turnError.error.message}` : undefined;
@@ -273,18 +262,17 @@ function render(): void {
   options($<HTMLSelectElement>('model'), [
     ...(task.settings.model === 'latest' ? [{ id: 'latest', label: latest ? `最新モデル (${latest.label})` : '最新モデル' }] : []),
     { id: '', label: task.effectiveModel || 'モデル' },
-    ...models.filter(model => !task!.threadId || sameTaskProvider(task!, model.id)).map(model => ({ id: model.id, label: model.label })),
+    ...models.map(model => ({ id: model.id, label: model.label })),
   ], task.settings.model ?? '');
   const model = selectedModel(models, task.settings.model ?? task.effectiveModel ?? 'latest');
-  options($<HTMLSelectElement>('effort'), external ? presetEffortOptions(model) : [
+  options($<HTMLSelectElement>('effort'), [
     { id: '', label: task.effectiveEffort || '推論の強さ' },
     ...(task.settings.effort === 'default' ? [{ id: 'default', label: model?.defaultEffort || 'モデルの既定値' }] : []),
     ...(model?.efforts ?? []).map(effort => ({ id: effort.id, label: effort.id })),
-  ], external ? task.settings.effort ?? 'default' : task.settings.effort ?? '');
+  ], task.settings.effort ?? '');
   renderSpeed();
   renderPermissions();
   for (const id of ['model', 'effort', 'mode']) $<HTMLSelectElement>(id).disabled = running || busy;
-  if (external && !model?.efforts.length) $<HTMLSelectElement>('effort').disabled = true;
   const cyclePreset = $<HTMLButtonElement>('cycle-preset');
   cyclePreset.disabled = running || busy || !presetCount || !models.length;
   updatePresetTitle();

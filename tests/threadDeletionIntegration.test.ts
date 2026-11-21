@@ -9,7 +9,7 @@ import { JsonRpcPeer } from '../src/appServer/rpc';
 import { deleteThreadHistory } from '../src/core/threadDeletion';
 import type { JsonObject } from '../src/core/types';
 
-for (const scenario of ['approve', 'cancel', 'running', 'unreadable', 'missing-root-rollout'] as const) test(`persisted references include hidden forks despite empty rollouts: ${scenario}`, async t => {
+for (const scenario of ['approve', 'cancel', 'running', 'unreadable', 'external-fork', 'missing-root-rollout'] as const) test(`persisted references include hidden forks despite empty rollouts: ${scenario}`, async t => {
   const folder = await mkdtemp(join(tmpdir(), 'codex-deck-deletion-'));
   t.after(() => rm(folder, { recursive: true, force: true }));
   const records = [
@@ -40,11 +40,11 @@ for (const scenario of ['approve', 'cancel', 'running', 'unreadable', 'missing-r
       else if (request.method === 'thread/list') {
         // The real server omits hidden forks and returns null ancestry on list responses.
         result = { data: records.filter(record => record.id !== 'hidden' && record.archived === request.params.archived)
-          .map(record => ({ id: record.id, name: record.name, forkedFromId: null, parentThreadId: null })), nextCursor: null };
+          .map(record => ({ id: record.id, name: record.name, modelProvider: 'openai', forkedFromId: null, parentThreadId: null })), nextCursor: null };
       } else if (request.method === 'thread/read') {
         const record = records.find(record => record.id === id)!;
         if (scenario === 'unreadable' && id === 'hidden') error = { code: -32603, message: 'metadata unavailable' };
-        else result = { thread: { id, name: record.name, forkedFromId: record.forked_from_id,
+        else result = { thread: { id, name: record.name, modelProvider: scenario === 'external-fork' && id === 'hidden' ? 'external' : 'openai', forkedFromId: record.forked_from_id,
           status: { type: (scenario === 'running' && id === 'hidden') || (scenario === 'missing-root-rollout' && id === 'root') ? 'active' : 'notLoaded' } } };
       } else if (request.method === 'thread/delete') {
         if (records.some(record => record.forked_from_id === id && !deleted.includes(record.id))) error = { code: -32603, message: 'forked history still references it' };
@@ -67,8 +67,8 @@ for (const scenario of ['approve', 'cancel', 'running', 'unreadable', 'missing-r
     assert.deepEqual(deleted, []);
     return scenario === 'approve';
   });
-  if (scenario === 'running' || scenario === 'unreadable' || scenario === 'missing-root-rollout') {
-    await assert.rejects(work, scenario === 'running' ? /一覧に出ない分岐.*停止/ : scenario === 'missing-root-rollout' ? /元のチャット.*停止/ : /metadata unavailable/);
+  if (scenario === 'running' || scenario === 'unreadable' || scenario === 'external-fork' || scenario === 'missing-root-rollout') {
+    await assert.rejects(work, scenario === 'running' ? /一覧に出ない分岐.*停止/ : scenario === 'missing-root-rollout' ? /元のチャット.*停止/ : scenario === 'external-fork' ? /ChatGPT/ : /metadata unavailable/);
     assert.equal(confirmations, 0);
   } else {
     assert.deepEqual(await work, { deletedIds: scenario === 'approve' ? ['hidden', 'fork', 'root'] : [] });

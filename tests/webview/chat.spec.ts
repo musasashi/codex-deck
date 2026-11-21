@@ -10,77 +10,13 @@ import { taskReferenceBody } from '../../src/core/taskReferenceText';
 import { selectionReference } from '../../src/core/selectionReference';
 import { FakeGateway, thread } from '../helpers';
 import type { Attachment, ImageStroke, Skill, Task, Usage } from '../../src/core/types';
-import { emptyTaskCost } from '../../src/core/cost';
-import { withHuggingFaceModels } from '../../src/core/huggingFace';
-import { providerModels, validateProviders } from '../../src/core/providers';
 import { inducedVoltageAnswer } from '../fixtures/math';
 import { carrierDiagram, diagramExamples } from '../fixtures/diagrams';
-
-test('Responses tasks only offer their own provider and declared efforts, including the provider default', async ({ page }) => {
-  const catalog = providerModels(validateProviders([
-    { id: 'one', name: 'First API', baseUrl: 'http://localhost/v1', models: [{ id: 'model', reasoningEfforts: ['low', 'high'] }, { id: 'plain' }] },
-    { id: 'two', name: 'Other API', baseUrl: 'http://localhost/v1', models: [{ id: 'model' }] },
-  ]));
-  const value = task();
-  value.settings = { model: 'responses:one:model', effort: 'high', mode: 'read-only' };
-  value.modelProvider = 'codex_deck_responses_one';
-  value.cost = emptyTaskCost();
-  await receive(page, { type: 'state', task: value, models: [...models, ...catalog], connected: true });
-  await expect(page.locator('#model option')).toHaveCount(3);
-  await expect(page.locator('#model option[value="responses:one:plain"]')).toHaveCount(1);
-  await expect(page.locator('#model option[value="responses:two:model"]')).toHaveCount(0);
-  await expect(page.locator('#model option[value="catalog-model"]')).toHaveCount(0);
-  await expect(page.locator('#effort option')).toHaveText(['モデルの既定値', 'low', 'high']);
-  await expect(page.getByLabel('速度', { exact: true })).toBeDisabled();
-  await expect(page.locator('#service-tier option')).toHaveText(['Standard']);
-  await page.locator('#effort').selectOption('default');
-  expect((await messages(page)).at(-1)).toMatchObject({ type: 'settings', model: 'responses:one:model', effort: 'default' });
-  await expect(page.locator('#task-cost')).toBeVisible();
-  await expect(page.locator('#task-cost')).toHaveAttribute('aria-label', /外部API利用額/);
-  await expect(page.locator('#usage-gauges')).toBeHidden();
-  await expect(page.locator('#auto-resume')).toBeHidden();
-  value.settings = { model: 'responses:one:plain', mode: 'read-only' };
-  value.effectiveEffort = 'high';
-  await receive(page, { type: 'state', task: value, models: catalog, connected: true });
-  await expect(page.locator('#effort')).toHaveValue('default');
-  await expect(page.locator('#effort')).toBeDisabled();
-  await expect(page.locator('#effort option')).toHaveText(['モデルの既定値']);
-  await expect(page.getByLabel('速度', { exact: true })).toBeDisabled();
-});
-
-test('HF task cost replaces quota gauges, updates live, and stays visible after disconnecting', async ({ page }, info) => {
-  const value = task();
-  value.settings = { model: 'hf:deepseek-ai/DeepSeek-V4-Flash:deepinfra', effort: 'default', mode: 'workspace-write', pricing: { input: 0.1, output: 0.2 } };
-  value.modelProvider = 'codex_deck_huggingface';
-  value.effectiveEffort = 'max';
-  value.cost = { ...emptyTaskCost(), usd: 0.1234 };
-  const usage = decodeUsage({ rateLimits: { limitId: 'codex', primary: { usedPercent: 10, windowDurationMins: 300 }, secondary: { usedPercent: 20, windowDurationMins: 10080 } } });
-  await state(page, value, usage);
-  await expect(page.locator('#task-cost')).toHaveText('$0.1234（概算）');
-  await expect(page.locator('#task-cost')).toHaveAttribute('title', /ユーザー設定の単価/);
-  await expect(page.locator('#usage-gauges')).toBeHidden();
-  await expect(page.locator('#auto-resume')).toBeHidden();
-  await expect(page.locator('#effort')).toHaveValue('default');
-  await expect(page.locator('#effort')).toBeDisabled();
-  await expect(page.locator('#effort option')).toHaveText(['モデルの既定値']);
-  await expect(page.locator('#model')).toHaveValue(value.settings.model!);
-  await expect(page.locator('#model option[value="catalog-model"]')).toHaveCount(0);
-  value.cost.usd = 0.2345;
-  await state(page, value, usage, false);
-  await expect(page.locator('#task-cost')).toHaveText('$0.2345（概算）');
-  await page.setViewportSize({ width: 380, height: 850 });
-  expect(await page.evaluate(() => document.body.scrollWidth)).toBeLessThanOrEqual(380);
-  await page.screenshot({ path: info.outputPath('hf-cost.png'), fullPage: true });
-  await state(page, task(), usage);
-  await expect(page.locator('#task-cost')).toBeHidden();
-  await expect(page.getByRole('meter', { name: 'Codex 5時間枠の残量' })).toBeVisible();
-  await expect(page.locator('#auto-resume')).toBeVisible();
-});
 
 const theme = `:root{--vscode-editor-background:#181a1e;--vscode-foreground:#e0e3e9;--vscode-descriptionForeground:#a0a7b3;--vscode-widget-border:#353940;--vscode-input-background:#22252b;--vscode-input-foreground:#e0e3e9;--vscode-input-placeholderForeground:#979faa;--vscode-button-background:#b6d8b1;--vscode-button-foreground:#193019;--vscode-button-hoverBackground:#c9e8c5;--vscode-button-secondaryBackground:#353941;--vscode-button-secondaryForeground:#e0e3e9;--vscode-focusBorder:#8eaf8a;--vscode-font-family:system-ui,sans-serif;--vscode-font-size:13px;--vscode-editor-font-family:monospace;--vscode-editor-font-size:12px;--vscode-textCodeBlock-background:#121417;--vscode-textLink-foreground:#a9c6ea;--vscode-progressBar-background:#b6d8b1;--vscode-editorWarning-foreground:#e2bd79;--vscode-errorForeground:#f5a59e;--vscode-inputValidation-warningBackground:#302b20;--vscode-editorWidget-background:#22252b;--vscode-dropdown-background:#22252b;--vscode-dropdown-foreground:#e0e3e9;}`;
 const models = [{ id: 'catalog-model', label: 'Catalog model', efforts: [{ id: 'new-effort', description: 'from server' }, { id: 'high', description: 'high' }], description: '', defaultEffort: 'new-effort', isDefault: true, inputModalities: ['text', 'image'] }];
 function task(): Task { return { id: 'task-1', threadId: 'thread-1', title: 'App Serverとの通信を実装する', cwd: '/workspace/codex-deck', open: true, autoResume: false, claims: [], settings: { mode: 'default' }, status: 'idle', turns: [], requests: [], attachments: [], busy: false, hydrated: true, instructionSources: [] }; }
-async function state(page: Page, value: Task, usage?: Usage, connected = true, presetCount = 1, questionPresets: { id: string; name: string }[] = []) { await page.evaluate(data => window.dispatchEvent(new MessageEvent('message', { data })), { type: 'state', task: value, models: withHuggingFaceModels(models, [value.settings.model]), usage, connected, presetCount, questionPresets, enterBehavior: 'enter' }); }
+async function state(page: Page, value: Task, usage?: Usage, connected = true, presetCount = 1, questionPresets: { id: string; name: string }[] = []) { await page.evaluate(data => window.dispatchEvent(new MessageEvent('message', { data })), { type: 'state', task: value, models, usage, connected, presetCount, questionPresets, enterBehavior: 'enter' }); }
 async function messages(page: Page) { return page.evaluate(() => (window as unknown as { sent: Record<string, unknown>[] }).sent); }
 async function receive(page: Page, data: Record<string, unknown>) { await page.evaluate(data => window.dispatchEvent(new MessageEvent('message', { data })), data); }
 async function sendResult(page: Page, type: 'sent' | 'failure') {
@@ -391,7 +327,7 @@ test('wide display equations scroll within a narrow chat instead of expanding th
   await page.screenshot({ path: info.outputPath('wide-math.png'), fullPage: true });
 });
 
-test('dragging an answer exposes a selection menu and appends a quote followed by a comment', async ({ page }, info) => {
+test('the selection menu quotes the selected answer in the draft and leaves room for a comment', async ({ page }, info) => {
   const value = task();
   value.turns = [{ id: 'answer', status: 'completed', items: [{ id: 'reply', kind: 'agentMessage', data: { text: '前の説明。選択した文章です。後の説明。' } }] }];
   await state(page, value);
@@ -2190,7 +2126,6 @@ test('selection menu lists questions in order, preserves the selected text, and 
   await page.locator('.assistant .markdown p').selectText();
   await openSelectionMenu(page, '.assistant .markdown p');
   await expect(page.getByRole('menuitem')).toHaveText(['コピー', 'Codex-Deckで言及', '具体例で', 'かみ砕いて']);
-  await expect(page.getByRole('menuitem', { name: '質問プリセットを設定' })).toHaveCount(0);
   // Selection may disappear while the menu has keyboard focus; actions still use the snapshot.
   await page.evaluate(() => window.getSelection()?.removeAllRanges());
   await page.getByRole('menuitem', { name: '具体例で' }).evaluate(element => { (element as HTMLButtonElement).click(); (element as HTMLButtonElement).click(); });

@@ -89,10 +89,10 @@ test('forks wait for the first new instruction and summarize it with the selecte
 
 test('a fork restored before its first send uses the new instruction and inherited context to name the task', async () => {
   const { gateway, manager, requests } = setup();
-  const source = { ...thread('source'), title: 'Claude枠とDeepSeek API対応可否', name: 'Claude枠とDeepSeek API対応可否', turns: [
+  const source = { ...thread('source'), title: '作業環境についての相談', name: '作業環境についての相談', turns: [
     { id: 'design', status: 'completed', items: [
-      { id: 'question', kind: 'userMessage', data: { content: [{ type: 'text', text: 'DeepSeek APIはどのような設計になる？' }] } },
-      { id: 'answer', kind: 'agentMessage', data: { text: 'DeepSeek対応でもCodex App Serverを継続利用し、接続先ごとに会話管理と残高表示を分けます。' } },
+      { id: 'question', kind: 'userMessage', data: { content: [{ type: 'text', text: '閉じた会話はどこから再開できますか？' }] } },
+      { id: 'answer', kind: 'agentMessage', data: { text: 'チャット履歴で会話を選ぶとタブで再開できます。' } },
     ] },
   ] };
   gateway.threads.set(source.id, source);
@@ -105,14 +105,14 @@ test('a fork restored before its first send uses the new instruction and inherit
     await restored.send(forked.id, '  '); await tick();
     assert.equal(restored.get(forked.id).title, '分岐したタスク');
     assert.equal(requests.length, 0, 'restoring or an empty send must not start inference');
-    await restored.send(forked.id, 'この修正の仕様ドキュメントを作成して'); await tick();
+    await restored.send(forked.id, 'この手順をまとめてください'); await tick();
     assert.equal(requests.length, 1);
-    assert.equal(JSON.parse(requests[0]!.request.input).request, 'この修正の仕様ドキュメントを作成して');
-    assert.match(requests[0]!.request.input, /DeepSeek対応でもCodex App Serverを継続利用/);
-    assert.doesNotMatch(requests[0]!.request.input, /Claude枠/);
-    requests[0]!.result.resolve('DeepSeek API対応の仕様書を作成'); await tick();
-    assert.equal(restored.get(forked.id).title, 'DeepSeek API対応の仕様書を作成');
-    assert.equal(gateway.threads.get(forked.threadId!)?.name, 'DeepSeek API対応の仕様書を作成');
+    assert.equal(JSON.parse(requests[0]!.request.input).request, 'この手順をまとめてください');
+    assert.match(requests[0]!.request.input, /チャット履歴で会話を選ぶとタブで再開できます/);
+    assert.doesNotMatch(requests[0]!.request.input, /作業環境についての相談/);
+    requests[0]!.result.resolve('会話を履歴から再開する手順'); await tick();
+    assert.equal(restored.get(forked.id).title, '会話を履歴から再開する手順');
+    assert.equal(gateway.threads.get(forked.threadId!)?.name, '会話を履歴から再開する手順');
   } finally { restored.dispose(); await restored.flush(); }
 });
 

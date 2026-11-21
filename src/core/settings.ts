@@ -1,15 +1,18 @@
 import { array, messageOf, object, string, type ExecutionMode, type Model, type RunSettings, type ServiceTier, type SettingsPreset } from './types';
 import { permissionPresets } from './composer';
-import { huggingFaceModel, isHuggingFaceModel } from './huggingFace';
-import { isExternalModel, sameTaskProvider } from './providers';
-import type { Task } from './types';
-import { readTokenPrice, validateTokenPrice } from './cost';
 
 export const DEFAULT_PRESET = { model: 'latest', effort: 'high', mode: 'auto-review' } as const satisfies SettingsPreset;
 export const DEFAULT_TITLE_MODEL = 'latest';
 export const DEFAULT_TITLE_EFFORT = 'lowest';
 
-export function readTitleModel(value: unknown): string { return string(value).trim() || DEFAULT_TITLE_MODEL; }
+export function isExternalModelId(value: unknown): boolean {
+  return typeof value === 'string' && (value.startsWith('hf:') || value.startsWith('responses:'));
+}
+
+export function readTitleModel(value: unknown): string {
+  const model = string(value).trim();
+  return model && !isExternalModelId(model) ? model : DEFAULT_TITLE_MODEL;
+}
 export function readTitleEffort(value: unknown): string { return string(value).trim() || DEFAULT_TITLE_EFFORT; }
 
 export function validateTitleModel(value: unknown, models: Model[]): string {
@@ -54,7 +57,7 @@ export function validateServiceTier(value: unknown): ServiceTier | undefined {
 }
 
 export function selectedModel(models: Model[], id: string): Model | undefined {
-  return id === 'latest' ? latestModel(models) : huggingFaceModel(id) ?? models.find(model => model.id === id);
+  return id === 'latest' ? latestModel(models) : models.find(model => model.id === id);
 }
 
 export function presetEffortOptions(model?: Model): { id: string; label: string }[] {
@@ -71,7 +74,7 @@ export function validatePreset(value: unknown, models: Model[]): SettingsPreset 
   if (!selected) throw new Error('利用できるモデルを選択してください。候補の再読み込みもお試しください。');
   if (!presetEffortOptions(selected).some(option => option.id === effort)) throw new Error('選択したモデルに対応する推論強度を選択してください。');
   if (!presetPermissionOptions.some(option => option.id === mode)) throw new Error('一覧から権限を選択してください。');
-  return { model, effort, ...(serviceTier && !isExternalModel(model) ? { serviceTier } : {}), mode: mode as ExecutionMode, ...(isExternalModel(model) && data.pricing !== undefined ? { pricing: validateTokenPrice(data.pricing) } : {}) };
+  return { model, effort, ...(serviceTier ? { serviceTier } : {}), mode: mode as ExecutionMode };
 }
 
 export function readPresets(value: unknown): SettingsPreset[] {
@@ -79,8 +82,8 @@ export function readPresets(value: unknown): SettingsPreset[] {
     const data = object(value);
     const model = string(data.model), effort = string(data.effort), mode = string(data.mode);
     const validTier = data.serviceTier === undefined || serviceTierOptions.some(option => option.id === data.serviceTier);
-    return model && effort && presetPermissionOptions.some(option => option.id === mode) && validTier
-      ? [{ model, effort: isHuggingFaceModel(model) ? 'default' : effort, ...(data.serviceTier && !isExternalModel(model) ? { serviceTier: data.serviceTier as ServiceTier } : {}), mode: mode as ExecutionMode, ...(isExternalModel(model) && readTokenPrice(data.pricing) ? { pricing: readTokenPrice(data.pricing) } : {}) }] : [];
+    return model && !isExternalModelId(model) && effort && presetPermissionOptions.some(option => option.id === mode) && validTier
+      ? [{ model, effort, ...(data.serviceTier ? { serviceTier: data.serviceTier as ServiceTier } : {}), mode: mode as ExecutionMode }] : [];
   });
   return presets.length ? presets : [{ ...DEFAULT_PRESET }];
 }
@@ -96,8 +99,7 @@ export function validatePresets(value: unknown, models: Model[]): SettingsPreset
 export function nextPresetIndex(settings: RunSettings, presets: SettingsPreset[], models: Model[], previousIndex = -1): number {
   if (!presets.length) return -1;
   const same = (a: RunSettings, b: RunSettings): boolean => a.model === b.model && a.effort === b.effort && a.mode === b.mode
-    && a.serviceTier === b.serviceTier
-    && a.pricing?.input === b.pricing?.input && a.pricing?.output === b.pricing?.output;
+    && a.serviceTier === b.serviceTier;
   const matches = (preset: SettingsPreset): boolean => {
     if (same(preset, settings)) return true;
     try { return same(resolveRunSettings(preset, models), resolveRunSettings(settings, models)); }
@@ -108,12 +110,7 @@ export function nextPresetIndex(settings: RunSettings, presets: SettingsPreset[]
   return (current + 1) % presets.length;
 }
 
-export function taskPresets(task: Task, presets: SettingsPreset[]): SettingsPreset[] {
-  return task.threadId ? presets.filter(preset => sameTaskProvider(task, preset.model)) : presets;
-}
-
 export function latestModel(models: Model[]): Model | undefined {
-  models = models.filter(model => !isExternalModel(model.id));
   let model = models.find(model => model.isDefault) ?? models[0];
   const seen = new Set<string>();
   while (model) {

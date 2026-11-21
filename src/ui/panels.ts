@@ -1,9 +1,8 @@
 import * as vscode from 'vscode';
 import { randomBytes } from 'node:crypto';
-import { array, object, string, messageOf, statusLabel, type JsonObject, type Model, type Task, type TaskStatus } from '../core/types';
+import { array, object, string, messageOf, statusLabel, type JsonObject, type Model, type Task, type TaskRecord, type TaskStatus } from '../core/types';
 import { TaskManager } from '../core/taskManager';
-import { readPresets, taskPresets } from '../core/settings';
-import { withHuggingFaceModels } from '../core/huggingFace';
+import { readPresets } from '../core/settings';
 import { chatHtml } from './html';
 import { readQuestionPresets } from '../core/questionPresets';
 
@@ -23,7 +22,7 @@ export interface PanelHost {
   report(error: unknown): void;
 }
 
-export class TaskPanels implements vscode.WebviewPanelSerializer, vscode.Disposable {
+export class TaskPanels implements vscode.Disposable {
   private panels = new Map<string, vscode.WebviewPanel>();
   private serializers = new Map<string, vscode.Disposable>();
   private ready = new Set<string>();
@@ -31,7 +30,7 @@ export class TaskPanels implements vscode.WebviewPanelSerializer, vscode.Disposa
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
   private subscriptions: (() => void)[];
   private stopping = false;
-  constructor(private readonly uri: vscode.Uri, private readonly manager: TaskManager, private readonly host: PanelHost) {
+  constructor(private readonly uri: vscode.Uri, private readonly manager: TaskManager, private readonly host: PanelHost, savedTasks: TaskRecord[] = manager.openTasks) {
     this.subscriptions = [manager.changed.subscribe(task => {
       if (task && !manager.tasks.has(task.id)) { void this.close(task.id).catch(error => host.report(error)); return; }
       if (task) this.update(task.id); else for (const id of this.panels.keys()) this.update(id);
@@ -46,7 +45,11 @@ export class TaskPanels implements vscode.WebviewPanelSerializer, vscode.Disposa
       if (state.focused && this.activeId) this.post(this.activeId);
     });
     this.subscriptions.push(() => windowState.dispose());
-    for (const task of manager.openTasks) this.registerSerializer(task.id);
+    for (const task of savedTasks) {
+      if (!task.open) continue;
+      this.registerSerializer(task.id);
+      if (!manager.tasks.has(task.id)) void this.close(task.id).catch(error => host.report(error));
+    }
   }
   get activeId(): string | undefined { return [...this.panels].find(([, panel]) => panel.active)?.[0]; }
   idForEditorResource(resourcePath: string): string | undefined {
@@ -56,20 +59,18 @@ export class TaskPanels implements vscode.WebviewPanelSerializer, vscode.Disposa
   }
   private registerSerializer(id: string): void {
     const viewType = taskViewType(id);
-    if (!this.serializers.has(viewType)) this.serializers.set(viewType, vscode.window.registerWebviewPanelSerializer(viewType, this));
+    if (this.serializers.has(viewType)) return;
+    this.serializers.set(viewType, vscode.window.registerWebviewPanelSerializer(viewType, {
+      deserializeWebviewPanel: panel => this.restorePanel(id, panel),
+    }));
   }
-  async deserializeWebviewPanel(panel: vscode.WebviewPanel, state: unknown): Promise<void> {
-    const id = string(object(state).taskId);
-    if (!id || !this.manager.tasks.has(id)) { panel.dispose(); return; }
+  private async restorePanel(id: string, panel: vscode.WebviewPanel): Promise<void> {
+    const task = this.manager.tasks.get(id);
+    if (!task) { panel.dispose(); return; }
     const existing = this.panels.get(id);
     if (existing) { panel.dispose(); existing.reveal(); return; }
-    if (panel.viewType === 'codexDeck.task') {
-      panel.dispose();
-      this.open(this.manager.get(id));
-    } else {
-      this.manager.open(id);
-      this.bind(panel, this.manager.get(id));
-    }
+    this.manager.open(id);
+    this.bind(panel, task);
     try { await this.host.connect(); await this.manager.restore(id); }
     catch (error) { this.host.report(error); }
   }
@@ -176,10 +177,9 @@ export class TaskPanels implements vscode.WebviewPanelSerializer, vscode.Disposa
     panel.title = task.title;
     panel.iconPath = taskIcon(this.uri, task.unreadTurnId ? 'unread' : task.status);
     const config = vscode.workspace.getConfiguration('codexDeck', vscode.Uri.file(task.cwd));
-    const models = withHuggingFaceModels(this.host.models, [...readPresets(config.get('presets')).map(preset => preset.model), task.settings.model, task.effectiveModel]);
-    void panel.webview.postMessage({ type: 'state', task, models, connected: this.manager.gateway.connected,
+    void panel.webview.postMessage({ type: 'state', task, models: this.host.models, connected: this.manager.gateway.connected,
       questionPresets: readQuestionPresets(config.get('questionPresets')).map(({ id, name }) => ({ id, name })),
-      usage: this.manager.usage, presetCount: taskPresets(task, readPresets(config.get('presets'))).length, enterBehavior: config.get<string>('composerEnterBehavior', 'modEnter') });
+      usage: this.manager.usage, presetCount: readPresets(config.get('presets')).length, enterBehavior: config.get<string>('composerEnterBehavior', 'modEnter') });
   }
   private html(webview: vscode.Webview): string {
     const nonce = randomBytes(18).toString('base64');
