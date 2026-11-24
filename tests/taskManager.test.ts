@@ -17,21 +17,28 @@ function waitForUsage(state: ReturnType<typeof setup>, turnId = 'stopped') {
   state.gateway.finish(state.task.threadId!, turnId);
 }
 
-test('new tasks are listed immediately and stay listed after completion; closing never interrupts', async () => {
-  const { manager, gateway } = setup();
+test('new tasks stay listed after completion and closing a running task never interrupts it', async t => {
+  const gateway = new FakeGateway();
+  const manager = new TaskManager(gateway, { async save() {} }, [], { schedule: false });
+  t.after(() => manager.dispose());
   const task = manager.create('/project');
   assert.equal(task.threadId, undefined);
-  assert.ok(manager.openTasks.includes(task));
+  assert.deepEqual(manager.openTasks, [task]);
   await manager.send(task.id, 'hello');
+  gateway.finish(task.threadId!, task.activeTurnId!, 'completed');
+  assert.equal(task.status, 'idle');
+  assert.deepEqual(manager.openTasks, [task]);
+
+  await manager.send(task.id, 'follow up');
   const id = task.activeTurnId!;
   manager.close(task.id);
-  assert.ok(!manager.openTasks.includes(task));
+  assert.equal(manager.openTasks.length, 0);
   assert.deepEqual(gateway.interrupted, []);
   gateway.finish(task.threadId!, id, 'completed');
   const reopened = manager.openThread(task.threadId!);
   assert.equal(reopened, task);
   assert.equal(reopened.status, 'idle');
-  assert.ok(manager.openTasks.includes(task));
+  assert.deepEqual(manager.openTasks, [task]);
 });
 
 test('restoring a task with no recorded provider removes it from Deck when Codex identifies it as external', async () => {
@@ -409,13 +416,23 @@ test('manual input while a turn is active uses steer and the expected turn ID', 
   assert.equal(state.gateway.steered[0]?.turnId, turnId);
 });
 
-test('pending approvals and a newly active server turn prevent continuation', async () => {
-  const state = setup(); waitForUsage(state);
-  state.gateway.threads.get(state.task.threadId!)!.status = 'active';
-  await state.manager.checkUsage();
-  assert.equal(state.gateway.sent.length, 0);
-  assert.equal(state.task.waiting, undefined);
-  assert.equal(state.task.status, 'running');
+test('a blocking approval or active server status during usage recovery prevents automatic continuation', async () => {
+  for (const status of ['approval', 'running'] as const) {
+    const state = setup(); waitForUsage(state);
+    const threadId = state.task.threadId!;
+    const checking = state.manager.checkUsage();
+    if (status === 'approval') {
+      state.gateway.events.emit({ type: 'request', request: { id: 'number:1', threadId, turnId: 'next', kind: 'approval',
+        title: 'コマンドの実行', detail: '', choices: ['許可'], blocking: true } });
+    } else {
+      state.gateway.threads.get(threadId)!.status = 'active';
+    }
+    await checking;
+    assert.equal(state.gateway.sent.length, 0);
+    assert.equal(state.task.waiting, undefined);
+    assert.equal(state.task.status, status);
+    state.manager.dispose();
+  }
 });
 
 test('duplicate completion and stale starts cannot rerun a claimed stop or regress a newer turn', async () => {

@@ -150,17 +150,31 @@ test('save errors keep the draft and show an inline message that allows retry', 
   await expect(page.getByLabel('推論強度', { exact: true })).toHaveValue('medium');
 });
 
-test('a failed scope load cannot save values from the previous scope', async ({ page }) => {
+test('scoped settings remain editable after a catalog failure and save once the missing title model is replaced', async ({ page }) => {
+  const workspacePreset = { ...initialPreset, model: 'recommended' };
+  const workspace = { presets: [workspacePreset], titleModel: 'unavailable' };
+  const modelError = 'モデル一覧: 候補を取得できません。';
+  const model = page.getByLabel('モデル', { exact: true });
+  const titleModel = page.getByLabel('要約に使うモデル');
+  const save = page.getByRole('button', { name: '保存', exact: true });
   await snapshot(page);
   await page.getByLabel('推論強度', { exact: true }).selectOption('medium');
   await page.getByLabel('保存先').selectOption('workspace');
-  await receive(page, { type: 'settingsError', requestId: (await messages(page)).at(-1)!.requestId, message: '候補を取得できません。' });
-  await expect(page.getByRole('button', { name: '保存', exact: true })).toBeDisabled();
-  await expect(page.getByLabel('モデル', { exact: true })).toBeDisabled();
+  await snapshot(page, { ...workspace, models: [], modelError });
+  await expect(page.getByRole('status')).toHaveText(modelError);
+  await expect(model).toBeEnabled();
+  await expect(model).toHaveValue(workspacePreset.model);
+  await titleModel.selectOption('latest');
+  await expect(save).toBeDisabled();
+
   await page.getByRole('button', { name: '候補を再読み込み' }).click();
-  await snapshot(page);
-  await expect(page.getByLabel('モデル', { exact: true })).toBeEnabled();
-  await expect(page.getByLabel('推論強度', { exact: true })).toHaveValue('high');
+  await snapshot(page, workspace);
+  await expect(titleModel.locator('option:checked')).toContainText('候補にありません');
+  await page.getByLabel('権限').selectOption('read-only');
+  await expect(save).toBeDisabled();
+  await titleModel.selectOption('latest');
+  await save.click();
+  expect((await messages(page)).at(-1)).toMatchObject({ type: 'saveSettings', scope: 'workspace', titleModel: 'latest', presets: [{ ...workspacePreset, mode: 'read-only' }] });
 });
 
 test('catalog metadata is rendered as text and settings fit a split editor', async ({ page }) => {
@@ -224,20 +238,6 @@ test('an unavailable saved title effort must be repaired before saving', async (
   await page.getByLabel('要約の推論強度').selectOption('lowest');
   await page.getByRole('button', { name: '保存', exact: true }).click();
   expect((await messages(page)).at(-1)).toMatchObject({ type: 'saveSettings', titleEffort: 'lowest' });
-});
-
-test('unavailable title models and failed scope loads cannot be saved', async ({ page }) => {
-  await snapshot(page, { titleModel: 'unavailable' });
-  await expect(page.locator('#title-model option:checked')).toContainText('候補にありません');
-  await page.getByLabel('推論強度', { exact: true }).selectOption('medium');
-  await expect(page.getByRole('button', { name: '保存', exact: true })).toBeDisabled();
-  await page.getByLabel('要約に使うモデル').selectOption('latest');
-  await expect(page.getByRole('button', { name: '保存', exact: true })).toBeEnabled();
-  await page.getByLabel('保存先').selectOption('workspace');
-  await receive(page, { type: 'settingsError', requestId: (await messages(page)).at(-1)!.requestId, message: '候補を取得できません。' });
-  await expect(page.getByLabel('要約に使うモデル')).toBeDisabled();
-  await expect(page.getByLabel('要約の推論強度')).toBeDisabled();
-  await expect(page.getByRole('button', { name: '保存', exact: true })).toBeDisabled();
 });
 
 test('question presets have independent model settings, reorder by identity, and keep drafts on failure', async ({ page }, info) => {

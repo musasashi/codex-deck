@@ -13,7 +13,7 @@ const nodeRequire = createRequire(path.resolve('package.json'));
 const preset = { model: 'test-model', effort: 'default', mode: 'read-only' };
 const save = { type: 'saveSettings', scope: 'user', presets: [preset], titleModel: 'latest', titleEffort: 'lowest', requestId: 1 };
 
-function harness(scoped = false) {
+function harness(scoped = false, loadModels = () => new FakeGateway().listModels()) {
   const updates: { key: string; value: unknown; target: number; uri?: string }[] = [];
   const values = new Map<string, Record<string, unknown>>();
   const sent: JsonObject[] = [];
@@ -37,10 +37,23 @@ function harness(scoped = false) {
   const module = { exports: {} as typeof import('../src/ui/settingsPanel') };
   new Function('require', 'module', 'exports', bundle)((id: string) => id === 'vscode' ? api : nodeRequire(id), module, module.exports);
   const panel = new module.exports.SettingsPanel(new URL('file:///extension') as unknown as vscode.Uri,
-    { loadModels: () => new FakeGateway().listModels(), openCodexSettings: async () => {}, report() {} });
+    { loadModels, openCodexSettings: async () => {}, report() {} });
   panel.open();
   return { receive: (message: unknown) => receive(message), updates, sent, values };
 }
+
+test('a catalog failure returns the requested scope and its saved presets', async () => {
+  const h = harness(true, async () => { throw new Error('offline'); });
+  h.values.set('presets', { workspaceValue: [preset] });
+  await h.receive({ type: 'loadSettings', scope: 'workspace', requestId: 7 });
+  const state = h.sent.at(-1)!;
+  assert.equal(state.type, 'settingsState');
+  assert.equal(state.requestId, 7);
+  assert.equal(state.scope, 'workspace');
+  assert.deepEqual(state.presets, [preset]);
+  assert.deepEqual(state.models, []);
+  assert.equal(state.modelError, 'モデル一覧: offline');
+});
 
 test('settings load only subscription presets and save only supported settings', async () => {
   const h = harness();

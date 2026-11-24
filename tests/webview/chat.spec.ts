@@ -5,11 +5,10 @@ import { join } from 'node:path';
 import { chatHtml, imageViewerHtml } from '../../src/ui/html';
 import { decodeUsage } from '../../src/appServer/client';
 import { TaskManager } from '../../src/core/taskManager';
-import { questionAnswerText } from '../../src/core/questions';
 import { taskReferenceBody } from '../../src/core/taskReferenceText';
 import { selectionReference } from '../../src/core/selectionReference';
 import { FakeGateway, thread } from '../helpers';
-import type { Attachment, ImageStroke, Skill, Task, Usage } from '../../src/core/types';
+import type { Attachment, ImageStroke, RequestAnswer, Skill, Task, Usage } from '../../src/core/types';
 import { inducedVoltageAnswer } from '../fixtures/math';
 import { carrierDiagram, diagramExamples } from '../fixtures/diagrams';
 
@@ -2061,43 +2060,50 @@ test('streaming, quota wait and questions preserve unsent answers across updates
   expect((await messages(page)).at(-1)).toMatchObject({ type: 'answer', requestId: 'number:11', answer: { answers: { direction: ['まず接続層を進めてください。'] } } });
 });
 
-test('async message questions show selectable cards after completion and submit one answer', async ({ page }, info) => {
-  const value = task(); value.status = 'input';
-  value.requests = [{ id: 'message:question', threadId: 'thread-1', turnId: 'turn-1', kind: 'questions', source: 'agentMessage', title: '質問', detail: '', choices: [], blocking: false,
-    questions: [{ id: '0', header: '', question: 'AかBどちらにしますか？', secret: false, options: [{ label: 'A', description: '' }, { label: 'B', description: '' }] }] }];
-  await state(page, value);
-  const send = page.getByRole('button', { name: '回答を送信', exact: true });
-  await expect(send).toBeDisabled();
-  await expect(page.locator('#stop')).toBeHidden();
-  await expect(page.locator('#send')).toHaveText('送信');
-  await expect(page.locator('#model')).toBeEnabled();
-  await page.getByLabel('メッセージ', { exact: true }).fill('入力中の作業指示');
-  await page.locator('.answer-label').filter({ hasText: /^B$/ }).click();
-  await expect(page.getByRole('radio', { name: 'B', exact: true })).toBeChecked();
-  await expect(send).toBeEnabled();
-  await page.screenshot({ path: info.outputPath('question-card.png') });
-  await send.click();
-  await expect(send).toBeDisabled();
-  await page.locator('.question-card').evaluate((form: HTMLFormElement) => form.requestSubmit());
-  expect((await messages(page)).filter(message => message.type === 'answer')).toEqual([{ type: 'answer', requestId: 'message:question', answer: { answers: { '0': ['B'] } } }]);
-  await expect(page.getByLabel('メッセージ', { exact: true })).toHaveValue('入力中の作業指示');
-  await receive(page, { type: 'failure', requestId: 'message:question' });
-  await expect(send).toBeEnabled();
-  await expect(page.getByRole('radio', { name: 'B', exact: true })).toBeChecked();
-  await send.click();
-  const text = questionAnswerText(value.requests[0]!, { answers: { '0': ['B'] } });
-  value.requests = []; value.status = 'running'; value.activeTurnId = 'next';
-  value.turns = [{ id: 'next', status: 'inProgress', items: [{ id: 'answer', kind: 'userMessage', data: { content: [{ type: 'text', text }] } }] }];
-  await state(page, value);
-  await expect(page.locator('#requests')).toBeHidden();
-  const answer = page.locator('.message.user');
-  await expect(answer.locator('blockquote')).toHaveText('AかBどちらにしますか？');
-  await expect(answer.locator('blockquote')).toHaveCSS('border-left-style', 'solid');
-  await expect(answer.locator('.user-text')).toHaveText('B');
-  await page.screenshot({ path: info.outputPath('question-answer.png') });
-  await page.reload(); await state(page, value);
-  await expect(answer.locator('blockquote')).toHaveText('AかBどちらにしますか？');
-  await expect(answer.locator('.user-text')).toHaveText('B');
+test('completed message questions submit once per attempt and show the answer after retry', async ({ page }, info) => {
+  const gateway = new FakeGateway();
+  const history = thread();
+  const question = 'AかBどちらにしますか？';
+  history.turns = [{ id: 'asked', status: 'completed', items: [{ id: 'question', kind: 'agentMessage',
+    data: { text: question, delivery: 'async', questions: [{ title: question, options: ['A', 'B'] }] } }] }];
+  gateway.threads.set(history.id, history);
+  const manager = new TaskManager(gateway, { async save() {} }, [], { schedule: false });
+  try {
+    const value = manager.adoptThread(structuredClone(history));
+    const requestId = value.requests[0]!.id;
+    await state(page, value);
+    const send = page.getByRole('button', { name: '回答を送信', exact: true });
+    await expect(send).toBeDisabled();
+    await expect(page.locator('#stop')).toBeHidden();
+    await expect(page.locator('#send')).toHaveText('送信');
+    await expect(page.locator('#model')).toBeEnabled();
+    await page.getByLabel('メッセージ', { exact: true }).fill('入力中の作業指示');
+    await page.locator('.answer-label').filter({ hasText: /^B$/ }).click();
+    await page.screenshot({ path: info.outputPath('question-card.png') });
+    await send.click();
+    await expect(send).toBeDisabled();
+    await page.locator('.question-card').evaluate((form: HTMLFormElement) => form.requestSubmit());
+    expect((await messages(page)).filter(message => message.type === 'answer')).toEqual([{ type: 'answer', requestId, answer: { answers: { '0': ['B'] } } }]);
+    await expect(page.getByLabel('メッセージ', { exact: true })).toHaveValue('入力中の作業指示');
+
+    await receive(page, { type: 'failure', requestId });
+    await expect(page.getByRole('radio', { name: 'B', exact: true })).toBeChecked();
+    await send.click();
+    const replies = (await messages(page)).filter(message => message.type === 'answer');
+    expect(replies).toHaveLength(2);
+    const retry = replies[1]!;
+    await manager.answer(value.id, String(retry.requestId), retry.answer as RequestAnswer);
+    await state(page, value);
+    await expect(page.locator('#requests')).toBeHidden();
+    const answer = page.locator('.message.user');
+    await expect(answer.locator('blockquote')).toHaveText(question);
+    await expect(answer.locator('blockquote')).toHaveCSS('border-left-style', 'solid');
+    await expect(answer.locator('.user-text')).toHaveText('B');
+    await page.screenshot({ path: info.outputPath('question-answer.png') });
+    await page.reload(); await state(page, value);
+    await expect(answer.locator('blockquote')).toHaveText(question);
+    await expect(answer.locator('.user-text')).toHaveText('B');
+  } finally { manager.dispose(); }
 });
 
 test('multiple questions require answers and freely switch between options and text', async ({ page }) => {

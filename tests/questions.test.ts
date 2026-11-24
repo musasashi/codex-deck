@@ -24,7 +24,7 @@ function setup(status = 'inProgress', records: TaskRecord[] = []) {
   return { gateway, manager, task };
 }
 
-test('async message questions from history and live events remain visible after completion', () => {
+test('history and streamed questions survive completion and only a new question raises attention', () => {
   const { gateway, manager, task } = setup();
   const other = manager.adoptThread(thread('other'));
   const request = task.requests[0]!;
@@ -32,27 +32,22 @@ test('async message questions from history and live events remain visible after 
   assert.equal(request.blocking, false);
   assert.deepEqual(request.questions?.[0]?.options.map(option => option.label), ['A', 'B']);
   assert.equal(task.status, 'running');
-  gateway.events.emit({ type: 'item', threadId: task.threadId!, turnId: 'turn', item: questionItem(), completed: true });
-  assert.equal(task.requests.length, 1, 'duplicate items must not duplicate the card');
+  let attention = 0;
+  manager.attention.subscribe(() => attention++);
+  const live = { type: 'item' as const, threadId: task.threadId!, turnId: 'turn', item: questionItem('second'), completed: true };
+  gateway.events.emit(live);
+  assert.equal(attention, 1);
+  gateway.events.emit(live);
+  assert.equal(attention, 1);
+  assert.equal(task.requests.length, 2);
+  const ids = task.requests.map(request => request.id);
   assert.equal(other.requests.length, 0);
   gateway.events.emit({ type: 'turn', threadId: task.threadId!, turn: { id: 'turn', status: 'completed', items: [] }, completed: true });
   assert.equal(task.activeTurnId, undefined);
   assert.equal(task.status, 'input');
   assert.equal(task.requests[0]?.id, request.id);
   manager.close(task.id); manager.open(task.id);
-  assert.equal(task.requests[0]?.id, request.id);
-  manager.dispose();
-});
-
-test('a streamed async question is decoded without a server request or experimental capabilities', () => {
-  const { gateway, manager, task } = setup();
-  let attention = 0;
-  manager.attention.subscribe(() => attention++);
-  gateway.events.emit({ type: 'item', threadId: task.threadId!, turnId: 'turn', item: questionItem('second'), completed: true });
-  assert.equal(task.requests.length, 2);
-  assert.equal(attention, 1);
-  gateway.events.emit({ type: 'item', threadId: task.threadId!, turnId: 'turn', item: questionItem('second'), completed: true });
-  assert.equal(attention, 1);
+  assert.deepEqual(task.requests.map(request => request.id), ids);
   manager.dispose();
 });
 

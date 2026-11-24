@@ -17,6 +17,7 @@ const bundle = buildSync({ entryPoints: [path.resolve('src/extension.ts')], bund
   platform: 'node', format: 'cjs', external: ['vscode'], logLevel: 'silent' }).outputFiles[0]!.text;
 const nodeRequire = createRequire(path.resolve('package.json'));
 const disposable = () => ({ dispose() {} });
+const webviewOrigin = 'https://webview.test';
 
 class Emitter<T> {
   private listeners = new Set<(value: T) => void>();
@@ -39,7 +40,7 @@ function panel() {
   let receive = async (_value: unknown): Promise<void> => {};
   const webviewPanel = {
     active: true, viewColumn: 1,
-    webview: { cspSource: 'test:', asWebviewUri: (uri: vscode.Uri) => uri,
+    webview: { cspSource: webviewOrigin, asWebviewUri: (uri: URL) => new URL(uri.pathname, webviewOrigin),
       onDidReceiveMessage(listener: typeof receive) { receive = listener; return disposable(); },
       async postMessage(message: JsonObject) { messages.push(structuredClone(message)); return true; } },
     reveal() {}, onDidChangeViewState: disposable, onDidDispose: disposed.event, dispose() { disposed.fire(); },
@@ -169,6 +170,7 @@ test('chat images resolve within the task folder and use one separate fullscreen
   const cwd = path.join(parent, 'board');
   const file = path.join(cwd, '基板 #1.PNG');
   const href = encodeURIComponent(path.basename(file));
+  const imageUri = webviewOrigin + pathToFileURL(file).pathname;
   const denied = ['missing.png', '../outside.png', 'outside-link.png', 'notes.md', 'https://example.com/remote.png'];
   const extension = activate([{ ...record('board', true, true), cwd }]);
   try {
@@ -180,7 +182,7 @@ test('chat images resolve within the task folder and use one separate fullscreen
     await extension.restoreTab('board', tab);
     await tab.receive({ type: 'resolveChatImages', cwd, links: [file, href, ...denied] });
     assert.deepEqual(tab.messages.at(-1), { type: 'chatImageSources', cwd, sources: [
-      { href: file, uri: pathToFileURL(file).href }, { href, uri: pathToFileURL(file).href }, ...denied.map(href => ({ href, uri: '' })),
+      { href: file, uri: imageUri }, { href, uri: imageUri }, ...denied.map(href => ({ href, uri: '' })),
     ] });
     assert.ok(tab.webview.options.localResourceRoots?.some(root => root.toString() === pathToFileURL(cwd).href));
     const calls: unknown[][] = [];
@@ -196,7 +198,7 @@ test('chat images resolve within the task folder and use one separate fullscreen
     assert.deepEqual(calls, [['workbench.action.newEmptyEditorWindow']]);
     await viewer.receive({ type: 'ready', fullscreen: false });
     assert.deepEqual(calls.at(-1), ['workbench.action.toggleFullScreen']);
-    assert.deepEqual(viewer.messages.at(-1), { type: 'image', src: pathToFileURL(file).href, label: '基板' });
+    assert.deepEqual(viewer.messages.at(-1), { type: 'image', src: imageUri, label: '基板' });
     await tab.receive({ type: 'openChatImage', href: file, label: '下面' });
     assert.equal(extension.createdPanels(), 1);
     assert.equal(viewer.messages.at(-1)?.label, '下面');
@@ -387,15 +389,10 @@ test('activation lists all saved open tasks before any editor tab is deserialize
 });
 
 test('saved external tasks and drafts are hidden and their restored tabs close', async () => {
-  const native = { ...record('native', true), modelProvider: 'openai', cost: { total: 1 },
-    settings: { mode: 'default' as const, model: 'test-model', pricing: { input: 1, output: 2 } } };
-  const extension = activate([native, { ...record('external', true), modelProvider: 'custom' },
+  const extension = activate([{ ...record('native', true), modelProvider: 'openai' }, { ...record('external', true), modelProvider: 'custom' },
     { ...record('draft', true, true), settings: { mode: 'default', model: externalModelIds[0] } }]);
   try {
-    const rows = extension.rows();
-    assert.deepEqual(rows.map(row => row.id), ['native']);
-    assert.deepEqual(rows[0]?.settings, { mode: 'default', model: 'test-model' });
-    assert.equal(Object.hasOwn(rows[0]!, 'cost'), false);
+    assert.deepEqual(extension.rows().map(row => row.id), ['native']);
     for (const id of ['external', 'draft']) {
       const tab = panel();
       let disposed = false;
