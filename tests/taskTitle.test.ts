@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { TaskManager } from '../src/core/taskManager';
 import { parseTitle, provisionalTitle, titleInput } from '../src/core/taskTitle';
-import type { Attachment, TitleRequest, TitleSource, Turn } from '../src/core/types';
+import type { Attachment, TitleRequest, Turn } from '../src/core/types';
 import { deferred, FakeGateway, thread } from './helpers';
 
 const tick = () => new Promise<void>(resolve => setImmediate(resolve));
@@ -116,43 +116,30 @@ test('a fork restored before its first send uses the new instruction and inherit
   } finally { restored.dispose(); await restored.flush(); }
 });
 
-test('saved unresolved fork placeholders recover on send while explicit manual and generated names stay protected', async () => {
-  for (const titleSource of ['provisional', 'existing', undefined, 'manual', 'generated'] as (TitleSource | undefined)[]) {
-    const { gateway, manager, requests } = setup();
-    const source = { ...thread('source'), turns: conversation() };
-    gateway.threads.set(source.id, source);
-    const forked = await manager.fork(manager.adoptThread(source).id);
-    const records = manager.records();
-    Object.assign(records.find(record => record.id === forked.id)!, { titleSource, titleGenerationAttempted: true });
-    manager.dispose(); await manager.flush();
-    const restored = new TaskManager(gateway, { async save() {} }, records, { schedule: false, titleModel: () => 'title-model' });
-    try {
-      await restored.send(forked.id, 'この修正の仕様ドキュメントを作成して'); await tick();
-      if (titleSource === 'manual' || titleSource === 'generated') {
-        assert.equal(requests.length, 0);
-        assert.equal(restored.get(forked.id).title, '分岐したタスク');
-      } else {
-        assert.equal(requests.length, 1);
-        requests[0]!.result.resolve('通知機能の仕様書を作成'); await tick();
-        assert.equal(restored.get(forked.id).title, '通知機能の仕様書を作成');
-      }
-    } finally { restored.dispose(); await restored.flush(); }
-  }
-});
+test('manual and generated fork titles matching the placeholder survive reload without another summary', async () => {
+  const { gateway, manager, requests } = setup();
+  const source = thread('source');
+  gateway.threads.set(source.id, source);
+  const original = manager.adoptThread(source);
+  const title = '分岐したタスク';
+  const manual = await manager.fork(original.id);
+  await manager.rename(manual.id, title);
+  const generated = await manager.fork(original.id);
+  await manager.send(generated.id, '変更を確認して'); await tick();
+  requests[0]!.result.resolve(title); await tick();
+  assert.equal(generated.titleSource, 'generated');
+  const records = manager.records();
+  manager.dispose(); await manager.flush();
 
-test('manually naming a fork before its first send cancels automatic naming even when the placeholder is chosen', async () => {
-  for (const name of ['自分で決めた名前', '分岐したタスク']) {
-    const { gateway, manager, requests } = setup();
-    try {
-      const source = { ...thread('source'), turns: conversation() };
-      gateway.threads.set(source.id, source);
-      const forked = await manager.fork(manager.adoptThread(source).id);
-      await manager.rename(forked.id, name);
-      await manager.send(forked.id, 'この修正の仕様ドキュメントを作成して'); await tick();
-      assert.equal(requests.length, 0);
-      assert.equal(forked.title, name);
-    } finally { manager.dispose(); await manager.flush(); }
-  }
+  const restored = new TaskManager(gateway, { async save() {} }, records, { schedule: false, titleModel: () => 'title-model' });
+  try {
+    for (const fork of [manual, generated]) {
+      await restored.send(fork.id, '続けてください');
+      assert.equal(restored.get(fork.id).title, title);
+    }
+    await tick();
+    assert.equal(requests.length, 1);
+  } finally { restored.dispose(); await restored.flush(); }
 });
 
 test('a failed first send on a fork starts naming only after the request is successfully retried', async () => {

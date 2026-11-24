@@ -1,17 +1,38 @@
-import { Marked } from 'marked';
+import { Marked, type Tokens } from 'marked';
 import { array, object, string, type Attachment, type Item, type Task, type Turn } from '../core/types';
-import { isImageDataUrl } from '../core/attachments';
+import { isImageDataUrl, localImagePath } from '../core/attachments';
 import { hasSkillMention } from '../core/composer';
 import { taskReferenceBody } from '../core/taskReferenceText';
 import { mathExtensions } from './math';
 
 export const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);
 const copyIcon = '<svg viewBox="0 0 16 16" aria-hidden="true"><g class="copy-icon"><rect x="2" y="5" width="9" height="9" rx="2"/><path d="M5 5V4a2 2 0 0 1 2-2h5a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-1"/></g><path class="copied-icon" d="m3 8 3 3 7-7"/></svg>';
+function linkButton(href: string, label: string): string {
+  return `<button class="inline-link" data-link="${escapeHtml(href)}">${label}</button>`;
+}
+function canPreviewImage(href: string): boolean { return !!localImagePath(href) || isImageDataUrl(href); }
+function imageButton(href: string, label: string, thumbnail = href): string {
+  return `<button type="button" class="inline-link chat-image" data-link="${escapeHtml(href)}" data-chat-image="${thumbnail === href ? '' : escapeHtml(thumbnail)}"><img alt="" loading="lazy" hidden><span>${label || '画像'}</span></button>`;
+}
 const markdown = new Marked({ breaks: true, gfm: true, extensions: mathExtensions });
 markdown.use({ renderer: {
   html({ text }) { return escapeHtml(text); },
-  link({ href, tokens }) { return `<button class="inline-link" data-link="${escapeHtml(href)}">${this.parser.parseInline(tokens)}</button>`; },
-  image({ href, text }) { return `<button class="inline-link" data-link="${escapeHtml(href)}">画像: ${escapeHtml(text || '開く')}</button>`; },
+  link({ href, tokens }) {
+    const embedded = tokens.find((token): token is Tokens.Image => token.type === 'image');
+    if (embedded) {
+      const label = escapeHtml(this.parser.parseInline(tokens, this.parser.textRenderer));
+      if (canPreviewImage(embedded.href)) {
+        if (canPreviewImage(href)) return imageButton(href, label, embedded.href);
+        return `${imageButton(embedded.href, escapeHtml(embedded.text))} ${linkButton(href, label || 'リンクを開く')}`;
+      }
+      return canPreviewImage(href) ? imageButton(href, label) : linkButton(href, label);
+    }
+    const label = this.parser.parseInline(tokens);
+    return canPreviewImage(href) ? imageButton(href, label) : linkButton(href, label);
+  },
+  image({ href, text }) {
+    return canPreviewImage(href) ? imageButton(href, escapeHtml(text)) : linkButton(href, `画像: ${escapeHtml(text || '開く')}`);
+  },
   code({ text, lang, raw }) {
     const language = (lang ?? '').match(/^\S+/)?.[0];
     const code = `<div class="code-block"><pre><code${language ? ` class="language-${escapeHtml(language)}"` : ''}>${escapeHtml(text)}</code></pre><button type="button" class="code-copy" data-code-action="copy" aria-label="コードをコピー" title="コードをコピー">${copyIcon}</button></div>`;

@@ -97,6 +97,17 @@ test('model text cannot inject executable HTML or navigate using command links',
   assert.ok(!html.includes('src="https://host'));
 });
 
+test('both local image link styles and linked thumbnails render without embedding a model-supplied file URL', () => {
+  const html = renderMarkdown('[上面](/board/top.PNG)\n\n![下面](<assembly/下 面.jpg>)\n\n[![基板](thumb.webp)](full.png)\n\n[組立STEP](assembly.step)');
+  assert.equal((html.match(/data-chat-image=/g) ?? []).length, 3);
+  assert.match(html, /data-link="full\.png" data-chat-image="thumb\.webp"/);
+  assert.match(html, /data-link="assembly\.step">組立STEP<\/button>/);
+  assert.doesNotMatch(html, /<img[^>]*src=|<button[^>]*><button/);
+  for (const target of ['//host/p.png', 'command:run.png', 'https://host/p.png', 'data:text/html,foo.png']) {
+    assert.doesNotMatch(renderMarkdown(`![画像](${target})`), /<img\b|data-chat-image=/);
+  }
+});
+
 test('tool output, automatic labels and native code fences render without raw HTML', () => {
   const code = renderMarkdown('```ts\nconst value = "<unsafe>";\n```');
   assert.match(code, /<div class="code-block"><pre><code class="language-ts">const value = &quot;&lt;unsafe&gt;&quot;;<\/code><\/pre>/);

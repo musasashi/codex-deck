@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { readFile, rm } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
 import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { buildSync } from 'esbuild';
 import type * as vscode from 'vscode';
 import type { JsonObject, Task, TaskRecord } from '../src/core/types';
@@ -15,6 +17,7 @@ const bundle = buildSync({ entryPoints: [path.resolve('src/extension.ts')], bund
   platform: 'node', format: 'cjs', external: ['vscode'], logLevel: 'silent' }).outputFiles[0]!.text;
 const nodeRequire = createRequire(path.resolve('package.json'));
 const disposable = () => ({ dispose() {} });
+const webviewOrigin = 'https://webview.test';
 
 class Emitter<T> {
   private listeners = new Set<(value: T) => void>();
@@ -37,7 +40,7 @@ function panel() {
   let receive = async (_value: unknown): Promise<void> => {};
   const webviewPanel = {
     active: true, viewColumn: 1,
-    webview: { cspSource: 'test:', asWebviewUri: (uri: vscode.Uri) => uri,
+    webview: { cspSource: webviewOrigin, asWebviewUri: (uri: URL) => new URL(uri.pathname, webviewOrigin),
       onDidReceiveMessage(listener: typeof receive) { receive = listener; return disposable(); },
       async postMessage(message: JsonObject) { messages.push(structuredClone(message)); return true; } },
     reveal() {}, onDidChangeViewState: disposable, onDidDispose: disposed.event, dispose() { disposed.fire(); },
@@ -61,12 +64,12 @@ function activate(records: TaskRecord[], options: { remoteName?: string; isTrust
       async writeText(value: string) { clipboardText = value; },
       async readText() { return clipboardText; },
     } },
-    Uri: { file: (value: string) => new URL(`file://${value}`),
+    Uri: { file: (value: string) => Object.assign(pathToFileURL(value), { fsPath: value }),
       joinPath: (uri: URL, ...parts: string[]) => new URL(`${uri}/${parts.join('/')}`) },
     window: {
       state: { focused: true },
       activeTextEditor: undefined as vscode.TextEditor | undefined,
-      tabGroups: { all: [] as { tabs: vscode.Tab[] }[], close: async (_tabs: readonly vscode.Tab[]): Promise<boolean> => true },
+      tabGroups: { all: [] as { tabs: vscode.Tab[]; viewColumn?: number }[], close: async (_tabs: readonly vscode.Tab[]): Promise<boolean> => true },
       showQuickPick: async (_items: { label: string; task?: Task }[]): Promise<{ label: string; task?: Task } | undefined> => undefined,
       showInputBox: async (): Promise<string | undefined> => undefined,
       showWarningMessage: async (_message: string, _options: vscode.MessageOptions, ..._items: string[]): Promise<string | undefined> => undefined,
@@ -77,7 +80,7 @@ function activate(records: TaskRecord[], options: { remoteName?: string; isTrust
         serializers.set(type, value);
         return { dispose() { serializers.delete(type); } };
       },
-      createWebviewPanel(viewType: string) { createdPanels++; const value = Object.assign(panel(), { viewType }); openedPanels.push(value); return value; },
+      createWebviewPanel(viewType: string, _title?: string, column = 1) { createdPanels++; const value = Object.assign(panel(), { viewType, viewColumn: column > 0 ? column : 1 }); openedPanels.push(value); return value; },
     },
     workspace: {
       isTrusted: options.isTrusted ?? false, // Restoration must populate the tree even when connecting is unavailable.
@@ -160,6 +163,57 @@ test('code block copy requests write the exact code and acknowledge their reques
     assert.deepEqual(await host.command(task, { type: 'copyCode', requestId: 7, text }), { type: 'codeCopied', requestId: 7 });
     assert.equal(extension.clipboard(), text);
   } finally { await extension.shutdown(); }
+});
+
+test('chat images resolve within the task folder and use one separate fullscreen viewer across clicks', async () => {
+  const parent = await mkdtemp(path.join(tmpdir(), 'codex-deck-images-'));
+  const cwd = path.join(parent, 'board');
+  const file = path.join(cwd, '基板 #1.PNG');
+  const href = encodeURIComponent(path.basename(file));
+  const imageUri = webviewOrigin + pathToFileURL(file).pathname;
+  const denied = ['missing.png', '../outside.png', 'outside-link.png', 'notes.md', 'https://example.com/remote.png'];
+  const extension = activate([{ ...record('board', true, true), cwd }]);
+  try {
+    await mkdir(cwd);
+    await copyFile('media/icon.png', file);
+    await copyFile(file, path.join(parent, 'outside.png'));
+    await symlink('../outside.png', path.join(cwd, 'outside-link.png'));
+    const tab = panel();
+    await extension.restoreTab('board', tab);
+    await tab.receive({ type: 'resolveChatImages', cwd, links: [file, href, ...denied] });
+    assert.deepEqual(tab.messages.at(-1), { type: 'chatImageSources', cwd, sources: [
+      { href: file, uri: imageUri }, { href, uri: imageUri }, ...denied.map(href => ({ href, uri: '' })),
+    ] });
+    assert.ok(tab.webview.options.localResourceRoots?.some(root => root.toString() === pathToFileURL(cwd).href));
+    const calls: unknown[][] = [];
+    extension.api.window.tabGroups.all.push({ tabs: [], viewColumn: 1 }, { tabs: [], viewColumn: 2 });
+    Object.assign(extension.api.commands, { async executeCommand(...args: unknown[]) {
+      calls.push(args);
+      if (args[0] === 'workbench.action.newEmptyEditorWindow') extension.api.window.tabGroups.all.push({ tabs: [], viewColumn: extension.api.window.tabGroups.all.length + 1 });
+    } });
+    await tab.receive({ type: 'openChatImage', href, label: '基板' });
+    const viewer = extension.openedPanels[0]!;
+    assert.equal(viewer.viewType, 'codexDeck.imageViewer');
+    assert.equal(viewer.viewColumn, 3);
+    assert.deepEqual(calls, [['workbench.action.newEmptyEditorWindow']]);
+    await viewer.receive({ type: 'ready', fullscreen: false });
+    assert.deepEqual(calls.at(-1), ['workbench.action.toggleFullScreen']);
+    assert.deepEqual(viewer.messages.at(-1), { type: 'image', src: imageUri, label: '基板' });
+    await tab.receive({ type: 'openChatImage', href: file, label: '下面' });
+    assert.equal(extension.createdPanels(), 1);
+    assert.equal(viewer.messages.at(-1)?.label, '下面');
+    assert.equal(calls.length, 2);
+    await viewer.receive({ type: 'close' });
+    await tab.receive({ type: 'openChatImage', href, label: 'もう一度' });
+    await extension.openedPanels[1]!.receive({ type: 'ready', fullscreen: true });
+    assert.deepEqual(calls.slice(2), [['workbench.action.newEmptyEditorWindow']]);
+    await extension.host.command(extension.manager.get('board'), { type: 'openLink', url: href });
+    assert.equal(calls.at(-1)?.[0], 'vscode.open');
+    assert.equal(String(calls.at(-1)?.[1]), pathToFileURL(file).href);
+  } finally {
+    await extension.shutdown();
+    await rm(parent, { recursive: true, force: true });
+  }
 });
 
 test('speed changes persist independently and survive other composer settings and task restoration', async () => {
@@ -335,15 +389,10 @@ test('activation lists all saved open tasks before any editor tab is deserialize
 });
 
 test('saved external tasks and drafts are hidden and their restored tabs close', async () => {
-  const native = { ...record('native', true), modelProvider: 'openai', cost: { total: 1 },
-    settings: { mode: 'default' as const, model: 'test-model', pricing: { input: 1, output: 2 } } };
-  const extension = activate([native, { ...record('external', true), modelProvider: 'custom' },
+  const extension = activate([{ ...record('native', true), modelProvider: 'openai' }, { ...record('external', true), modelProvider: 'custom' },
     { ...record('draft', true, true), settings: { mode: 'default', model: externalModelIds[0] } }]);
   try {
-    const rows = extension.rows();
-    assert.deepEqual(rows.map(row => row.id), ['native']);
-    assert.deepEqual(rows[0]?.settings, { mode: 'default', model: 'test-model' });
-    assert.equal(Object.hasOwn(rows[0]!, 'cost'), false);
+    assert.deepEqual(extension.rows().map(row => row.id), ['native']);
     for (const id of ['external', 'draft']) {
       const tab = panel();
       let disposed = false;

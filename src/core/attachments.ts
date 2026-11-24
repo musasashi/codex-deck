@@ -5,6 +5,14 @@ export const MAX_TEXT_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 export const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 export const IMAGE_FORMAT_ERROR = '32MiB以下のPNG・JPEG・WebP・GIF画像を使用してください。';
 
+export function localImagePath(href: string): string | undefined {
+  const nonLocal = /^(?:[a-z][a-z\d+.-]*:|\/\/)|[\\\x00-\x1f]/i;
+  if (nonLocal.test(href.trimStart())) return;
+  let filename = href;
+  try { filename = decodeURIComponent(href); } catch { /* A local filename may contain a literal percent sign. */ }
+  if (!nonLocal.test(filename.trimStart()) && /\.(?:apng|avif|bmp|gif|ico|jpe?g|png|svg|webp)$/i.test(filename)) return filename;
+}
+
 export function isImageDataUrl(value: unknown): value is string {
   if (typeof value !== 'string' || value.length > Math.ceil(MAX_IMAGE_ATTACHMENT_BYTES / 3) * 4 + 32) return false;
   const prefix = /^data:(image\/[a-z]+);base64,/.exec(value);
