@@ -40,3 +40,13 @@ export function chatHtml(options: { cspSource: string; script: string; css: stri
       </dialog>
       <script nonce="${nonce}" src="${script}"></script></body></html>`;
 }
+
+export function imageViewerHtml(options: { cspSource: string; script: string; css: string; nonce: string }): string {
+  const { cspSource, script, css, nonce } = options;
+  return `<!doctype html><html lang="ja"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource}; img-src ${cspSource} data:; script-src 'nonce-${nonce}';">
+    <link href="${css}" rel="stylesheet"><title>画像の拡大表示</title></head><body class="image-window">
+    <header><button id="scale" class="secondary" type="button" disabled>実寸表示</button><button id="close" class="secondary" type="button" title="閉じる (Esc)">閉じる</button></header>
+    <main id="image-stage" tabindex="0" aria-label="画像の拡大表示"><img id="preview" alt="" hidden><p id="image-error" role="status" hidden>画像を読み込めませんでした。</p></main>
+    <script nonce="${nonce}" src="${script}"></script></body></html>`;
+}

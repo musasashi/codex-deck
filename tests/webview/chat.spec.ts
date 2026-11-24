@@ -2,7 +2,7 @@ import { test, expect, type Page } from '@playwright/test';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { chatHtml } from '../../src/ui/html';
+import { chatHtml, imageViewerHtml } from '../../src/ui/html';
 import { decodeUsage } from '../../src/appServer/client';
 import { TaskManager } from '../../src/core/taskManager';
 import { questionAnswerText } from '../../src/core/questions';
@@ -123,6 +123,76 @@ async function openSelectionMenu(page: Page, selector: string, point?: { x: numb
   if (point) await page.mouse.click(point.x, point.y, { button: 'right' });
   else await page.locator(selector).click({ button: 'right' });
 }
+
+test('a split chat shows both board thumbnails and sends the selected original to the separate viewer', async ({ page }) => {
+  await page.setViewportSize({ width: 380, height: 700 });
+  const png = await readFile('media/icon.png');
+  await page.route('http://localhost/boards/*.png', route => route.fulfill({ contentType: 'image/png', body: png }));
+  const value = task();
+  const top = `${value.cwd}/kicad/assembly/ADDA_2up.png`;
+  const bottom = 'kicad/HAN_FMC_Adapter/assembly/HAN_ADDA_stack.png';
+  const reply = { id: 'reply', kind: 'agentMessage', data: { text: `- [上から見た画像](${top})\n- ![下から見た画像](${bottom})\n- [組立STEP](board.step)` } };
+  value.turns = [{ id: 'board', status: 'completed', items: [reply] }];
+  await state(page, value);
+  expect((await messages(page)).find(message => message.type === 'resolveChatImages')).toEqual({ type: 'resolveChatImages', cwd: value.cwd, links: [top, bottom] });
+  await receive(page, { type: 'chatImageSources', cwd: value.cwd, sources: [{ href: top, uri: 'http://localhost/boards/top.png' }, { href: bottom, uri: 'http://localhost/boards/bottom.png' }] });
+  const thumbs = page.locator('.assistant .chat-image img');
+  await expect(thumbs).toHaveCount(2);
+  await expect.poll(() => thumbs.evaluateAll(images => images.every(image => (image as HTMLImageElement).naturalWidth > 0))).toBe(true);
+  const open = page.getByRole('button', { name: '下から見た画像' });
+  await open.click();
+  expect((await messages(page)).at(-1)).toEqual({ type: 'openChatImage', href: bottom, label: '下から見た画像' });
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  reply.data.text += '\n\n追記';
+  await state(page, value);
+  await page.getByRole('button', { name: '上から見た画像' }).press('Enter');
+  expect((await messages(page)).at(-1)).toEqual({ type: 'openChatImage', href: top, label: '上から見た画像' });
+  expect((await messages(page)).filter(message => message.type === 'resolveChatImages')).toHaveLength(1);
+  expect((await messages(page)).some(message => message.type === 'openLink')).toBe(false);
+  await page.getByRole('button', { name: '組立STEP' }).click();
+  expect((await messages(page)).at(-1)).toEqual({ type: 'openLink', url: 'board.step' });
+});
+
+test('the image window fits the whole image, toggles to original pixels and scrolls independently', async ({ page }) => {
+  const viewer = await page.context().newPage();
+  await viewer.setViewportSize({ width: 1150, height: 800 });
+  await viewer.addInitScript(() => {
+    const sent: unknown[] = [];
+    Object.assign(window, { sent, acquireVsCodeApi: () => ({ postMessage: (message: unknown) => sent.push(message) }) });
+  });
+  const html = imageViewerHtml({ cspSource: 'http://localhost', script: '/imageViewer.js', css: '/chat.css', nonce: 'testing-nonce' });
+  await viewer.route('http://localhost/**', async route => {
+    const url = route.request().url();
+    if (url.endsWith('.js')) await route.fulfill({ contentType: 'text/javascript', body: await readFile('dist/imageViewer.js') });
+    else if (url.endsWith('.css')) await route.fulfill({ contentType: 'text/css', body: theme + await readFile('dist/chat.css', 'utf8') });
+    else if (url.endsWith('.png')) await route.fulfill({ contentType: 'image/png', body: await readFile('media/icon.png') });
+    else await route.fulfill({ contentType: 'text/html', body: html });
+  });
+  await viewer.goto('http://localhost/viewer');
+  await expect.poll(async () => (await messages(viewer)).at(-1)?.type).toBe('ready');
+  await receive(viewer, { type: 'image', src: 'http://localhost/board.png', label: '基板' });
+  const image = viewer.getByRole('img', { name: '基板' });
+  await expect(image).toBeVisible();
+  const original = await image.evaluate(element => (element as HTMLImageElement).naturalWidth);
+  const fit = (await image.boundingBox())!;
+  expect(fit.width).toBeGreaterThan(380);
+  expect(fit.width).toBeLessThan(original);
+  await viewer.getByRole('button', { name: '実寸表示' }).click();
+  expect((await image.boundingBox())!.width).toBe(original);
+  expect(await viewer.locator('#image-stage').evaluate(stage => {
+    stage.scrollTo(60, 80); return [stage.scrollLeft, stage.scrollTop];
+  })).toEqual([60, 80]);
+  await viewer.getByRole('button', { name: '全体表示' }).click();
+  expect((await image.boundingBox())!.width).toBe(fit.width);
+  await image.click();
+  await receive(viewer, { type: 'image', src: 'http://localhost/other.png', label: '別の基板' });
+  await expect(viewer.getByRole('button', { name: '実寸表示' })).toBeEnabled();
+  await viewer.keyboard.press('Escape');
+  expect((await messages(viewer)).at(-1)).toEqual({ type: 'close' });
+  await viewer.getByRole('button', { name: '閉じる' }).click();
+  expect((await messages(viewer)).filter(message => message.type === 'close')).toHaveLength(2);
+  await viewer.close();
+});
 
 test('the reference Mermaid diagram renders locally under CSP, with multiline labels and copyable source', async ({ page }, info) => {
   const errors: string[] = [];

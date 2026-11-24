@@ -12,7 +12,7 @@ import { messageMarkdown, taskMarkdown } from './core/taskCopy';
 import { linkedThreadId, taskDeepLink } from './core/taskReferences';
 import { selectionReference } from './core/selectionReference';
 import { questionPresetMessage, readQuestionPresets, validateQuestionPreset } from './core/questionPresets';
-import { IMAGE_FORMAT_ERROR, isImageDataUrl, isImageStrokes, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TEXT_ATTACHMENT_BYTES } from './core/attachments';
+import { IMAGE_FORMAT_ERROR, isImageDataUrl, isImageStrokes, localImagePath, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TEXT_ATTACHMENT_BYTES } from './core/attachments';
 import { configPermissionMode, parseSlashCommand, permissionOptions, permissionPresets, resolveSkillMentions, slashCommands } from './core/composer';
 import { workingDiff } from './core/gitDiff';
 import { availableResetCredits, resetCreditExpiry } from './core/usage';
@@ -689,6 +689,11 @@ class DeckExtension implements PanelHost {
       await this.manager.restore(linked.id); return;
     }
     if (/^[a-z][a-z\d+.-]*:/i.test(value)) throw new Error('この種類のリンクは開けません。');
+    const image = localImagePath(value);
+    if (image) {
+      await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(path.resolve(task.cwd, image)), vscode.ViewColumn.Beside);
+      return;
+    }
     const match = /^(.*?)(?::(\d+)(?::\d+)?|#L(\d+)(?:-L?\d+)?)?$/.exec(value);
     if (!match?.[1]) return;
     const filename = path.isAbsolute(match[1]) ? match[1] : path.resolve(task.cwd, match[1]);

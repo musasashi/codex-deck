@@ -10,6 +10,7 @@ import { UsageGauges } from './usage';
 import { Requests } from './requests';
 import { Diagrams } from './diagrams';
 import { ImageAnnotationEditor } from './imageAnnotation';
+import { ChatImages } from './chatImages';
 import { pendingSubmission, reconcilePendingSends, submissionContent, type PendingSend, type Submission } from './submissions';
 
 declare function acquireVsCodeApi(): { postMessage(value: unknown): void; setState(value: unknown): void; getState(): unknown };
@@ -55,6 +56,7 @@ for (const savedSend of array(saved.pendingSends).map(object)) {
 const completion = new Composer(prompt, $('completions'), $('skills'), post, saveDraft, () => { renderSpeed(); renderPermissions(); }, array(saved.skillPaths).filter((value): value is string => typeof value === 'string'));
 const usageGauges = new UsageGauges($('usage-gauges'), post);
 const requests = new Requests($('requests'), post);
+const chatImages = new ChatImages($('transcript'), post);
 const selectionMenu = new SelectionMenu($('transcript'), () => ({ taskId: task?.id, hasThread: !!task?.threadId, presets: questionPresets }), post, () => render());
 const imageAnnotation = new ImageAnnotationEditor($<HTMLDialogElement>('image-annotation'), post, updateSendButton, attachment => {
   if (!task) return;
@@ -224,7 +226,7 @@ function render(): void {
   const transcript = $('transcript');
   const selected = selectionMenu.opened || !!selectedTranscriptText(transcript);
   const html = renderTranscript(task) + pendingSends.map(renderPendingSend).join('');
-  if (transcriptHtml !== html && !selected) {
+  if ((transcriptHtml !== html || transcript.dataset.cwd !== task.cwd) && !selected) {
     const detailStates = new Map([...transcript.querySelectorAll<HTMLDetailsElement>('details[data-item]')].map(details => [
       detailKey(details), { open: details.open, status: details.closest<HTMLElement>('.turn')?.dataset.status, diagramRendered: details.dataset.diagramRendered },
     ]));
@@ -233,6 +235,8 @@ function render(): void {
     const activeAction = document.activeElement instanceof HTMLElement && document.activeElement.matches('[data-message-action]') && transcript.contains(document.activeElement) ? messageActionKey(document.activeElement) : undefined;
     transcript.innerHTML = html;
     transcriptHtml = html;
+    transcript.dataset.cwd = task.cwd;
+    chatImages.render(task.cwd);
     diagrams.render(atBottom);
     for (const details of transcript.querySelectorAll<HTMLDetailsElement>('details[data-item]')) {
       const key = detailKey(details);
@@ -282,6 +286,7 @@ function render(): void {
 }
 window.addEventListener('message', event => {
   const message = object(event.data);
+  if (message.type === 'chatImageSources') { chatImages.receive(message); return; }
   if (imageAnnotation.handleMessage(message)) return;
   usageGauges.handleMessage(message);
   if (message.type === 'state') {

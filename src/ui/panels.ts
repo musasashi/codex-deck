@@ -1,9 +1,13 @@
 import * as vscode from 'vscode';
 import { randomBytes } from 'node:crypto';
+import { realpath, stat } from 'node:fs/promises';
+import * as path from 'node:path';
+import { isImageDataUrl, localImagePath } from '../core/attachments';
 import { array, object, string, messageOf, statusLabel, type JsonObject, type Model, type Task, type TaskRecord, type TaskStatus } from '../core/types';
 import { TaskManager } from '../core/taskManager';
 import { readPresets } from '../core/settings';
 import { chatHtml } from './html';
+import { ImageViewer } from './imageViewer';
 import { readQuestionPresets } from '../core/questionPresets';
 
 function taskIcon(uri: vscode.Uri, status: TaskStatus | 'unread'): { light: vscode.Uri; dark: vscode.Uri } {
@@ -15,6 +19,24 @@ function taskIcon(uri: vscode.Uri, status: TaskStatus | 'unread'): { light: vsco
 
 function taskViewType(id: string): string { return `codexDeck.task.${encodeURIComponent(id)}`; }
 
+function insideFolder(folder: string, filename: string): boolean {
+  const relative = path.relative(folder, filename);
+  return !!relative && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+async function chatImageFile(cwd: string, root: string, href: string): Promise<vscode.Uri | undefined> {
+  const filename = localImagePath(href);
+  if (!root || !filename) return;
+  const target = path.resolve(cwd, filename);
+  if (!insideFolder(cwd, target)) return;
+  try {
+    const file = await realpath(target);
+    if (insideFolder(root, file) && localImagePath(file) && (await stat(file)).isFile()) {
+      return vscode.Uri.file(file);
+    }
+  } catch { /* A historical image may have been moved or deleted. */ }
+}
+
 export interface PanelHost {
   models: Model[];
   command(task: Task, message: JsonObject): Promise<JsonObject | void>;
@@ -23,6 +45,7 @@ export interface PanelHost {
 }
 
 export class TaskPanels implements vscode.Disposable {
+  private readonly imageViewer: ImageViewer;
   private panels = new Map<string, vscode.WebviewPanel>();
   private serializers = new Map<string, vscode.Disposable>();
   private ready = new Set<string>();
@@ -31,6 +54,7 @@ export class TaskPanels implements vscode.Disposable {
   private subscriptions: (() => void)[];
   private stopping = false;
   constructor(private readonly uri: vscode.Uri, private readonly manager: TaskManager, private readonly host: PanelHost, savedTasks: TaskRecord[] = manager.openTasks) {
+    this.imageViewer = new ImageViewer(uri, error => host.report(error));
     this.subscriptions = [manager.changed.subscribe(task => {
       if (task && !manager.tasks.has(task.id)) { void this.close(task.id).catch(error => host.report(error)); return; }
       if (task) this.update(task.id); else for (const id of this.panels.keys()) this.update(id);
@@ -93,7 +117,9 @@ export class TaskPanels implements vscode.Disposable {
   private bind(panel: vscode.WebviewPanel, task: Task): void {
     this.panels.set(task.id, panel);
     const webview = panel.webview;
-    webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.joinPath(this.uri, 'dist'), vscode.Uri.joinPath(this.uri, 'media')] };
+    const assets = [vscode.Uri.joinPath(this.uri, 'dist'), vscode.Uri.joinPath(this.uri, 'media')];
+    let imageRoot = '';
+    webview.options = { enableScripts: true, localResourceRoots: assets };
     webview.html = this.html(webview);
     const receive = webview.onDidReceiveMessage(async (value: unknown) => {
       const message = object(value);
@@ -104,6 +130,30 @@ export class TaskPanels implements vscode.Disposable {
           void this.postKeybindings(task.id);
           for (const pending of this.pendingMessages.get(task.id) ?? []) void webview.postMessage(pending);
           this.pendingMessages.delete(task.id);
+          return;
+        }
+        if (message.type === 'resolveChatImages' || message.type === 'openChatImage') {
+          const cwd = task.cwd;
+          if (message.type === 'resolveChatImages' && message.cwd !== cwd) return;
+          const root = path.isAbsolute(cwd) ? await realpath(cwd).catch(() => '') : '';
+          if (message.type === 'openChatImage') {
+            const href = string(message.href);
+            const source = isImageDataUrl(href) ? href : await chatImageFile(cwd, root, href);
+            if (!source) throw new Error('画像ファイルを開けませんでした。');
+            await this.imageViewer.open(source, string(message.label) || '画像');
+            return;
+          }
+          const links = [...new Set(array(message.links).filter((link): link is string => typeof link === 'string'))];
+          const sources = await Promise.all(links.map(async href => {
+            const file = await chatImageFile(cwd, root, href);
+            return { href, uri: file ? webview.asWebviewUri(file).toString() : '' };
+          }));
+          if (this.panels.get(task.id) !== panel || task.cwd !== cwd) return;
+          if (imageRoot !== root) {
+            webview.options = { enableScripts: true, localResourceRoots: root ? [...assets, vscode.Uri.file(root)] : assets };
+            imageRoot = root;
+          }
+          await webview.postMessage({ type: 'chatImageSources', cwd, sources });
           return;
         }
         if (message.type === 'keybindings') {
@@ -189,6 +239,7 @@ export class TaskPanels implements vscode.Disposable {
   }
   dispose(): void {
     this.stopping = true;
+    this.imageViewer.dispose();
     for (const dispose of this.subscriptions) dispose();
     for (const serializer of this.serializers.values()) serializer.dispose();
     this.serializers.clear();
